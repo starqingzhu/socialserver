@@ -1,0 +1,24 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+            "name": "common",
+            "path": "..\\common"
+        },
+        {
+            "name": "pbcommon",
+            "path": "..\\pbcommon"
+        },
+        {
+            "name": "golib",
+            "path": "..\\golib"
+        },
+        {
+            "name": "proto",
+            "path": "..\\Proto_MergeHope"
+        }
+	],
+	"settings": {}
+}
