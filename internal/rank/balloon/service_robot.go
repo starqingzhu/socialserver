@@ -22,7 +22,7 @@ func (s *Service) spawnRobotsForGroup(ctx context.Context, groupID int32, capaci
 
 	s.mu.Lock()
 	if s.groupUsedInfoIDs[groupID] == nil {
-		s.groupUsedInfoIDs[groupID] = make(map[int32]struct{})
+		s.groupUsedInfoIDs[groupID] = make(map[int64]struct{})
 	}
 	usedInfoIDs := s.groupUsedInfoIDs[groupID]
 	s.mu.Unlock()
@@ -59,12 +59,11 @@ func (s *Service) spawnRobotsForGroup(ctx context.Context, groupID int32, capaci
 				Score:     initScore,
 				AtTime:    now,
 				EnterTime: now,
-				Extra: map[string]int64{
-					"groupId":   int64(groupID),
-					"isRobot":   1,
-					"robotInfo": int64(info.InfoID),
-					"avatar":    int64(info.Avatar),
-					"frame":     int64(info.Frame),
+				AvatarInfo: &rank.AvatarInfo{
+					UserId: info.InfoID,
+					Name:   info.Name,
+					Avatar: info.Avatar,
+					Frame:  info.Frame,
 				},
 			})
 		}
@@ -84,7 +83,7 @@ func (s *Service) spawnRobotsForGroup(ctx context.Context, groupID int32, capaci
 	_ = s.store.SaveRobots(groupID, newRobots)
 	_ = s.store.SaveUsedInfoIDs(groupID, usedInfoIDs)
 
-	zaplog.LoggerSugar.Infof("balloon: spawned %d robots for group %d (actID=%d)", len(newRobots), groupID, s.config.ActID)
+	zaplog.LoggerSugar.Infof("balloon: spawned %d robots for group %d (bizType=%s)", len(newRobots), groupID, s.config.BizType)
 	return nil
 }
 
@@ -144,10 +143,6 @@ func (s *Service) tickGroupRobots(ctx context.Context, groupID int32, instanceID
 				MemberId: robot.MemberID,
 				Score:    newScore,
 				AtTime:   nowMs,
-				Extra: map[string]int64{
-					"groupId": int64(groupID),
-					"isRobot": 1,
-				},
 			})
 		}
 	}

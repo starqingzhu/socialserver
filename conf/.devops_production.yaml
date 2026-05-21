@@ -3,14 +3,38 @@ cluster: production
 module: socialserver
 configDir: "../config"
 
+#redis - 优化生产配置
+redis:
+  - group: 1
+    host: "r-0xiljf6en8p0l6yvmk.redis.rds-aliyun-america.rds.aliyuncs.com"
+    port: 6379
+    username: NONE
+    password: "redis_mNcmNe!6QT"
+
 etcd:
   - group: 1
     host: 172.20.4.73:2379
     username: NONE
     password: NONE
 
+#mongodb - 优化生产配置
+mongodb:
+  uri: mongodb://root:mongo_q8Y5bgDQs3@dds-0xiffd8cc75778e42.mongodb.rds-aliyun-america.rds.aliyuncs.com:3717,dds-0xiffd8cc75778e41.mongodb.rds-aliyun-america.rds.aliyuncs.com:3717/admin?replicaSet=mgset-1600021462
+  username: root
+  password: mongo_q8Y5bgDQs3
+  authSource: admin
+  database: mergeHope
+  socketTimeout: 120 #套接字超时时间，单位秒 (优化为2分钟)
+  maxPoolSize: 300 #连接池最大连接数 (提高并发能力)
+  minPoolSize: 30 #连接池最小连接数 (增加最小连接数)
+  maxIdleTime: 300 #连接最大空闲时间，单位秒 (5分钟)
+  connectTimeout: 30 #连接超时时间，单位秒 (30秒)
+  heartbeatFrequency: 10 #心跳频率，单位秒 (10秒检查)
+  serverSelectionTimeout: 30 #服务器选择超时，单位秒 (30秒)
+  maxConnecting: 100 #最大同时连接数 (增加并发连接)
+
 http:
-  http_listen_addr: 0.0.0.0:29004
+  http_listen_addr: 0.0.0.0:10001
   http_read_timeout: 60000
   http_write_timeout: 60000
   http_idle_timeout: 60000
@@ -20,7 +44,7 @@ http:
 
 rpc:
   server:
-    address: "0.0.0.0:29104"
+    address: "0.0.0.0:10101"
     enable_reflection: false
     keepalive_time: 10
     keepalive_timeout: 3
@@ -34,4 +58,4 @@ logCfg:
 
 pprof:
   enabled: false
-  addr: "0.0.0.0:29904"
+  addr: "0.0.0.0:10901"

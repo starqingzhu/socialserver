@@ -9,11 +9,9 @@ func cloneSnapshots(src []rank.RankMemberSnapshot) []rank.RankMemberSnapshot {
 	dst := make([]rank.RankMemberSnapshot, len(src))
 	for i, item := range src {
 		dst[i] = item
-		if len(item.Extra) > 0 {
-			dst[i].Extra = make(map[string]int64, len(item.Extra))
-			for k, v := range item.Extra {
-				dst[i].Extra[k] = v
-			}
+		if item.AvatarInfo != nil {
+			cp := *item.AvatarInfo
+			dst[i].AvatarInfo = &cp
 		}
 	}
 	return dst

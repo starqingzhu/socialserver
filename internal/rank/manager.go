@@ -2,15 +2,19 @@ package rankservice
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	commonrank "common/rank"
+	rediskeys "common/redis"
 	goredis "golib/redis"
 	"golib/zaplog"
 	"socialserver/internal/rank/balloon"
 )
+
+const syncIntervalMs = 30_000 // 30秒同步一次
 
 type Manager struct {
 	mu              sync.RWMutex
@@ -18,8 +22,9 @@ type Manager struct {
 	dao             *balloon.DAO
 	rankService     commonrank.Service
 	memberIndex     *MemberIndex
-	services        map[BizKey]RankBizService
-	balloonServices map[BizKey]*balloon.Service
+	services        map[string]RankBizService
+	balloonServices map[string]*balloon.Service
+	lastSyncTime    int64 // 上次同步时间（毫秒）
 }
 
 var globalManager *Manager
@@ -34,13 +39,15 @@ func InitGlobalManager(rdb *goredis.Redis, dbName string) error {
 		dao:             dao,
 		rankService:     commonrank.NewRedisService(rdb),
 		memberIndex:     NewMemberIndex(rdb),
-		services:        make(map[BizKey]RankBizService),
-		balloonServices: make(map[BizKey]*balloon.Service),
+		services:        make(map[string]RankBizService),
+		balloonServices: make(map[string]*balloon.Service),
 	}
 	if dao != nil {
 		dao.EnsureIndexes()
-		manager.recoverFromMongo(context.Background())
+		manager.syncFromMongo(context.Background())
 	}
+	// 从 Redis 补充注册（应对 MongoDB 中未存储或节点重启时 Redis 中已有排行榜数据的情况）
+	manager.syncFromRedis(context.Background())
 	globalManager = manager
 	zaplog.LoggerSugar.Infof("rank global manager initialized")
 	return nil
@@ -56,20 +63,18 @@ func (m *Manager) Close() {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.services = make(map[BizKey]RankBizService)
-	m.balloonServices = make(map[BizKey]*balloon.Service)
+	m.services = make(map[string]RankBizService)
+	m.balloonServices = make(map[string]*balloon.Service)
 	zaplog.LoggerSugar.Infof("rank global manager closed")
 }
 
-func (m *Manager) RegisterBalloon(ctx context.Context, cfg balloon.Config) (*balloon.Service, error) {
-	if m == nil {
-		return nil, fmt.Errorf("rank manager is nil")
-	}
+func (m *Manager) registerBalloon(ctx context.Context, cfg balloon.Config) (*balloon.Service, error) {
+	bizType := BizType(cfg.BizType)
 	if cfg.RankCode == "" {
-		cfg.RankCode = fmt.Sprintf("balloon_score_%d", cfg.ActID)
+		cfg.RankCode = fmt.Sprintf("%s_score_%d", bizType, cfg.ActID)
 	}
 
-	key := BizKey{BizType: BizTypeBalloon, ActID: cfg.ActID, Round: cfg.Round}
+	key := NewBizKey(bizType, cfg.ActID).String()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -78,7 +83,7 @@ func (m *Manager) RegisterBalloon(ctx context.Context, cfg balloon.Config) (*bal
 	}
 	if err := m.rankService.RegisterRank(ctx, commonrank.Rank{
 		RankCode:       cfg.RankCode,
-		RankName:       fmt.Sprintf("balloon_rank_%d", cfg.ActID),
+		RankName:       fmt.Sprintf("%s_rank_%d", bizType, cfg.ActID),
 		ScoreOrder:     commonrank.ScoreOrderDesc,
 		TieBreakPolicy: commonrank.TieBreakPolicyFirstEnter,
 		CreateTime:     cfg.OpenTime,
@@ -89,9 +94,8 @@ func (m *Manager) RegisterBalloon(ctx context.Context, cfg balloon.Config) (*bal
 
 	onMemberJoin := func(userID int64, groupID int32) {
 		m.memberIndex.Track(userID, MemberEntry{
-			BizType: BizTypeBalloon,
+			BizType: bizType,
 			ActID:   cfg.ActID,
-			Round:   cfg.Round,
 			GroupID: groupID,
 		})
 	}
@@ -100,31 +104,139 @@ func (m *Manager) RegisterBalloon(ctx context.Context, cfg balloon.Config) (*bal
 	if err != nil {
 		return nil, err
 	}
-	m.services[key] = &balloonAdapter{svc: service, bizType: BizTypeBalloon}
+	m.services[key] = &balloonAdapter{Svc: service, bizType: bizType}
 	m.balloonServices[key] = service
 
-	// 持久化活动注册到 MongoDB
-	bizKeyStr := fmt.Sprintf("%s:%d:%d", key.BizType, key.ActID, key.Round)
 	if m.dao != nil {
-		m.dao.SaveActivity(bizKeyStr, cfg)
+		if err := m.dao.SaveRankConfig(key, cfg); err != nil {
+			zaplog.LoggerSugar.Errorf("rank: persist rank config %s to mongodb failed: %v", key, err)
+		}
 	}
+	m.saveConfigToRedis(key, cfg)
 
 	return service, nil
 }
 
-// GetBalloonService 返回指定活动 Round=0 的 balloon 服务（向后兼容）。
-func (m *Manager) GetBalloonService(actID int32) *balloon.Service {
-	return m.GetBalloonServiceByRound(actID, 0)
-}
-
-// GetBalloonServiceByRound 返回指定活动和期数的 balloon 服务。
-func (m *Manager) GetBalloonServiceByRound(actID int32, round int32) *balloon.Service {
+// GetService 返回指定业务类型和活动ID的通用服务接口。
+func (m *Manager) GetService(bizType BizType, actID int32) RankBizService {
 	if m == nil {
 		return nil
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.balloonServices[BizKey{BizType: BizTypeBalloon, ActID: actID, Round: round}]
+	return m.services[NewBizKey(bizType, actID).String()]
+}
+
+// Register 按业务类型注册排行榜服务，自动从配置文件加载参数。
+func (m *Manager) Register(ctx context.Context, bizType BizType, cfg balloon.Config) error {
+	if err := ValidateBizType(bizType); err != nil {
+		return err
+	}
+	cfg.BizType = string(bizType)
+	if err := FillConfigFromFiles(bizType, &cfg); err != nil {
+		return err
+	}
+
+	switch bizType {
+	case BizTypeBalloon:
+		_, err := m.registerBalloon(ctx, cfg)
+		return err
+	default:
+		return fmt.Errorf("unsupported biz type: %s", bizType)
+	}
+}
+
+// UpdateService 按业务类型更新排行榜配置。
+func (m *Manager) UpdateService(bizType BizType, actID int32, cfg balloon.Config) error {
+	if m == nil {
+		return fmt.Errorf("rank manager is nil")
+	}
+	key := NewBizKey(bizType, actID).String()
+	m.mu.RLock()
+	svc, ok := m.balloonServices[key]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("service not found: %s", key)
+	}
+
+	svc.UpdateConfig(cfg)
+	updated := svc.GetConfig()
+
+	if m.dao != nil {
+		if err := m.dao.SaveRankConfig(key, updated); err != nil {
+			zaplog.LoggerSugar.Errorf("rank: persist rank config %s to mongodb failed: %v", key, err)
+		}
+	}
+	m.saveConfigToRedis(key, updated)
+	return nil
+}
+
+// RemoveService 按业务类型移除排行榜服务并清理持久化数据。
+func (m *Manager) RemoveService(bizType BizType, actID int32) error {
+	if m == nil {
+		return fmt.Errorf("rank manager is nil")
+	}
+	key := NewBizKey(bizType, actID).String()
+
+	m.mu.Lock()
+	svc, ok := m.balloonServices[key]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("service not found: %s", key)
+	}
+	delete(m.services, key)
+	delete(m.balloonServices, key)
+	m.memberIndex.RemoveByKey(key)
+	m.mu.Unlock()
+
+	// 在清理 Redis 数据之前加载所有成员，以便清理各用户的成员索引条目。
+	if members, err := svc.GetAllMembers(); err == nil && len(members) > 0 {
+		m.memberIndex.RemoveUserEntries(bizType, actID, members)
+	}
+
+	svc.Cleanup()
+
+	if m.dao != nil {
+		m.dao.DeleteRankConfig(key)
+	}
+	m.deleteConfigFromRedis(key)
+	return nil
+}
+
+// ServiceInfo 包含排行榜服务的摘要信息。
+type ServiceInfo struct {
+	BizType     BizType
+	ActID       int32
+	Config      balloon.Config
+	Settled     bool
+	GroupCount  int32
+	MemberCount int32
+}
+
+// ListServices 返回已注册的排行榜服务摘要，可按 bizType 过滤（空=全部）。
+func (m *Manager) ListServices(filterBizType BizType) []ServiceInfo {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make([]ServiceInfo, 0, len(m.balloonServices))
+	for _, svc := range m.balloonServices {
+		cfg := svc.GetConfig()
+		bizType := BizType(cfg.BizType)
+		if filterBizType != "" && bizType != filterBizType {
+			continue
+		}
+		result = append(result, ServiceInfo{
+			BizType:     bizType,
+			ActID:       cfg.ActID,
+			Config:      cfg,
+			Settled:     svc.IsSettled(),
+			GroupCount:  svc.GroupCount(),
+			MemberCount: svc.MemberCount(),
+		})
+	}
+	return result
 }
 
 // GetMemberEntries 返回用户参与的所有排行榜记录。
@@ -150,7 +262,7 @@ func (m *Manager) GetMemberRankEntries(ctx context.Context, userID int64) ([]Mem
 	defer m.mu.RUnlock()
 
 	for _, entry := range entries {
-		key := BizKey{BizType: entry.BizType, ActID: entry.ActID, Round: entry.Round}
+		key := NewBizKey(entry.BizType, entry.ActID).String()
 		svc, ok := m.services[key]
 		if !ok {
 			result = append(result, MemberRankEntry{MemberEntry: entry})
@@ -158,7 +270,7 @@ func (m *Manager) GetMemberRankEntries(ctx context.Context, userID int64) ([]Mem
 		}
 		snapshot, _, err := svc.GetMemberRank(ctx, userID)
 		if err != nil {
-			return nil, fmt.Errorf("get rank for %v: %w", key, err)
+			return nil, fmt.Errorf("get rank for %s: %w", key, err)
 		}
 		result = append(result, MemberRankEntry{
 			MemberEntry: entry,
@@ -172,6 +284,15 @@ func (m *Manager) Tick(ctx context.Context, now int64) error {
 	if m == nil {
 		return nil
 	}
+
+	// 定期从 MongoDB 同步（发现其他节点新增/删除的活动）
+	if now-m.lastSyncTime >= syncIntervalMs {
+		m.lastSyncTime = now
+		m.syncFromMongo(ctx)
+		// Redis 补充注册：应对 syncFromMongo 取不到 MongoDB 数据时 Redis 中仍有排行榜配置的场景
+		m.syncFromRedis(ctx)
+	}
+
 	m.mu.RLock()
 	svcs := make([]RankBizService, 0, len(m.services))
 	for _, svc := range m.services {
@@ -186,53 +307,242 @@ func (m *Manager) Tick(ctx context.Context, now int64) error {
 	return nil
 }
 
-// recoverFromMongo 启动时从 MongoDB 恢复活跃的排行榜活动。
-func (m *Manager) recoverFromMongo(ctx context.Context) {
-	if m.dao == nil {
+// saveConfigToRedis 将活动配置序列化写入 Redis，供其他节点或重启后恢复注册使用。
+func (m *Manager) saveConfigToRedis(bizKey string, cfg balloon.Config) {
+	if m.rdb == nil {
 		return
 	}
-	docs, err := m.dao.LoadAllActivities()
+	data, err := json.Marshal(cfg)
 	if err != nil {
-		zaplog.LoggerSugar.Warnf("rank: load activity registry from mongo: %v", err)
+		zaplog.LoggerSugar.Warnf("rank: marshal config for redis %s: %v", bizKey, err)
+		return
+	}
+	if err := m.rdb.Set(rediskeys.GetBalloonConfigKey(bizKey), string(data)); err != nil {
+		zaplog.LoggerSugar.Warnf("rank: save config to redis %s: %v", bizKey, err)
+	}
+}
+
+// deleteConfigFromRedis 从 Redis 删除活动配置。
+func (m *Manager) deleteConfigFromRedis(bizKey string) {
+	if m.rdb == nil {
+		return
+	}
+	m.rdb.Del(rediskeys.GetBalloonConfigKey(bizKey))
+}
+
+// syncFromRedis 扫描 Redis 中的活动配置，将本节点内存中缺失的服务注册上来。
+// 这是 syncFromMongo 的补充路径，在 MongoDB 不可用或配置仅存于 Redis 时生效。
+// 仅做新增，不做删除（删除由 syncFromMongo 负责）。
+func (m *Manager) syncFromRedis(ctx context.Context) {
+	if m.rdb == nil {
+		return
+	}
+	keys, err := m.rdb.Keys(rediskeys.BalloonConfigKeyPrefix + ":*")
+	if err != nil {
+		zaplog.LoggerSugar.Warnf("rank: syncFromRedis scan keys: %v", err)
+		return
+	}
+	if len(keys) == 0 {
 		return
 	}
 
 	now := time.Now().UnixMilli()
-	recovered := 0
-	for _, doc := range docs {
-		cfg := doc.Config
-		// 跳过已过期且已结算的活动（预留一天查询窗口）
+	added := 0
+	for _, key := range keys {
+		raw, err := m.rdb.Get(key)
+		if err != nil {
+			continue
+		}
+		var cfg balloon.Config
+		if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+			zaplog.LoggerSugar.Warnf("rank: syncFromRedis unmarshal config key=%s: %v", key, err)
+			continue
+		}
+		// 跳过过期活动（超过关闭时间 24h）
 		if cfg.CloseTime > 0 && now > cfg.CloseTime+86400_000 {
 			continue
 		}
 
-		key := BizKey{BizType: BizTypeBalloon, ActID: cfg.ActID, Round: cfg.Round}
-		if _, ok := m.balloonServices[key]; ok {
+		bizType := BizType(cfg.BizType)
+		if bizType == "" {
+			bizType = BizTypeBalloon
+			cfg.BizType = string(bizType)
+		}
+		bizKey := NewBizKey(bizType, cfg.ActID).String()
+
+		m.mu.RLock()
+		_, exists := m.balloonServices[bizKey]
+		m.mu.RUnlock()
+		if exists {
 			continue
 		}
+
+		// 使用最新配置文件参数覆盖（RankPeopleNum、OpenToken、机器人配置等可能随版本更新）
+		if err := FillConfigFromFiles(bizType, &cfg); err != nil {
+			zaplog.LoggerSugar.Warnf("rank: syncFromRedis fill config %s: %v", bizKey, err)
+		}
+
 		if cfg.RankCode == "" {
-			cfg.RankCode = fmt.Sprintf("balloon_score_%d", cfg.ActID)
+			cfg.RankCode = fmt.Sprintf("%s_score_%d", bizType, cfg.ActID)
+		}
+
+		if err := m.rankService.RegisterRank(ctx, commonrank.Rank{
+			RankCode:       cfg.RankCode,
+			RankName:       fmt.Sprintf("%s_rank_%d", bizType, cfg.ActID),
+			ScoreOrder:     commonrank.ScoreOrderDesc,
+			TieBreakPolicy: commonrank.TieBreakPolicyFirstEnter,
+			CreateTime:     cfg.OpenTime,
+			UpdateTime:     cfg.OpenTime,
+		}); err != nil {
+			zaplog.LoggerSugar.Warnf("rank: syncFromRedis register rank def %s: %v", cfg.RankCode, err)
+			continue
 		}
 
 		onMemberJoin := func(userID int64, groupID int32) {
 			m.memberIndex.Track(userID, MemberEntry{
-				BizType: BizTypeBalloon,
+				BizType: bizType,
 				ActID:   cfg.ActID,
-				Round:   cfg.Round,
 				GroupID: groupID,
 			})
 		}
 
 		service, err := balloon.NewService(m.rankService, cfg, m.rdb, m.dao, balloon.WithOnMemberJoin(onMemberJoin))
 		if err != nil {
-			zaplog.LoggerSugar.Warnf("rank: recover balloon %s: %v", doc.BizKey, err)
+			zaplog.LoggerSugar.Warnf("rank: syncFromRedis create service %s: %v", bizKey, err)
 			continue
 		}
-		m.services[key] = &balloonAdapter{svc: service, bizType: BizTypeBalloon}
-		m.balloonServices[key] = service
-		recovered++
+
+		m.mu.Lock()
+		if _, dup := m.balloonServices[bizKey]; !dup {
+			m.services[bizKey] = &balloonAdapter{Svc: service, bizType: bizType}
+			m.balloonServices[bizKey] = service
+			added++
+		}
+		m.mu.Unlock()
 	}
-	if recovered > 0 {
-		zaplog.LoggerSugar.Infof("rank: recovered %d balloon services from mongodb", recovered)
+
+	if added > 0 {
+		zaplog.LoggerSugar.Infof("rank: syncFromRedis completed, added=%d", added)
+	}
+}
+
+// syncFromMongo 从 MongoDB 同步活动列表：新增本节点缺少的、移除 MongoDB 中已删除的。
+func (m *Manager) syncFromMongo(ctx context.Context) {
+	if m.dao == nil {
+		return
+	}
+	// 快照同步开始时内存中已有的服务 key。
+	// 仅删除「本次同步开始前已在内存」且「MongoDB 中已不存在」的服务，
+	// 避免与 registerBalloon 并发时误删刚注册的服务（registerBalloon 持锁期间
+	// 同时写内存和 MongoDB，但 syncFromMongo 已在锁外读取完 MongoDB）。
+	m.mu.RLock()
+	existingKeys := make(map[string]struct{}, len(m.balloonServices))
+	for key := range m.balloonServices {
+		existingKeys[key] = struct{}{}
+	}
+	m.mu.RUnlock()
+
+	docs, err := m.dao.LoadAllRankConfigs()
+	if err != nil {
+		zaplog.LoggerSugar.Warnf("rank: sync from mongo: %v", err)
+		return
+	}
+
+	now := time.Now().UnixMilli()
+
+	// 收集 MongoDB 中有效的 key 集合
+	mongoKeys := make(map[string]struct{})
+	added := 0
+	for _, doc := range docs {
+		cfg := doc.Config
+		if cfg.CloseTime > 0 && now > cfg.CloseTime+86400_000 {
+			continue
+		}
+
+		bizType := BizType(cfg.BizType)
+		if bizType == "" {
+			bizType = BizTypeBalloon
+			cfg.BizType = string(bizType)
+		}
+		key := NewBizKey(bizType, cfg.ActID).String()
+		mongoKeys[key] = struct{}{}
+
+		m.mu.RLock()
+		_, exists := m.balloonServices[key]
+		m.mu.RUnlock()
+		if exists {
+			continue
+		}
+
+		// 新增：本节点没有，从 MongoDB 恢复
+		if cfg.RankCode == "" {
+			cfg.RankCode = fmt.Sprintf("%s_score_%d", bizType, cfg.ActID)
+		}
+
+		if err := m.rankService.RegisterRank(ctx, commonrank.Rank{
+			RankCode:       cfg.RankCode,
+			RankName:       fmt.Sprintf("%s_rank_%d", bizType, cfg.ActID),
+			ScoreOrder:     commonrank.ScoreOrderDesc,
+			TieBreakPolicy: commonrank.TieBreakPolicyFirstEnter,
+			CreateTime:     cfg.OpenTime,
+			UpdateTime:     cfg.OpenTime,
+		}); err != nil {
+			zaplog.LoggerSugar.Warnf("rank: sync register rank def %s: %v", cfg.RankCode, err)
+			continue
+		}
+
+		onMemberJoin := func(userID int64, groupID int32) {
+			m.memberIndex.Track(userID, MemberEntry{
+				BizType: bizType,
+				ActID:   cfg.ActID,
+				GroupID: groupID,
+			})
+		}
+
+		service, err := balloon.NewService(m.rankService, cfg, m.rdb, m.dao, balloon.WithOnMemberJoin(onMemberJoin))
+		if err != nil {
+			zaplog.LoggerSugar.Warnf("rank: sync create service %s: %v", key, err)
+			continue
+		}
+
+		m.mu.Lock()
+		if _, dup := m.balloonServices[key]; !dup {
+			m.services[key] = &balloonAdapter{Svc: service, bizType: bizType}
+			m.balloonServices[key] = service
+			added++
+		}
+		m.mu.Unlock()
+	}
+
+	// 删除：本次同步开始时已在内存、但 MongoDB 中已不存在的服务。
+	// 使用 existingKeys 快照而非实时 m.balloonServices，防止把 registerBalloon
+	// 在本次同步读取 MongoDB 之后新增的服务误判为"不在 MongoDB 中"而删除。
+	m.mu.Lock()
+	var removed []string
+	for key := range existingKeys {
+		if _, inMongo := mongoKeys[key]; !inMongo {
+			if _, stillExists := m.balloonServices[key]; stillExists {
+				removed = append(removed, key)
+			}
+		}
+	}
+	removedSvcs := make([]*balloon.Service, 0, len(removed))
+	for _, key := range removed {
+		if svc, ok := m.balloonServices[key]; ok {
+			removedSvcs = append(removedSvcs, svc)
+			delete(m.services, key)
+			delete(m.balloonServices, key)
+			m.memberIndex.RemoveByKey(key)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, svc := range removedSvcs {
+		svc.Cleanup()
+	}
+
+	if added > 0 || len(removed) > 0 {
+		zaplog.LoggerSugar.Infof("rank: sync from mongo completed, added=%d removed=%d total=%d",
+			added, len(removed), len(mongoKeys))
 	}
 }

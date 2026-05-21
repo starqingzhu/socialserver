@@ -9,8 +9,6 @@ import (
 	goredis "golib/redis"
 )
 
-// MemberIndex 全局成员索引，维护 userID → 排行榜参与记录的映射。
-// 当 rdb 不为 nil 时数据缓存到 Redis（多节点共享），否则退化为纯内存模式（测试用）。
 type MemberIndex struct {
 	rdb     *goredis.Redis
 	entries map[int64][]MemberEntry
@@ -24,35 +22,29 @@ func NewMemberIndex(rdb *goredis.Redis) *MemberIndex {
 }
 
 func encodeMemberEntry(e MemberEntry) string {
-	return fmt.Sprintf("%s:%d:%d:%d", e.BizType, e.ActID, e.Round, e.GroupID)
+	return fmt.Sprintf("%s:%d:%d", e.BizType, e.ActID, e.GroupID)
 }
 
 func decodeMemberEntry(s string) (MemberEntry, bool) {
-	parts := strings.SplitN(s, ":", 4)
-	if len(parts) != 4 {
+	parts := strings.SplitN(s, ":", 3)
+	if len(parts) != 3 {
 		return MemberEntry{}, false
 	}
 	actID, err := strconv.ParseInt(parts[1], 10, 32)
 	if err != nil {
 		return MemberEntry{}, false
 	}
-	round, err := strconv.ParseInt(parts[2], 10, 32)
-	if err != nil {
-		return MemberEntry{}, false
-	}
-	groupID, err := strconv.ParseInt(parts[3], 10, 32)
+	groupID, err := strconv.ParseInt(parts[2], 10, 32)
 	if err != nil {
 		return MemberEntry{}, false
 	}
 	return MemberEntry{
 		BizType: BizType(parts[0]),
 		ActID:   int32(actID),
-		Round:   int32(round),
 		GroupID: int32(groupID),
 	}, true
 }
 
-// Track 记录用户参与了某个排行榜分组。幂等。
 func (idx *MemberIndex) Track(userID int64, entry MemberEntry) {
 	if idx.rdb != nil {
 		idx.rdb.SAdd(rediskeys.GetRankMemberIndexKey(userID), encodeMemberEntry(entry))
@@ -66,7 +58,6 @@ func (idx *MemberIndex) Track(userID int64, entry MemberEntry) {
 	idx.entries[userID] = append(idx.entries[userID], entry)
 }
 
-// Lookup 返回用户参与的所有排行榜记录。
 func (idx *MemberIndex) Lookup(userID int64) []MemberEntry {
 	if idx.rdb != nil {
 		raw, err := idx.rdb.SMembers(rediskeys.GetRankMemberIndexKey(userID))
@@ -90,7 +81,6 @@ func (idx *MemberIndex) Lookup(userID int64) []MemberEntry {
 	return dst
 }
 
-// LookupByBizType 返回用户在指定业务类型下的所有排行榜记录。
 func (idx *MemberIndex) LookupByBizType(userID int64, bizType BizType) []MemberEntry {
 	all := idx.Lookup(userID)
 	var result []MemberEntry
@@ -102,15 +92,14 @@ func (idx *MemberIndex) LookupByBizType(userID int64, bizType BizType) []MemberE
 	return result
 }
 
-// RemoveByKey 删除所有匹配指定 BizKey 的记录（仅内存模式）。
-func (idx *MemberIndex) RemoveByKey(key BizKey) {
+func (idx *MemberIndex) RemoveByKey(key string) {
 	if idx.rdb != nil {
 		return
 	}
 	for userID, list := range idx.entries {
 		filtered := list[:0]
 		for _, e := range list {
-			if !(e.BizType == key.BizType && e.ActID == key.ActID && e.Round == key.Round) {
+			if !(NewBizKey(e.BizType, e.ActID).String() == key) {
 				filtered = append(filtered, e)
 			}
 		}
@@ -119,5 +108,17 @@ func (idx *MemberIndex) RemoveByKey(key BizKey) {
 		} else {
 			idx.entries[userID] = filtered
 		}
+	}
+}
+
+// RemoveUserEntries 从 Redis 中批量移除指定活动下所有成员的索引条目。
+// members 为 userID → groupID 映射，与 balloon.Service.GetAllMembers() 返回值对应。
+func (idx *MemberIndex) RemoveUserEntries(bizType BizType, actID int32, members map[int64]int32) {
+	if idx.rdb == nil || len(members) == 0 {
+		return
+	}
+	for userID, groupID := range members {
+		entry := encodeMemberEntry(MemberEntry{BizType: bizType, ActID: actID, GroupID: groupID})
+		idx.rdb.SRem(rediskeys.GetRankMemberIndexKey(userID), entry)
 	}
 }

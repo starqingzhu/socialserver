@@ -35,7 +35,7 @@ type RobotTierCfg struct {
 
 // RobotInfoEntry 机器人展示信息条目。
 type RobotInfoEntry struct {
-	InfoID int32
+	InfoID int64
 	Name   string
 	Avatar int32
 	Frame  int32
@@ -45,7 +45,7 @@ type RobotInfoEntry struct {
 type robotState struct {
 	MemberID   int64 `json:"memberId" bson:"memberId"`
 	TierID     int32 `json:"tierId" bson:"tierId"`
-	InfoID     int32 `json:"infoId" bson:"infoId"`
+	InfoID     int64 `json:"infoId" bson:"infoId"`
 	Score      int64 `json:"score" bson:"score"`
 	LastGrowAt int64 `json:"lastGrowAt" bson:"lastGrowAt"`
 }
@@ -89,7 +89,7 @@ func totalRobotsInPlan(plan []robotSpawnEntry) int32 {
 // pickRobotInfo 从信息池中随机选取一条未使用的机器人信息。
 // usedIDs 为当前组已使用的 InfoID 集合。
 // 若信息池全部耗尽则返回 false。
-func pickRobotInfo(infos []RobotInfoEntry, usedIDs map[int32]struct{}) (RobotInfoEntry, bool) {
+func pickRobotInfo(infos []RobotInfoEntry, usedIDs map[int64]struct{}) (RobotInfoEntry, bool) {
 	// 构建可用列表
 	avail := make([]RobotInfoEntry, 0, len(infos))
 	for _, info := range infos {

@@ -8,6 +8,7 @@ import (
 
 type ServerHandler struct {
 	pb.UnimplementedGameServerServer
+	pb.UnimplementedSocailServerServer
 }
 
 var globalServerHandler *ServerHandler

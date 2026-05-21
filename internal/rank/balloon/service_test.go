@@ -18,6 +18,7 @@ func TestBalloonServiceAssignsGroupAndRanks(t *testing.T) {
 	}
 
 	service, err := NewService(rankService, Config{
+		BizType:       "balloon",
 		ActID:         1001,
 		RankCode:      "balloon_score",
 		RankPeopleNum: 2,
@@ -46,9 +47,6 @@ func TestBalloonServiceAssignsGroupAndRanks(t *testing.T) {
 	if list[0].MemberId != 1002 || list[1].MemberId != 1001 {
 		t.Fatalf("unexpected sort order: %+v", list)
 	}
-	if list[0].Extra["groupId"] != 1 {
-		t.Fatalf("expected group info in extra: %+v", list[0].Extra)
-	}
 
 	self, groupID, err := service.GetMemberRank(ctx, 1002)
 	if err != nil {
@@ -70,6 +68,7 @@ func TestBalloonServiceCreatesNewGroupWhenFull(t *testing.T) {
 	}
 
 	service, err := NewService(rankService, Config{
+		BizType:       "balloon",
 		ActID:         1002,
 		RankCode:      "balloon_score",
 		RankPeopleNum: 2,
@@ -115,6 +114,7 @@ func TestBalloonServiceRejectsClosedActivityAndSettles(t *testing.T) {
 	}
 
 	service, err := NewService(rankService, Config{
+		BizType:       "balloon",
 		ActID:         1003,
 		RankCode:      "balloon_score",
 		RankPeopleNum: 10,
@@ -150,48 +150,6 @@ func TestBalloonServiceRejectsClosedActivityAndSettles(t *testing.T) {
 	}
 }
 
-func TestBalloonServiceWithRound(t *testing.T) {
-	ctx := context.Background()
-	rankService := rank.NewMemoryService()
-	if err := rankService.RegisterRank(ctx, rank.Rank{
-		RankCode:   "balloon_round",
-		ScoreOrder: rank.ScoreOrderDesc,
-	}); err != nil {
-		t.Fatalf("register: %v", err)
-	}
-
-	svc1, err := NewService(rankService, Config{
-		ActID: 4001, Round: 1, RankCode: "balloon_round",
-		RankPeopleNum: 10, OpenToken: 100, OpenTime: 1000, CloseTime: 5000,
-	}, nil, nil)
-	if err != nil {
-		t.Fatalf("new service round 1: %v", err)
-	}
-	svc2, err := NewService(rankService, Config{
-		ActID: 4001, Round: 2, RankCode: "balloon_round",
-		RankPeopleNum: 10, OpenToken: 100, OpenTime: 6000, CloseTime: 10000,
-	}, nil, nil)
-	if err != nil {
-		t.Fatalf("new service round 2: %v", err)
-	}
-
-	if err := svc1.UpsertScore(ctx, 1001, 200, 1100, nil); err != nil {
-		t.Fatalf("upsert r1: %v", err)
-	}
-	if err := svc2.UpsertScore(ctx, 1001, 500, 6100, nil); err != nil {
-		t.Fatalf("upsert r2: %v", err)
-	}
-
-	snap1, _, _ := svc1.GetMemberRank(ctx, 1001)
-	snap2, _, _ := svc2.GetMemberRank(ctx, 1001)
-	if snap1 == nil || snap1.Score != 200 {
-		t.Fatalf("expected r1 score 200, got %+v", snap1)
-	}
-	if snap2 == nil || snap2.Score != 500 {
-		t.Fatalf("expected r2 score 500, got %+v", snap2)
-	}
-}
-
 func TestBalloonServiceOnMemberJoinCallback(t *testing.T) {
 	ctx := context.Background()
 	rankService := rank.NewMemoryService()
@@ -214,8 +172,13 @@ func TestBalloonServiceOnMemberJoinCallback(t *testing.T) {
 	}
 
 	service, err := NewService(rankService, Config{
-		ActID: 5001, RankCode: "balloon_cb",
-		RankPeopleNum: 10, OpenToken: 100, OpenTime: 1000, CloseTime: 99999,
+		BizType:       "balloon",
+		ActID:         5001,
+		RankCode:      "balloon_cb",
+		RankPeopleNum: 10,
+		OpenToken:     100,
+		OpenTime:      1000,
+		CloseTime:     99999,
 	}, nil, nil, WithOnMemberJoin(onJoin))
 	if err != nil {
 		t.Fatalf("new service: %v", err)
@@ -250,8 +213,14 @@ func TestBalloonServiceIsSettled(t *testing.T) {
 	}
 
 	service, err := NewService(rankService, Config{
-		ActID: 6001, RankCode: "balloon_settled",
-		RankPeopleNum: 10, OpenToken: 100, OpenTime: 1000, CloseTime: 2000, AutoSettle: true,
+		BizType:       "balloon",
+		ActID:         6001,
+		RankCode:      "balloon_settled",
+		RankPeopleNum: 10,
+		OpenToken:     100,
+		OpenTime:      1000,
+		CloseTime:     2000,
+		AutoSettle:    true,
 	}, nil, nil)
 	if err != nil {
 		t.Fatalf("new service: %v", err)

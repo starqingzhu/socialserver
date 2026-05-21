@@ -3,11 +3,35 @@ cluster: local
 module: socialserver
 configDir: "../config"
 
+#redis - 优化生产配置
+redis:
+  - group: 1
+    host: 172.20.4.73
+    port: 6379
+    username: NONE
+    password: 123456
+
 etcd:
   - group: 1
     host: 172.20.4.73:2379
     username: NONE
     password: NONE
+
+#mongodb - 阿里云副本集配置
+mongodb:
+  uri: mongodb://172.20.4.73:27017
+  username: admin
+  password: 123456
+  authSource: admin
+  database: mergeHope
+  socketTimeout: 120 #套接字超时时间，单位秒 (优化为2分钟)
+  maxPoolSize: 100 #连接池最大连接数 (提高并发能力)
+  minPoolSize: 10 #连接池最小连接数 (增加最小连接数)
+  maxIdleTime: 300 #连接最大空闲时间，单位秒 (5分钟)
+  connectTimeout: 30 #连接超时时间，单位秒 (30秒)
+  heartbeatFrequency: 10 #心跳频率，单位秒 (10秒检查)
+  serverSelectionTimeout: 30 #服务器选择超时，单位秒 (30秒)
+  maxConnecting: 10 #最大同时连接数 (增加并发连接)
 
 http:
   http_listen_addr: 0.0.0.0:10001

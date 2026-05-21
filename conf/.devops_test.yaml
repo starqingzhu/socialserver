@@ -3,14 +3,39 @@ cluster: test
 module: socialserver
 configDir: "../config"
 
+
+#redis - 优化生产配置
+redis:
+  - group: 1
+    host: "10.7.1.165"
+    port: 9379
+    username: NONE
+    password: "hWCJ$HDajm9SN&&Z"
+
 etcd:
   - group: 1
     host: 172.20.4.73:2379
     username: NONE
     password: NONE
 
+#mongodb - 优化生产配置
+mongodb:
+  uri: mongodb://10.7.1.165:9479
+  username: admin
+  password: hWCJ$HDajm9SN&&Z
+  authSource: admin
+  database: mergeHope
+  socketTimeout: 120 #套接字超时时间，单位秒 (优化为2分钟)
+  maxPoolSize: 300 #连接池最大连接数 (提高并发能力)
+  minPoolSize: 30 #连接池最小连接数 (增加最小连接数)
+  maxIdleTime: 300 #连接最大空闲时间，单位秒 (5分钟)
+  connectTimeout: 30 #连接超时时间，单位秒 (30秒)
+  heartbeatFrequency: 10 #心跳频率，单位秒 (10秒检查)
+  serverSelectionTimeout: 30 #服务器选择超时，单位秒 (30秒)
+  maxConnecting: 100 #最大同时连接数 (增加并发连接)
+
 http:
-  http_listen_addr: 0.0.0.0:19004
+  http_listen_addr: 0.0.0.0:10002
   http_read_timeout: 60000
   http_write_timeout: 60000
   http_idle_timeout: 60000
@@ -20,7 +45,7 @@ http:
 
 rpc:
   server:
-    address: "0.0.0.0:19104"
+    address: "0.0.0.0:10102"
     enable_reflection: true
     keepalive_time: 10
     keepalive_timeout: 3
@@ -34,4 +59,4 @@ logCfg:
 
 pprof:
   enabled: false
-  addr: "0.0.0.0:19904"
+  addr: "0.0.0.0:10902"

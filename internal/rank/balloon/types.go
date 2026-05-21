@@ -11,10 +11,10 @@ const (
 	GroupStateSettled GroupState = "settled" // 已结算，排名固化
 )
 
-// Config 气球活动排行榜业务配置。
+// Config 排行榜业务配置。
 type Config struct {
-	ActID         int32
-	Round         int32 // 期数（0 表示第一期，兼容旧调用）
+	BizType       string // 业务类型标识
+	ActID         int32  // 活动ID
 	RankCode      string
 	RankPeopleNum int32 // 每组最大人数（含机器人）
 	OpenToken     int64 // 进榜最低积分门槛（大于等于，不受商店消耗影响）
@@ -33,10 +33,7 @@ func (c *Config) hasRobots() bool {
 }
 
 func (c *Config) computeBizId() string {
-	if c.Round > 0 {
-		return fmt.Sprintf("act_%d_r%d", c.ActID, c.Round)
-	}
-	return fmt.Sprintf("act_%d", c.ActID)
+	return fmt.Sprintf("%s_%d", c.BizType, c.ActID)
 }
 
 // Option 用于配置 Service 的可选参数。

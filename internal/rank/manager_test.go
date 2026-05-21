@@ -13,8 +13,8 @@ func newTestManager() *Manager {
 	return &Manager{
 		rankService:     rank.NewMemoryService(),
 		memberIndex:     NewMemberIndex(nil),
-		services:        make(map[BizKey]RankBizService),
-		balloonServices: make(map[BizKey]*balloon.Service),
+		services:        make(map[string]RankBizService),
+		balloonServices: make(map[string]*balloon.Service),
 	}
 }
 
@@ -23,7 +23,8 @@ func TestManagerBalloonScenario(t *testing.T) {
 	manager := newTestManager()
 	defer manager.Close()
 
-	service, err := manager.RegisterBalloon(ctx, balloon.Config{
+	service, err := manager.registerBalloon(ctx, balloon.Config{
+		BizType:       "balloon",
 		ActID:         2001,
 		RankCode:      "balloon_score",
 		RankPeopleNum: 2,
@@ -48,7 +49,7 @@ func TestManagerBalloonScenario(t *testing.T) {
 		{10002, 220, 1500},
 	}
 	for _, item := range input {
-		if err := service.UpsertScore(ctx, item.userID, item.score, item.now, map[string]int64{"zoneId": 7}); err != nil {
+		if err := service.UpsertScore(ctx, item.userID, item.score, item.now, nil); err != nil {
 			t.Fatalf("upsert score user=%d: %v", item.userID, err)
 		}
 	}
@@ -98,7 +99,8 @@ func BenchmarkManagerBalloonScenario(b *testing.B) {
 	ctx := context.Background()
 	for i := 0; i < b.N; i++ {
 		manager := newTestManager()
-		service, err := manager.RegisterBalloon(ctx, balloon.Config{
+		service, err := manager.registerBalloon(ctx, balloon.Config{
+			BizType:       fmt.Sprintf("balloon_bench_%d", i),
 			ActID:         int32(3000 + i),
 			RankCode:      fmt.Sprintf("balloon_bench_%d", i),
 			RankPeopleNum: 50,
@@ -112,7 +114,7 @@ func BenchmarkManagerBalloonScenario(b *testing.B) {
 		}
 
 		for userID := int64(1); userID <= 1000; userID++ {
-			if err := service.UpsertScore(ctx, userID, 100+userID, 1100+userID, map[string]int64{"zoneId": userID % 8}); err != nil {
+			if err := service.UpsertScore(ctx, userID, 100+userID, 1100+userID, nil); err != nil {
 				b.Fatalf("upsert score: %v", err)
 			}
 		}
@@ -130,74 +132,31 @@ func BenchmarkManagerBalloonScenario(b *testing.B) {
 	}
 }
 
-func TestManagerMultiRound(t *testing.T) {
-	ctx := context.Background()
-	manager := newTestManager()
-	defer manager.Close()
-
-	svc1, err := manager.RegisterBalloon(ctx, balloon.Config{
-		ActID: 5001, Round: 1, RankCode: "balloon_mr",
-		RankPeopleNum: 2, OpenToken: 100, OpenTime: 1000, CloseTime: 5000, AutoSettle: true,
-	})
-	if err != nil {
-		t.Fatalf("register round 1: %v", err)
-	}
-	svc2, err := manager.RegisterBalloon(ctx, balloon.Config{
-		ActID: 5001, Round: 2, RankCode: "balloon_mr",
-		RankPeopleNum: 2, OpenToken: 100, OpenTime: 6000, CloseTime: 10000, AutoSettle: true,
-	})
-	if err != nil {
-		t.Fatalf("register round 2: %v", err)
-	}
-	if svc1 == svc2 {
-		t.Fatalf("expected different services for different rounds")
-	}
-
-	if err := svc1.UpsertScore(ctx, 1001, 200, 1100, nil); err != nil {
-		t.Fatalf("upsert r1: %v", err)
-	}
-	if err := svc2.UpsertScore(ctx, 1001, 300, 6100, nil); err != nil {
-		t.Fatalf("upsert r2: %v", err)
-	}
-
-	snap1, g1, _ := svc1.GetMemberRank(ctx, 1001)
-	snap2, g2, _ := svc2.GetMemberRank(ctx, 1001)
-	if snap1 == nil || snap2 == nil {
-		t.Fatalf("expected snapshots for both rounds")
-	}
-	if snap1.Score != 200 || snap2.Score != 300 {
-		t.Fatalf("unexpected scores: r1=%d r2=%d", snap1.Score, snap2.Score)
-	}
-	if g1 != 1 || g2 != 1 {
-		t.Fatalf("unexpected groups: r1=%d r2=%d", g1, g2)
-	}
-
-	if got := manager.GetBalloonServiceByRound(5001, 1); got != svc1 {
-		t.Fatalf("GetBalloonServiceByRound(5001,1) returned wrong service")
-	}
-	if got := manager.GetBalloonServiceByRound(5001, 2); got != svc2 {
-		t.Fatalf("GetBalloonServiceByRound(5001,2) returned wrong service")
-	}
-}
-
 func TestManagerMemberIndex(t *testing.T) {
 	ctx := context.Background()
 	manager := newTestManager()
 	defer manager.Close()
 
-	_, err := manager.RegisterBalloon(ctx, balloon.Config{
-		ActID: 6001, Round: 1, RankCode: "balloon_idx",
-		RankPeopleNum: 10, OpenToken: 100, OpenTime: 1000, CloseTime: 99999,
+	_, err := manager.registerBalloon(ctx, balloon.Config{
+		BizType:       "balloon",
+		ActID:         6001,
+		RankCode:      "balloon_idx",
+		RankPeopleNum: 10,
+		OpenToken:     100,
+		OpenTime:      1000,
+		CloseTime:     99999,
 	})
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	svc := manager.GetBalloonServiceByRound(6001, 1)
 
-	if err := svc.UpsertScore(ctx, 2001, 150, 1100, nil); err != nil {
+	svc := manager.GetService(BizTypeBalloon, 6001)
+	bsvc := svc.(*BalloonBizService)
+
+	if err := bsvc.Svc.UpsertScore(ctx, 2001, 150, 1100, nil); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
-	if err := svc.UpsertScore(ctx, 2002, 160, 1200, nil); err != nil {
+	if err := bsvc.Svc.UpsertScore(ctx, 2002, 160, 1200, nil); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 
@@ -205,7 +164,7 @@ func TestManagerMemberIndex(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry for user 2001, got %d", len(entries))
 	}
-	if entries[0].ActID != 6001 || entries[0].Round != 1 || entries[0].GroupID != 1 {
+	if entries[0].BizType != BizTypeBalloon || entries[0].GroupID != 1 {
 		t.Fatalf("unexpected entry: %+v", entries[0])
 	}
 
@@ -219,64 +178,61 @@ func TestManagerGetMemberRankEntries(t *testing.T) {
 	manager := newTestManager()
 	defer manager.Close()
 
-	for _, round := range []int32{1, 2} {
-		_, err := manager.RegisterBalloon(ctx, balloon.Config{
-			ActID: 7001, Round: round, RankCode: "balloon_agg",
-			RankPeopleNum: 10, OpenToken: 100,
-			OpenTime: int64(round) * 10000, CloseTime: int64(round)*10000 + 5000,
-		})
-		if err != nil {
-			t.Fatalf("register round %d: %v", round, err)
-		}
+	_, err := manager.registerBalloon(ctx, balloon.Config{
+		BizType:       "balloon",
+		ActID:         7001,
+		RankCode:      "balloon_agg",
+		RankPeopleNum: 10,
+		OpenToken:     100,
+		OpenTime:      10000,
+		CloseTime:     15000,
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
 	}
 
-	svc1 := manager.GetBalloonServiceByRound(7001, 1)
-	svc2 := manager.GetBalloonServiceByRound(7001, 2)
+	svc := manager.GetService(BizTypeBalloon, 7001)
+	bsvc := svc.(*BalloonBizService)
 
-	if err := svc1.UpsertScore(ctx, 3001, 200, 10100, nil); err != nil {
-		t.Fatalf("upsert r1: %v", err)
-	}
-	if err := svc2.UpsertScore(ctx, 3001, 400, 20100, nil); err != nil {
-		t.Fatalf("upsert r2: %v", err)
+	if err := bsvc.Svc.UpsertScore(ctx, 3001, 200, 10100, nil); err != nil {
+		t.Fatalf("upsert: %v", err)
 	}
 
 	rankEntries, err := manager.GetMemberRankEntries(ctx, 3001)
 	if err != nil {
 		t.Fatalf("get member rank entries: %v", err)
 	}
-	if len(rankEntries) != 2 {
-		t.Fatalf("expected 2 rank entries, got %d", len(rankEntries))
+	if len(rankEntries) != 1 {
+		t.Fatalf("expected 1 rank entry, got %d", len(rankEntries))
 	}
-
-	scoreByRound := make(map[int32]int64)
-	for _, re := range rankEntries {
-		if re.Snapshot != nil {
-			scoreByRound[re.Round] = re.Snapshot.Score
-		}
-	}
-	if scoreByRound[1] != 200 || scoreByRound[2] != 400 {
-		t.Fatalf("unexpected scores by round: %+v", scoreByRound)
+	if rankEntries[0].Snapshot == nil || rankEntries[0].Snapshot.Score != 200 {
+		t.Fatalf("unexpected rank entry: %+v", rankEntries[0])
 	}
 }
 
-func TestManagerBackwardCompat(t *testing.T) {
+func TestManagerGetService(t *testing.T) {
 	ctx := context.Background()
 	manager := newTestManager()
 	defer manager.Close()
 
-	svc, err := manager.RegisterBalloon(ctx, balloon.Config{
-		ActID: 8001, RankCode: "balloon_compat",
-		RankPeopleNum: 10, OpenToken: 100, OpenTime: 1000, CloseTime: 99999,
+	_, err := manager.registerBalloon(ctx, balloon.Config{
+		BizType:       "balloon",
+		ActID:         8001,
+		RankCode:      "balloon_compat",
+		RankPeopleNum: 10,
+		OpenToken:     100,
+		OpenTime:      1000,
+		CloseTime:     99999,
 	})
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
-	got := manager.GetBalloonService(8001)
-	if got != svc {
-		t.Fatalf("GetBalloonService should return Round=0 service")
+	got := manager.GetService(BizTypeBalloon, 8001)
+	if got == nil {
+		t.Fatalf("GetService should return registered service")
 	}
-	if manager.GetBalloonService(9999) != nil {
-		t.Fatalf("expected nil for unregistered actID")
+	if manager.GetService("nonexistent", 0) != nil {
+		t.Fatalf("expected nil for unregistered bizType")
 	}
 }

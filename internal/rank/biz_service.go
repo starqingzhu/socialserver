@@ -18,21 +18,24 @@ type RankBizService interface {
 }
 
 // balloonAdapter 将 balloon.Service 适配为 RankBizService 接口。
-type balloonAdapter struct {
-	svc     *balloon.Service
+type balloonAdapter = BalloonBizService
+
+// BalloonBizService 将 balloon.Service 适配为 RankBizService 接口（导出，供 handler 层类型断言）。
+type BalloonBizService struct {
+	Svc     *balloon.Service
 	bizType BizType
 }
 
-func (a *balloonAdapter) BizType() BizType { return a.bizType }
+func (a *BalloonBizService) BizType() BizType { return a.bizType }
 
-func (a *balloonAdapter) GetMemberRank(ctx context.Context, userID int64) (*commonrank.RankMemberSnapshot, int32, error) {
-	return a.svc.GetMemberRank(ctx, userID)
+func (a *BalloonBizService) GetMemberRank(ctx context.Context, userID int64) (*commonrank.RankMemberSnapshot, int32, error) {
+	return a.Svc.GetMemberRank(ctx, userID)
 }
 
-func (a *balloonAdapter) Tick(ctx context.Context, now int64) error {
-	return a.svc.Tick(ctx, now)
+func (a *BalloonBizService) Tick(ctx context.Context, now int64) error {
+	return a.Svc.Tick(ctx, now)
 }
 
-func (a *balloonAdapter) IsSettled() bool {
-	return a.svc.IsSettled()
+func (a *BalloonBizService) IsSettled() bool {
+	return a.Svc.IsSettled()
 }

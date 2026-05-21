@@ -10,6 +10,7 @@ replace pbcommon => ../pbcommon
 
 require (
 	common v0.0.0-00010101000000-000000000000
+	go.mongodb.org/mongo-driver v1.17.6
 	golib v0.0.0-00010101000000-000000000000
 	google.golang.org/grpc v1.78.0
 	pbcommon v0.0.0-00010101000000-000000000000
@@ -69,7 +70,6 @@ require (
 	go.etcd.io/etcd/api/v3 v3.6.5 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.6.5 // indirect
 	go.etcd.io/etcd/client/v3 v3.6.5 // indirect
-	go.mongodb.org/mongo-driver v1.17.6 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/mock v0.5.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect

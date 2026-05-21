@@ -30,7 +30,7 @@ type Service struct {
 
 	// 机器人内存缓存
 	groupRobots       map[int32][]*robotState
-	groupUsedInfoIDs  map[int32]map[int32]struct{}
+	groupUsedInfoIDs  map[int32]map[int64]struct{}
 	groupMaxRealScore map[int32]int64
 
 	nextGroupID  int32
@@ -49,7 +49,7 @@ func NewService(rankService rank.Service, config Config, rdb *goredis.Redis, dao
 		memberGroup:       make(map[int64]int32),
 		settledGroup:      make(map[int32][]rank.RankMemberSnapshot),
 		groupRobots:       make(map[int32][]*robotState),
-		groupUsedInfoIDs:  make(map[int32]map[int32]struct{}),
+		groupUsedInfoIDs:  make(map[int32]map[int64]struct{}),
 		groupMaxRealScore: make(map[int32]int64),
 	}
 	for _, opt := range opts {
@@ -134,7 +134,7 @@ func (s *Service) Tick(ctx context.Context, now int64) error {
 //   - 自动分配用户到当前可用分组（或创建新分组）。
 //   - 首位真实玩家进入分组时自动生成机器人。
 //   - 活动已关闭或实例未开放时返回 ErrInstanceNotOpen。
-func (s *Service) UpsertScore(ctx context.Context, userID int64, totalScore int64, now int64, extra map[string]int64) error {
+func (s *Service) UpsertScore(ctx context.Context, userID int64, totalScore int64, now int64, avatarInfo *rank.AvatarInfo) error {
 	if totalScore < s.config.OpenToken {
 		return nil
 	}
@@ -195,21 +195,15 @@ func (s *Service) UpsertScore(ctx context.Context, userID int64, totalScore int6
 	instanceID := s.groupInstanceID(groupID)
 	s.mu.Unlock()
 
-	mergedExtra := make(map[string]int64, len(extra)+1)
-	for k, v := range extra {
-		mergedExtra[k] = v
-	}
-	mergedExtra["groupId"] = int64(groupID)
-
 	if err := s.ensureGroupInstance(ctx, instanceID, now); err != nil {
 		return err
 	}
 	if err := s.rankService.BatchUpsertScore(ctx, instanceID, []rank.RankScoreItem{{
-		MemberId:  userID,
-		Score:     totalScore,
-		AtTime:    now,
-		EnterTime: now,
-		Extra:     mergedExtra,
+		MemberId:   userID,
+		Score:      totalScore,
+		AtTime:     now,
+		EnterTime:  now,
+		AvatarInfo: avatarInfo,
 	}}); err != nil {
 		return err
 	}
@@ -350,4 +344,99 @@ func (s *Service) IsSettled() bool {
 		}
 	}
 	return true
+}
+
+func (s *Service) GetConfig() Config {
+	return s.config
+}
+
+func (s *Service) GroupCount() int32 {
+	s.mu.Lock()
+	s.ensureLoaded()
+	defer s.mu.Unlock()
+	return int32(len(s.groups))
+}
+
+func (s *Service) MemberCount() int32 {
+	s.mu.Lock()
+	s.ensureLoaded()
+	defer s.mu.Unlock()
+	count := int32(0)
+	for uid := range s.memberGroup {
+		if uid > 0 {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *Service) UpdateConfig(cfg Config) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cfg.RankPeopleNum > 0 {
+		s.config.RankPeopleNum = cfg.RankPeopleNum
+	}
+	if cfg.OpenToken >= 0 {
+		s.config.OpenToken = cfg.OpenToken
+	}
+	if cfg.OpenTime > 0 {
+		s.config.OpenTime = cfg.OpenTime
+	}
+	if cfg.CloseTime > 0 {
+		s.config.CloseTime = cfg.CloseTime
+	}
+	s.config.AutoSettle = cfg.AutoSettle
+}
+
+func (s *Service) Cleanup() {
+	// 确保分组列表已从 Redis 加载，避免因懒加载未触发而遗漏分组级 key 的清理。
+	s.mu.Lock()
+	s.ensureLoaded()
+	groups := s.groups
+	s.mu.Unlock()
+
+	s.store.CleanupAll(groups)
+
+	// 删除每个分组对应的 commonRank 实例 Redis 数据。
+	ctx := context.Background()
+	for _, g := range groups {
+		if g == nil {
+			continue
+		}
+		instanceID := s.groupInstanceID(g.GroupID)
+		if err := s.rankService.DeleteInstance(ctx, instanceID); err != nil {
+			zaplog.LoggerSugar.Warnf("balloon: cleanup delete rank instance %s: %v", instanceID, err)
+		}
+	}
+	// 删除榜单定义。
+	if err := s.rankService.DeleteRankDef(ctx, s.config.RankCode); err != nil {
+		zaplog.LoggerSugar.Warnf("balloon: cleanup delete rank def %s: %v", s.config.RankCode, err)
+	}
+}
+
+// GetAllMembers 返回该活动所有成员的 userID→groupID 映射，供外部在 Cleanup 前收集用于清理成员索引。
+func (s *Service) GetAllMembers() (map[int64]int32, error) {
+	return s.store.GetAllMembers()
+}
+
+func (s *Service) ClaimReward(userID int64, now int64) (bool, int64, error) {
+	claimTime, found, err := s.store.GetClaim(userID)
+	if err != nil {
+		return false, 0, err
+	}
+	if found {
+		return false, claimTime, nil
+	}
+	if err := s.store.SetClaim(userID, now); err != nil {
+		return false, 0, err
+	}
+	return true, now, nil
+}
+
+func (s *Service) GetClaimStatus(userID int64) (bool, int64, error) {
+	claimTime, found, err := s.store.GetClaim(userID)
+	if err != nil {
+		return false, 0, err
+	}
+	return found, claimTime, nil
 }
