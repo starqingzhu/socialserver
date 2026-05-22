@@ -13,7 +13,7 @@ redis:
 
 etcd:
   - group: 1
-    host: 172.20.4.73:2379
+    host: 10.7.1.165:3379
     username: NONE
     password: NONE
 
