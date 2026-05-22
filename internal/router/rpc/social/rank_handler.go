@@ -25,7 +25,11 @@ func (h *ServerHandler) S2SUpsertScore(ctx context.Context, req *pb.PBS2SUpsertS
 		if retErr != nil {
 			zaplog.LoggerSugar.Warnf("[rank] S2SUpsertScore resp err=%v", retErr)
 		} else {
-			zaplog.LoggerSugar.Infof("[rank] S2SUpsertScore resp ok")
+			var myRank int64
+			if resp.MyRank != nil {
+				myRank = resp.MyRank.Rank
+			}
+			zaplog.LoggerSugar.Infof("[rank] S2SUpsertScore resp ok rank=%d", myRank)
 		}
 	}()
 	bsvc, err := lookupBalloonService(rankservice.BizType(req.BizType), req.ActId)
@@ -35,7 +39,13 @@ func (h *ServerHandler) S2SUpsertScore(ctx context.Context, req *pb.PBS2SUpsertS
 	if err := bsvc.Svc.UpsertScore(ctx, req.UserId, req.TotalScore, req.Timestamp, protoAvatarInfoToRank(req.AvatarInfo)); err != nil {
 		return nil, rankErrorToStatus(err)
 	}
-	return &pb.PBS2SUpsertScoreResponse{}, nil
+	snapshot, _, err := bsvc.Svc.GetMemberRank(ctx, req.UserId)
+	if err != nil {
+		// 查询排名失败不影响积分更新，降级返回空排名
+		zaplog.LoggerSugar.Warnf("[rank] S2SUpsertScore GetMemberRank userId=%d err=%v", req.UserId, err)
+		return &pb.PBS2SUpsertScoreResponse{MsgCode: commonMsg.MsgCode_CODE_OK}, nil
+	}
+	return &pb.PBS2SUpsertScoreResponse{MsgCode: commonMsg.MsgCode_CODE_OK, MyRank: snapshotToProto(snapshot)}, nil
 }
 
 func (h *ServerHandler) S2SGetRankList(ctx context.Context, req *pb.PBS2SGetRankListRequest) (resp *pb.PBS2SGetRankListResponse, retErr error) {
@@ -84,11 +94,17 @@ func (h *ServerHandler) S2SGetMemberRank(ctx context.Context, req *pb.PBS2SGetMe
 	if err != nil {
 		return nil, err
 	}
-	snapshot, _, err := bsvc.Svc.GetMemberRank(ctx, req.UserId)
+	snapshot, groupID, err := bsvc.Svc.GetMemberRank(ctx, req.UserId)
 	if err != nil {
 		return nil, rankErrorToStatus(err)
 	}
-	return &pb.PBS2SGetMemberRankResponse{Snapshot: snapshotToProto(snapshot)}, nil
+	settleStage := int32(0)
+	if groupID > 0 {
+		if g := bsvc.Svc.GetGroup(groupID); g != nil && g.State == balloon.GroupStateSettled {
+			settleStage = 1
+		}
+	}
+	return &pb.PBS2SGetMemberRankResponse{Snapshot: snapshotToProto(snapshot), SettleStage: settleStage}, nil
 }
 
 func (h *ServerHandler) S2SSettle(ctx context.Context, req *pb.PBS2SSettleRequest) (resp *pb.PBS2SSettleResponse, retErr error) {

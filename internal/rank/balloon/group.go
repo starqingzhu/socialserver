@@ -39,15 +39,17 @@ func (s *Service) ensureGroupLocked() (*Group, error) {
 	return group, nil
 }
 
-func (s *Service) ensureGroupInstance(ctx context.Context, instanceID string, now int64) error {
-	_, err := s.rankService.GetInstance(ctx, instanceID)
+func (s *Service) ensureGroupInstance(ctx context.Context, instanceID string, groupID int32, now int64) error {
+	inst, err := s.rankService.GetInstance(ctx, instanceID)
 	if err == nil {
+		// rank:inst 已在 Redis 中；同步持久化到 MongoDB（幂等，若已存在则覆盖更新）。
+		_ = s.store.SaveRankInst(groupID, *inst)
 		return nil
 	}
 	if err != rank.ErrInstanceNotFound {
 		return err
 	}
-	return s.rankService.OpenInstance(ctx, rank.RankInstance{
+	newInst := rank.RankInstance{
 		InstanceId: instanceID,
 		RankCode:   s.config.RankCode,
 		BizId:      s.bizId(),
@@ -56,7 +58,13 @@ func (s *Service) ensureGroupInstance(ctx context.Context, instanceID string, no
 		CloseTime:  s.config.CloseTime,
 		CreateTime: now,
 		UpdateTime: now,
-	})
+	}
+	if openErr := s.rankService.OpenInstance(ctx, newInst); openErr != nil {
+		return openErr
+	}
+	// 持久化新创建的实例元数据到 MongoDB。
+	_ = s.store.SaveRankInst(groupID, newInst)
+	return nil
 }
 
 func (s *Service) groupInstanceID(groupID int32) string {

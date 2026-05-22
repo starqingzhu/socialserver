@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	commonrank "common/rank"
 	rediskeys "common/redis"
 	goredis "golib/redis"
 	"golib/zaplog"
@@ -30,20 +31,15 @@ const nullCacheEntry = "\x00"
 // TTL 内 Redis+MongoDB 均为空的 bizId 将直接返回空，跳过 MongoDB 查询。
 const mongoCheckedTTL = 10 * time.Minute
 
-// mongoCheckedKey 返回用于标记“MongoDB 已查且为空”的 Redis STRING key。
-func mongoCheckedKey(bizId string) string {
-	return "balloon:mongo_chk:{" + bizId + "}"
-}
-
 // isMongoChecked 返回 true 表示该 bizId 的 MongoDB 已被查询过且当时为空。
 func (st *Store) isMongoChecked() bool {
-	ok, _ := st.rdb.Exists(mongoCheckedKey(st.bizId))
+	ok, _ := st.rdb.Exists(rediskeys.GetRankMongoCheckedKey(st.bizId))
 	return ok
 }
 
 // setMongoChecked 设置哨兵：表示 MongoDB 已被查询过且为空（即全新活动，尚无数据）。
 func (st *Store) setMongoChecked() {
-	_ = st.rdb.SetEX(mongoCheckedKey(st.bizId), "1", mongoCheckedTTL)
+	_ = st.rdb.SetEX(rediskeys.GetRankMongoCheckedKey(st.bizId), "1", mongoCheckedTTL)
 }
 
 func NewStore(rdb *goredis.Redis, dao *DAO, bizId string) *Store {
@@ -60,7 +56,7 @@ func (st *Store) SaveGroup(group *Group) error {
 		return nil
 	}
 	data, _ := json.Marshal(group)
-	st.rdb.HSet(rediskeys.GetBalloonGroupsKey(st.bizId), strconv.FormatInt(int64(group.GroupID), 10), string(data))
+	st.rdb.HSet(rediskeys.GetRankGroupsKey(st.bizId), strconv.FormatInt(int64(group.GroupID), 10), string(data))
 
 	if st.hasMongo() {
 		st.dao.SaveGroup(st.bizId, group)
@@ -72,7 +68,7 @@ func (st *Store) LoadGroups() ([]*Group, error) {
 	if !st.available() {
 		return nil, nil
 	}
-	raw, err := st.rdb.HGetAll(rediskeys.GetBalloonGroupsKey(st.bizId))
+	raw, err := st.rdb.HGetAll(rediskeys.GetRankGroupsKey(st.bizId))
 	if err == nil && len(raw) > 0 {
 		groups := make([]*Group, 0, len(raw))
 		for _, v := range raw {
@@ -102,7 +98,7 @@ func (st *Store) LoadGroups() ([]*Group, error) {
 	}
 	for _, g := range groups {
 		data, _ := json.Marshal(g)
-		st.rdb.HSet(rediskeys.GetBalloonGroupsKey(st.bizId), strconv.FormatInt(int64(g.GroupID), 10), string(data))
+		st.rdb.HSet(rediskeys.GetRankGroupsKey(st.bizId), strconv.FormatInt(int64(g.GroupID), 10), string(data))
 	}
 	return groups, nil
 }
@@ -112,11 +108,66 @@ func (st *Store) NextGroupID() (int32, error) {
 	if !st.available() {
 		return 0, fmt.Errorf("store not available")
 	}
-	val, err := st.rdb.HIncrBy(rediskeys.GetBalloonMetaKey(st.bizId), "nextGroupID", 1)
+	val, err := st.rdb.HIncrBy(rediskeys.GetRankMetaKey(st.bizId), "nextGroupID", 1)
 	if err != nil {
 		return 0, err
 	}
 	return int32(val), nil
+}
+
+// SaveActivityTimes 将活动的 openTime / closeTime 写入 meta hash，用于重启后的 Redis 恢复。
+func (st *Store) SaveActivityTimes(openTime, closeTime int64) {
+	if !st.available() {
+		return
+	}
+	key := rediskeys.GetRankMetaKey(st.bizId)
+	st.rdb.HSet(key, "openTime", strconv.FormatInt(openTime, 10))
+	st.rdb.HSet(key, "closeTime", strconv.FormatInt(closeTime, 10))
+}
+
+// LoadActivityTimes 从 meta hash 读取活动的 openTime / closeTime。
+// ok=false 表示数据不存在或不完整。
+func (st *Store) LoadActivityTimes() (openTime, closeTime int64, ok bool) {
+	if !st.available() {
+		return
+	}
+	key := rediskeys.GetRankMetaKey(st.bizId)
+	fields, err := st.rdb.HGetAll(key)
+	if err != nil || len(fields) == 0 {
+		return
+	}
+	openTime, _ = strconv.ParseInt(fields["openTime"], 10, 64)
+	closeTime, _ = strconv.ParseInt(fields["closeTime"], 10, 64)
+	ok = openTime > 0 && closeTime > 0
+	return
+}
+
+// RestoreNextGroupID 确保 rank:meta 中的 nextGroupID 计数器 ≥ minID。
+// Redis 被清理后 nextGroupID 为 0，新分组 HIncrBy 返回 1，可能与已有分组冲突。
+func (st *Store) RestoreNextGroupID(minID int32) {
+	if !st.available() || minID <= 0 {
+		return
+	}
+	key := rediskeys.GetRankMetaKey(st.bizId)
+	cur, _ := st.rdb.HGet(key, "nextGroupID")
+	curID, _ := strconv.ParseInt(cur, 10, 32)
+	if int32(curID) < minID {
+		st.rdb.HSet(key, "nextGroupID", strconv.FormatInt(int64(minID), 10))
+	}
+}
+
+// RestoreSettled 将结算快照强制写入 Redis rank:settled 键（冷启动恢复用）。
+// 使 rankService.GetMemRank 在 Redis 恢复后能正确读取结算数据。
+func (st *Store) RestoreSettled(instanceID string, snaps []commonrank.RankMemberSnapshot) {
+	if !st.available() || len(snaps) == 0 {
+		return
+	}
+	data, err := json.Marshal(snaps)
+	if err != nil {
+		zaplog.LoggerSugar.Warnf("balloon: marshal settled for restore instanceID=%s: %v", instanceID, err)
+		return
+	}
+	_ = st.rdb.Set(rediskeys.GetRankSettledKey(instanceID), string(data))
 }
 
 // --- 成员映射 ---
@@ -125,7 +176,7 @@ func (st *Store) SetMember(userID int64, groupID int32) error {
 	if !st.available() {
 		return nil
 	}
-	st.rdb.HSet(rediskeys.GetBalloonMembersKey(st.bizId), strconv.FormatInt(userID, 10), strconv.FormatInt(int64(groupID), 10))
+	st.rdb.HSet(rediskeys.GetRankMembersKey(st.bizId), strconv.FormatInt(userID, 10), strconv.FormatInt(int64(groupID), 10))
 
 	if st.hasMongo() {
 		st.dao.SaveMember(st.bizId, userID, groupID)
@@ -138,7 +189,7 @@ func (st *Store) GetMember(userID int64) (int32, bool, error) {
 		return 0, false, nil
 	}
 	uidStr := strconv.FormatInt(userID, 10)
-	raw, err := st.rdb.HGet(rediskeys.GetBalloonMembersKey(st.bizId), uidStr)
+	raw, err := st.rdb.HGet(rediskeys.GetRankMembersKey(st.bizId), uidStr)
 	if err == nil {
 		if raw == nullCacheEntry {
 			return 0, false, nil // 负向缓存命中：跳过 MongoDB
@@ -157,11 +208,11 @@ func (st *Store) GetMember(userID int64) (int32, bool, error) {
 			return 0, false, err
 		}
 		if found {
-			st.rdb.HSet(rediskeys.GetBalloonMembersKey(st.bizId), uidStr, strconv.FormatInt(int64(gid), 10))
+			st.rdb.HSet(rediskeys.GetRankMembersKey(st.bizId), uidStr, strconv.FormatInt(int64(gid), 10))
 			return gid, true, nil
 		}
 		// MongoDB 未找到：写入负向缓存，防止同一用户重复查 MongoDB
-		st.rdb.HSet(rediskeys.GetBalloonMembersKey(st.bizId), uidStr, nullCacheEntry)
+		st.rdb.HSet(rediskeys.GetRankMembersKey(st.bizId), uidStr, nullCacheEntry)
 	}
 	return 0, false, nil
 }
@@ -170,7 +221,7 @@ func (st *Store) GetAllMembers() (map[int64]int32, error) {
 	if !st.available() {
 		return nil, nil
 	}
-	raw, err := st.rdb.HGetAll(rediskeys.GetBalloonMembersKey(st.bizId))
+	raw, err := st.rdb.HGetAll(rediskeys.GetRankMembersKey(st.bizId))
 	if err == nil && len(raw) > 0 {
 		result := make(map[int64]int32, len(raw))
 		for k, v := range raw {
@@ -203,7 +254,7 @@ func (st *Store) GetAllMembers() (map[int64]int32, error) {
 		return nil, nil
 	}
 	for uid, gid := range members {
-		st.rdb.HSet(rediskeys.GetBalloonMembersKey(st.bizId), strconv.FormatInt(uid, 10), strconv.FormatInt(int64(gid), 10))
+		st.rdb.HSet(rediskeys.GetRankMembersKey(st.bizId), strconv.FormatInt(uid, 10), strconv.FormatInt(int64(gid), 10))
 	}
 	return members, nil
 }
@@ -214,7 +265,7 @@ func (st *Store) SaveRobots(groupID int32, robots []*robotState) error {
 	if !st.available() || len(robots) == 0 {
 		return nil
 	}
-	key := rediskeys.GetBalloonRobotsKey(st.bizId, groupID)
+	key := rediskeys.GetRankRobotsKey(st.bizId, groupID)
 	for _, r := range robots {
 		data, _ := json.Marshal(r)
 		st.rdb.HSet(key, strconv.FormatInt(r.MemberID, 10), string(data))
@@ -230,7 +281,7 @@ func (st *Store) LoadRobots(groupID int32) ([]*robotState, error) {
 	if !st.available() {
 		return nil, nil
 	}
-	key := rediskeys.GetBalloonRobotsKey(st.bizId, groupID)
+	key := rediskeys.GetRankRobotsKey(st.bizId, groupID)
 	raw, err := st.rdb.HGetAll(key)
 	if err == nil && len(raw) > 0 {
 		robots := make([]*robotState, 0, len(raw))
@@ -265,7 +316,7 @@ func (st *Store) SaveUsedInfoIDs(groupID int32, ids map[int64]struct{}) error {
 	for id := range ids {
 		members = append(members, strconv.FormatInt(int64(id), 10))
 	}
-	st.rdb.SAdd(rediskeys.GetBalloonRobotInfosKey(st.bizId, groupID), members...)
+	st.rdb.SAdd(rediskeys.GetRankRobotInfosKey(st.bizId, groupID), members...)
 	return nil
 }
 
@@ -273,7 +324,7 @@ func (st *Store) LoadUsedInfoIDs(groupID int32) (map[int64]struct{}, error) {
 	if !st.available() {
 		return nil, nil
 	}
-	raw, err := st.rdb.SMembers(rediskeys.GetBalloonRobotInfosKey(st.bizId, groupID))
+	raw, err := st.rdb.SMembers(rediskeys.GetRankRobotInfosKey(st.bizId, groupID))
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +345,7 @@ func (st *Store) UpdateMaxScore(groupID int32, score int64) error {
 	if !st.available() {
 		return nil
 	}
-	key := rediskeys.GetBalloonMaxScoreKey(st.bizId)
+	key := rediskeys.GetRankMaxScoreKey(st.bizId)
 	field := strconv.FormatInt(int64(groupID), 10)
 	cur, err := st.rdb.HGet(key, field)
 	if err != nil && !st.rdb.IsNil(err) {
@@ -313,7 +364,7 @@ func (st *Store) GetMaxScore(groupID int32) (int64, error) {
 	if !st.available() {
 		return 0, nil
 	}
-	raw, err := st.rdb.HGet(rediskeys.GetBalloonMaxScoreKey(st.bizId), strconv.FormatInt(int64(groupID), 10))
+	raw, err := st.rdb.HGet(rediskeys.GetRankMaxScoreKey(st.bizId), strconv.FormatInt(int64(groupID), 10))
 	if err != nil {
 		if st.rdb.IsNil(err) {
 			return 0, nil
@@ -333,18 +384,18 @@ func (st *Store) CleanupAll(groups []*Group) {
 			groups = loaded
 		}
 	}
-	st.rdb.Del(rediskeys.GetBalloonMetaKey(st.bizId))
-	st.rdb.Del(rediskeys.GetBalloonGroupsKey(st.bizId))
-	st.rdb.Del(rediskeys.GetBalloonMembersKey(st.bizId))
-	st.rdb.Del(rediskeys.GetBalloonMaxScoreKey(st.bizId))
-	st.rdb.Del(rediskeys.GetBalloonClaimsKey(st.bizId))
-	st.rdb.Del(mongoCheckedKey(st.bizId))
+	st.rdb.Del(rediskeys.GetRankMetaKey(st.bizId))
+	st.rdb.Del(rediskeys.GetRankGroupsKey(st.bizId))
+	st.rdb.Del(rediskeys.GetRankMembersKey(st.bizId))
+	st.rdb.Del(rediskeys.GetRankMaxScoreKey(st.bizId))
+	st.rdb.Del(rediskeys.GetRankClaimsKey(st.bizId))
+	st.rdb.Del(rediskeys.GetRankMongoCheckedKey(st.bizId))
 	for _, g := range groups {
 		if g == nil {
 			continue
 		}
-		st.rdb.Del(rediskeys.GetBalloonRobotsKey(st.bizId, g.GroupID))
-		st.rdb.Del(rediskeys.GetBalloonRobotInfosKey(st.bizId, g.GroupID))
+		st.rdb.Del(rediskeys.GetRankRobotsKey(st.bizId, g.GroupID))
+		st.rdb.Del(rediskeys.GetRankRobotInfosKey(st.bizId, g.GroupID))
 	}
 	// 删除 MongoDB 中该活动的全部关联文档。
 	if st.hasMongo() {
@@ -360,7 +411,7 @@ func (st *Store) SetClaim(userID int64, claimTime int64) error {
 	if !st.available() {
 		return nil
 	}
-	st.rdb.HSet(rediskeys.GetBalloonClaimsKey(st.bizId),
+	st.rdb.HSet(rediskeys.GetRankClaimsKey(st.bizId),
 		strconv.FormatInt(userID, 10),
 		strconv.FormatInt(claimTime, 10))
 
@@ -375,7 +426,7 @@ func (st *Store) GetClaim(userID int64) (int64, bool, error) {
 		return 0, false, nil
 	}
 	uidStr := strconv.FormatInt(userID, 10)
-	raw, err := st.rdb.HGet(rediskeys.GetBalloonClaimsKey(st.bizId), uidStr)
+	raw, err := st.rdb.HGet(rediskeys.GetRankClaimsKey(st.bizId), uidStr)
 	if err == nil {
 		if raw == nullCacheEntry {
 			return 0, false, nil // 负向缓存命中：跳过 MongoDB
@@ -394,11 +445,74 @@ func (st *Store) GetClaim(userID int64) (int64, bool, error) {
 			return 0, false, err
 		}
 		if found {
-			st.rdb.HSet(rediskeys.GetBalloonClaimsKey(st.bizId), uidStr, strconv.FormatInt(t, 10))
+			st.rdb.HSet(rediskeys.GetRankClaimsKey(st.bizId), uidStr, strconv.FormatInt(t, 10))
 			return t, true, nil
 		}
 		// MongoDB 未找到：写入负向缓存，防止同一用户重复查 MongoDB
-		st.rdb.HSet(rediskeys.GetBalloonClaimsKey(st.bizId), uidStr, nullCacheEntry)
+		st.rdb.HSet(rediskeys.GetRankClaimsKey(st.bizId), uidStr, nullCacheEntry)
 	}
 	return 0, false, nil
+}
+
+// --- 成员积分持久化 ---
+
+// SaveScore 将成员积分写入 MongoDB（write-through）。
+// enterTime 和 sequence 仅在首次插入时设置（$setOnInsert），避免恢复时覆盖原始进榜时间和序号。
+func (st *Store) SaveScore(groupID int32, userID int64, score int64, enterTime int64, sequence int64, updateTime int64, avatarInfo *commonrank.AvatarInfo) error {
+	if !st.hasMongo() {
+		return nil
+	}
+	return st.dao.SaveScore(st.bizId, groupID, userID, score, enterTime, sequence, updateTime, avatarInfo)
+}
+
+// LoadGroupScores 从 MongoDB 加载指定分组的全部成员积分。
+func (st *Store) LoadGroupScores(groupID int32) ([]ScoreDoc, error) {
+	if !st.hasMongo() {
+		return nil, nil
+	}
+	return st.dao.LoadGroupScores(st.bizId, groupID)
+}
+
+// RdbExists 检查 Redis 键是否存在（用于冷启动恢复时判断 rank:mb 是否缺失）。
+func (st *Store) RdbExists(key string) (bool, error) {
+	if !st.available() {
+		return false, nil
+	}
+	return st.rdb.Exists(key)
+}
+
+// --- 结算快照持久化 ---
+
+// SaveSettled 将结算快照写入 MongoDB。
+func (st *Store) SaveSettled(groupID int32, snaps []commonrank.RankMemberSnapshot, settleTime int64) error {
+	if !st.hasMongo() {
+		return nil
+	}
+	return st.dao.SaveSettled(st.bizId, groupID, snaps, settleTime)
+}
+
+// LoadGroupSettled 从 MongoDB 加载指定分组的结算快照。
+func (st *Store) LoadGroupSettled(groupID int32) ([]commonrank.RankMemberSnapshot, error) {
+	if !st.hasMongo() {
+		return nil, nil
+	}
+	return st.dao.LoadGroupSettled(st.bizId, groupID)
+}
+
+// --- 榜单实例元数据持久化 ---
+
+// SaveRankInst 异步将榜单实例元数据写入 MongoDB（rank:inst 持久化备份）。
+func (st *Store) SaveRankInst(groupID int32, inst commonrank.RankInstance) error {
+	if !st.hasMongo() {
+		return nil
+	}
+	return st.dao.SaveRankInst(st.bizId, groupID, inst)
+}
+
+// LoadGroupInst 从 MongoDB 加载指定分组的榜单实例元数据。未找到时返回 nil, nil。
+func (st *Store) LoadGroupInst(groupID int32) (*commonrank.RankInstance, error) {
+	if !st.hasMongo() {
+		return nil, nil
+	}
+	return st.dao.LoadGroupInst(st.bizId, groupID)
 }

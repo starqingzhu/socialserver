@@ -16,7 +16,7 @@ func (s *Service) spawnRobotsForGroup(ctx context.Context, groupID int32, capaci
 	}
 
 	instanceID := s.groupInstanceID(groupID)
-	if err := s.ensureGroupInstance(ctx, instanceID, now); err != nil {
+	if err := s.ensureGroupInstance(ctx, instanceID, groupID, now); err != nil {
 		return fmt.Errorf("ensure group instance: %w", err)
 	}
 

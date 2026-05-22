@@ -8,7 +8,7 @@ type GroupState string
 const (
 	GroupStateOpen    GroupState = "open"    // 接受新成员加入
 	GroupStateFull    GroupState = "full"    // 已达人数上限，不再接受新成员
-	GroupStateSettled GroupState = "settled" // 已结算，排名固化
+	GroupStateSettled GroupState = "settled" // 结算，排名固化
 )
 
 // Config 排行榜业务配置。
@@ -47,7 +47,7 @@ func WithOnMemberJoin(fn func(userID int64, groupID int32)) Option {
 // Group 业务层分组信息。
 type Group struct {
 	GroupID    int32      `json:"groupId" bson:"groupId"`
-	InstanceID string    `json:"instanceId" bson:"instanceId"`
+	InstanceID string     `json:"instanceId" bson:"instanceId"`
 	RealCount  int32      `json:"realCount" bson:"realCount"`
 	RobotCount int32      `json:"robotCount" bson:"robotCount"`
 	State      GroupState `json:"state" bson:"state"`

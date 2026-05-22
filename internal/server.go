@@ -7,8 +7,10 @@ import (
 	"common/configmgr"
 	"common/defines"
 	cetcd "common/etcd"
+	mongoTask "common/task/mongo"
 	mongodbmodule "golib/mongodb"
 	"golib/node"
+	"golib/queue"
 	"golib/redis"
 	"golib/utils"
 	"golib/yamlcfg"
@@ -118,6 +120,11 @@ func (s *Server) OnInit() {
 		zaplog.LoggerSugar.Fatalf("OnInit: load configs failed: %v", err)
 	}
 
+	if err := queue.InitQueues(); err != nil {
+		zaplog.LoggerSugar.Fatalf("OnInit: init queues failed: %v", err)
+	}
+	mongoTask.Init(mongodbmodule.Main.TakeSession(), config.Default.MongoCfg.Database)
+
 	if err := rankservice.InitGlobalManager(redis.Main, config.Default.MongoCfg.Database); err != nil {
 		zaplog.LoggerSugar.Fatalf("init rank manager failed: %v", err)
 	}
@@ -134,6 +141,9 @@ func (s *Server) OnClose() {
 	}
 	rpcservice.Close()
 	cetcd.Close()
+	if e := queue.Shutdown(); e != nil {
+		zaplog.LoggerSugar.Error("queue shutdown err:", e)
+	}
 	if redis.Main != nil {
 		if e := redis.Main.Close(); e != nil {
 			zaplog.LoggerSugar.Error("redis close err:", e)

@@ -2,8 +2,9 @@ package rankservice
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,6 +49,9 @@ func InitGlobalManager(rdb *goredis.Redis, dbName string) error {
 	}
 	// 从 Redis 补充注册（应对 MongoDB 中未存储或节点重启时 Redis 中已有排行榜数据的情况）
 	manager.syncFromRedis(context.Background())
+	// 预热所有服务：并发触发 ensureLoaded，确保冷启动后 Redis 数据完整恢复，
+	// 而非等待各服务收到第一个玩家请求才懒加载。
+	manager.warmUpAllServices(context.Background())
 	globalManager = manager
 	zaplog.LoggerSugar.Infof("rank global manager initialized")
 	return nil
@@ -112,7 +116,6 @@ func (m *Manager) registerBalloon(ctx context.Context, cfg balloon.Config) (*bal
 			zaplog.LoggerSugar.Errorf("rank: persist rank config %s to mongodb failed: %v", key, err)
 		}
 	}
-	m.saveConfigToRedis(key, cfg)
 
 	return service, nil
 }
@@ -167,7 +170,6 @@ func (m *Manager) UpdateService(bizType BizType, actID int32, cfg balloon.Config
 			zaplog.LoggerSugar.Errorf("rank: persist rank config %s to mongodb failed: %v", key, err)
 		}
 	}
-	m.saveConfigToRedis(key, updated)
 	return nil
 }
 
@@ -199,7 +201,6 @@ func (m *Manager) RemoveService(bizType BizType, actID int32) error {
 	if m.dao != nil {
 		m.dao.DeleteRankConfig(key)
 	}
-	m.deleteConfigFromRedis(key)
 	return nil
 }
 
@@ -291,6 +292,8 @@ func (m *Manager) Tick(ctx context.Context, now int64) error {
 		m.syncFromMongo(ctx)
 		// Redis 补充注册：应对 syncFromMongo 取不到 MongoDB 数据时 Redis 中仍有排行榜配置的场景
 		m.syncFromRedis(ctx)
+		// 预热本次周期同步中新增的服务（其 ensureLoaded 尚未执行）
+		m.warmUpAllServices(ctx)
 	}
 
 	m.mu.RLock()
@@ -307,37 +310,18 @@ func (m *Manager) Tick(ctx context.Context, now int64) error {
 	return nil
 }
 
-// saveConfigToRedis 将活动配置序列化写入 Redis，供其他节点或重启后恢复注册使用。
-func (m *Manager) saveConfigToRedis(bizKey string, cfg balloon.Config) {
-	if m.rdb == nil {
-		return
-	}
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		zaplog.LoggerSugar.Warnf("rank: marshal config for redis %s: %v", bizKey, err)
-		return
-	}
-	if err := m.rdb.Set(rediskeys.GetBalloonConfigKey(bizKey), string(data)); err != nil {
-		zaplog.LoggerSugar.Warnf("rank: save config to redis %s: %v", bizKey, err)
-	}
-}
-
-// deleteConfigFromRedis 从 Redis 删除活动配置。
-func (m *Manager) deleteConfigFromRedis(bizKey string) {
-	if m.rdb == nil {
-		return
-	}
-	m.rdb.Del(rediskeys.GetBalloonConfigKey(bizKey))
-}
-
-// syncFromRedis 扫描 Redis 中的活动配置，将本节点内存中缺失的服务注册上来。
-// 这是 syncFromMongo 的补充路径，在 MongoDB 不可用或配置仅存于 Redis 时生效。
+// syncFromRedis 通过扫描 Redis 运行时数据（rank:meta:*）发现已有活动，
+// 将内存中缺失的服务重新注册。这是 syncFromMongo 的补充路径：
+// 仅在 MongoDB 不可用（或本节点刚重启、数据未同步完）时发挥作用。
+// 配置字段从 meta hash 中恢复 openTime/closeTime，无需依赖 rank:inst:{...:main}。
 // 仅做新增，不做删除（删除由 syncFromMongo 负责）。
 func (m *Manager) syncFromRedis(ctx context.Context) {
 	if m.rdb == nil {
 		return
 	}
-	keys, err := m.rdb.Keys(rediskeys.BalloonConfigKeyPrefix + ":*")
+	// 通过 rank:meta:* 发现 Redis 中存有运行时数据的活动
+	prefix := rediskeys.RankMetaKeyPrefix + ":{"
+	keys, err := m.rdb.Keys(prefix + "*}")
 	if err != nil {
 		zaplog.LoggerSugar.Warnf("rank: syncFromRedis scan keys: %v", err)
 		return
@@ -349,27 +333,26 @@ func (m *Manager) syncFromRedis(ctx context.Context) {
 	now := time.Now().UnixMilli()
 	added := 0
 	for _, key := range keys {
-		raw, err := m.rdb.Get(key)
+		// 从 "rank:meta:{balloon_1068}" 中提取 bizId "balloon_1068"
+		bizId := strings.TrimPrefix(key, prefix)
+		bizId = strings.TrimSuffix(bizId, "}")
+		if bizId == "" {
+			continue
+		}
+
+		// 解析 bizId "balloon_1068" → BizType="balloon", actID=1068
+		sep := strings.LastIndex(bizId, "_")
+		if sep <= 0 {
+			continue
+		}
+		actIDInt, err := strconv.ParseInt(bizId[sep+1:], 10, 32)
 		if err != nil {
 			continue
 		}
-		var cfg balloon.Config
-		if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
-			zaplog.LoggerSugar.Warnf("rank: syncFromRedis unmarshal config key=%s: %v", key, err)
-			continue
-		}
-		// 跳过过期活动（超过关闭时间 24h）
-		if cfg.CloseTime > 0 && now > cfg.CloseTime+86400_000 {
-			continue
-		}
+		bizType := BizType(bizId[:sep])
+		actID := int32(actIDInt)
 
-		bizType := BizType(cfg.BizType)
-		if bizType == "" {
-			bizType = BizTypeBalloon
-			cfg.BizType = string(bizType)
-		}
-		bizKey := NewBizKey(bizType, cfg.ActID).String()
-
+		bizKey := NewBizKey(bizType, actID).String()
 		m.mu.RLock()
 		_, exists := m.balloonServices[bizKey]
 		m.mu.RUnlock()
@@ -377,18 +360,38 @@ func (m *Manager) syncFromRedis(ctx context.Context) {
 			continue
 		}
 
-		// 使用最新配置文件参数覆盖（RankPeopleNum、OpenToken、机器人配置等可能随版本更新）
+		// 从 meta hash 中读取 openTime / closeTime（由 NewService 写入）
+		tmpStore := balloon.NewStore(m.rdb, nil, bizId)
+		openTime, closeTime, ok := tmpStore.LoadActivityTimes()
+		if !ok {
+			// meta hash 缺少活动时间数据，跳过（数据不完整）
+			continue
+		}
+
+		// 跳过超过关闭时间 24h 的过期活动
+		if closeTime > 0 && now > closeTime+86400_000 {
+			continue
+		}
+
+		rankCode := fmt.Sprintf("%s_score_%d", bizType, actID)
+		cfg := balloon.Config{
+			BizType:   string(bizType),
+			ActID:     actID,
+			RankCode:  rankCode,
+			OpenTime:  openTime,
+			CloseTime: closeTime,
+			// AutoSettle 无法从 Redis 运行时数据恢复，默认 false（安全默认：不自动结算）
+		}
+
+		// 从本地配置文件填充 RankPeopleNum / OpenToken / RobotTiers / RobotInfos
 		if err := FillConfigFromFiles(bizType, &cfg); err != nil {
 			zaplog.LoggerSugar.Warnf("rank: syncFromRedis fill config %s: %v", bizKey, err)
 		}
 
-		if cfg.RankCode == "" {
-			cfg.RankCode = fmt.Sprintf("%s_score_%d", bizType, cfg.ActID)
-		}
-
+		// 确保 rank 定义存在（正常情况下 rank:def:{rankCode} 已在 Redis 中，此处为容错）
 		if err := m.rankService.RegisterRank(ctx, commonrank.Rank{
 			RankCode:       cfg.RankCode,
-			RankName:       fmt.Sprintf("%s_rank_%d", bizType, cfg.ActID),
+			RankName:       fmt.Sprintf("%s_rank_%d", bizType, actID),
 			ScoreOrder:     commonrank.ScoreOrderDesc,
 			TieBreakPolicy: commonrank.TieBreakPolicyFirstEnter,
 			CreateTime:     cfg.OpenTime,
@@ -398,10 +401,12 @@ func (m *Manager) syncFromRedis(ctx context.Context) {
 			continue
 		}
 
+		localBizType := bizType
+		localActID := actID
 		onMemberJoin := func(userID int64, groupID int32) {
 			m.memberIndex.Track(userID, MemberEntry{
-				BizType: bizType,
-				ActID:   cfg.ActID,
+				BizType: localBizType,
+				ActID:   localActID,
 				GroupID: groupID,
 			})
 		}
@@ -424,6 +429,31 @@ func (m *Manager) syncFromRedis(ctx context.Context) {
 	if added > 0 {
 		zaplog.LoggerSugar.Infof("rank: syncFromRedis completed, added=%d", added)
 	}
+}
+
+// warmUpAllServices 并发调用所有已注册服务的 WarmUp，
+// 在启动时主动触发 ensureLoaded，确保 Redis 数据完整恢复。
+// 在 syncFromMongo + syncFromRedis 之后调用。
+func (m *Manager) warmUpAllServices(ctx context.Context) {
+	m.mu.RLock()
+	svcs := make([]*balloon.Service, 0, len(m.balloonServices))
+	for _, svc := range m.balloonServices {
+		svcs = append(svcs, svc)
+	}
+	m.mu.RUnlock()
+	if len(svcs) == 0 {
+		return
+	}
+	var wg sync.WaitGroup
+	for _, svc := range svcs {
+		wg.Add(1)
+		go func(s *balloon.Service) {
+			defer wg.Done()
+			s.WarmUp(ctx)
+		}(svc)
+	}
+	wg.Wait()
+	zaplog.LoggerSugar.Infof("rank: warmUpAllServices completed, services=%d", len(svcs))
 }
 
 // syncFromMongo 从 MongoDB 同步活动列表：新增本节点缺少的、移除 MongoDB 中已删除的。
@@ -477,6 +507,10 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 		// 新增：本节点没有，从 MongoDB 恢复
 		if cfg.RankCode == "" {
 			cfg.RankCode = fmt.Sprintf("%s_score_%d", bizType, cfg.ActID)
+		}
+		// MongoDB 中不存储 RobotTiers/RobotInfos（可从本地配置文件恢复），此处补全。
+		if err := FillConfigFromFiles(bizType, &cfg); err != nil {
+			zaplog.LoggerSugar.Warnf("rank: syncFromMongo fill config %s: %v", key, err)
 		}
 
 		if err := m.rankService.RegisterRank(ctx, commonrank.Rank{
