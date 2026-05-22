@@ -56,7 +56,7 @@ func NewService(rankService rank.Service, config Config, rdb *goredis.Redis, dao
 		opt(s)
 	}
 	// 将活动时间写入 meta hash，以便节点重启后通过 syncFromRedis 恢复。
-	s.store.SaveActivityTimes(config.OpenTime, config.CloseTime)
+	s.store.SaveActivityTimes(config.OpenTime, config.CloseTime, config.GameEndTime)
 	return s, nil
 }
 
@@ -215,6 +215,7 @@ func (s *Service) ensureLoaded() {
 					State:       rank.InstanceStateOpen,
 					OpenTime:    s.config.OpenTime,
 					CloseTime:   s.config.CloseTime,
+					GameEndTime: s.config.GameEndTime,
 					CreateTime:  s.config.OpenTime,
 					UpdateTime:  s.config.OpenTime,
 					MemberCount: int64(len(items)),
@@ -234,7 +235,7 @@ func (s *Service) ensureLoaded() {
 				// 方向1：rank:settled 存在，但 MongoDB 可能缺失 → backfill
 				if mongoSettled, err := s.store.LoadGroupSettled(g.GroupID); err == nil && len(mongoSettled) == 0 {
 					if snaps, snapErr := s.rankService.Snapshot(ctx, instanceID); snapErr == nil && len(snaps) > 0 {
-						if wErr := s.store.SaveSettled(g.GroupID, snaps, g.SettleTime); wErr != nil {
+						if wErr := s.store.SaveSettled(g.GroupID, snaps, s.config.GameEndTime); wErr != nil {
 							zaplog.LoggerSugar.Warnf("balloon: backfill settled group=%d: %v", g.GroupID, wErr)
 						}
 					}
@@ -254,9 +255,10 @@ func (s *Service) ensureLoaded() {
 							State:       rank.InstanceStateSettled,
 							OpenTime:    s.config.OpenTime,
 							CloseTime:   s.config.CloseTime,
-							SettleTime:  g.SettleTime,
+							GameEndTime: s.config.GameEndTime,
+							SettleTime:  s.config.GameEndTime,
 							CreateTime:  s.config.OpenTime,
-							UpdateTime:  g.SettleTime,
+							UpdateTime:  s.config.GameEndTime,
 							MemberCount: int64(len(snaps)),
 							Version:     1,
 						}
@@ -364,6 +366,7 @@ func (s *Service) recoverGroupData(ctx context.Context, groupID int32, instanceI
 			State:       rank.InstanceStateOpen,
 			OpenTime:    s.config.OpenTime,
 			CloseTime:   s.config.CloseTime,
+			GameEndTime: s.config.GameEndTime,
 			CreateTime:  s.config.OpenTime,
 			UpdateTime:  s.config.OpenTime,
 			MemberCount: int64(len(items)),
@@ -378,33 +381,71 @@ func (s *Service) recoverGroupData(ctx context.Context, groupID int32, instanceI
 }
 
 // stateAt 根据活动配置时间返回当前活动状态，无需 Redis 写操作。
+// CloseTime=0 表示未设置关闭时间，活动保持 open 直到显式关闭。
 func (s *Service) stateAt(now int64) rank.InstanceStateType {
-	if now < s.config.OpenTime {
+	if s.config.OpenTime > 0 && now < s.config.OpenTime {
 		return rank.InstanceStateInit
 	}
-	if now < s.config.CloseTime {
-		return rank.InstanceStateOpen
+	if s.config.CloseTime > 0 && now >= s.config.CloseTime {
+		return rank.InstanceStateClosed
 	}
-	return rank.InstanceStateClosed
+	return rank.InstanceStateOpen
+}
+
+func (s *Service) canUpdateScore(now int64) rank.InstanceStateType {
+	if s.config.OpenTime > 0 && now < s.config.OpenTime {
+		return rank.InstanceStateInit
+	}
+	if s.config.CloseTime > 0 && now >= s.config.CloseTime {
+		return rank.InstanceStateClosed
+	}
+
+	if now > s.config.GameEndTime && s.config.GameEndTime > 0 {
+		return rank.InstanceStateSettled
+	}
+	return rank.InstanceStateOpen
 }
 
 // Tick 推进活动时间轴：
-// 1. 驱动所有活跃分组内的机器人积分增长。
-// 2. 到期时若 AutoSettle=true 则自动结算。
+// 1. 驱动所有活跃分组内的机器人积分增长（CloseTime 前）。
+// 2. 到达 GameEndTime（若未设置则退化为 CloseTime）后自动结算。
 func (s *Service) Tick(ctx context.Context, now int64) error {
 
 	s.mu.Lock()
 	s.ensureLoaded()
 	s.mu.Unlock()
 
-	if s.config.hasRobots() {
+	// 活动关闭前推进机器人积分；关闭后机器人停止增长，无需再 tick。
+	if s.config.hasRobots() && now < s.config.CloseTime {
 		s.tickAllRobots(ctx, now)
 	}
 
-	if now < s.config.CloseTime || !s.config.AutoSettle {
+	// 到达玩法结束时间后自动结算（幂等，已结算的分组会被跳过）。
+	// GameEndTime 为 0 时退化为 CloseTime，保持向后兼容。
+	settleAt := s.config.GameEndTime
+	if settleAt == 0 {
+		settleAt = s.config.CloseTime
+	}
+	if now < settleAt {
 		return nil
 	}
-	_, err := s.Settle(ctx, now)
+
+	// 到达玩法结束时间：先将所有活跃分组的榜单实例推进到 closed 状态，
+	// 确保 rank:inst 中的状态字段及时更新，不再接受新的得分写入。
+	s.mu.Lock()
+	groups := make([]*Group, len(s.groups))
+	copy(groups, s.groups)
+	s.mu.Unlock()
+	for _, g := range groups {
+		if g == nil || g.State == GroupStateSettled {
+			continue
+		}
+		if err := s.rankService.CloseInstance(ctx, g.InstanceID, settleAt); err != nil && err != rank.ErrInstanceNotFound {
+			zaplog.LoggerSugar.Warnf("balloon: tick close instance group=%d: %v", g.GroupID, err)
+		}
+	}
+
+	_, err := s.Settle(ctx)
 	return err
 }
 
@@ -412,12 +453,18 @@ func (s *Service) Tick(ctx context.Context, now int64) error {
 //   - 分数低于 OpenToken 门槛时忽略。
 //   - 自动分配用户到当前可用分组（或创建新分组）。
 //   - 首位真实玩家进入分组时自动生成机器人。
-//   - 活动已关闭或实例未开放时返回 ErrInstanceNotOpen。
+//   - 活动尚未开放时返回 ErrInstanceNotOpen。
+//   - 活动已结算或已关闭时返回 ErrInstanceClosed。
 func (s *Service) UpsertScore(ctx context.Context, userID int64, totalScore int64, now int64, avatarInfo *rank.AvatarInfo) error {
 	// if totalScore < s.config.OpenToken {
 	// 	return nil
 	// }
-	if s.stateAt(now) != rank.InstanceStateOpen {
+	switch s.canUpdateScore(now) {
+	case rank.InstanceStateOpen:
+		// ok
+	case rank.InstanceStateClosed, rank.InstanceStateSettled:
+		return rank.ErrInstanceClosed
+	default:
 		return rank.ErrInstanceNotOpen
 	}
 
@@ -572,7 +619,13 @@ func (s *Service) GetMemberRank(ctx context.Context, userID int64) (*rank.RankMe
 }
 
 // Settle 对所有未结算分组执行最终结算，返回各分组快照。幂等。
-func (s *Service) Settle(ctx context.Context, now int64) (map[int32][]rank.RankMemberSnapshot, error) {
+// 结算时间固定为配置的 GameEndTime（未设置时退化为 CloseTime），不依赖调用时刻。
+func (s *Service) Settle(ctx context.Context) (map[int32][]rank.RankMemberSnapshot, error) {
+	settleAt := s.config.GameEndTime
+	if settleAt == 0 {
+		settleAt = s.config.CloseTime
+	}
+
 	s.mu.Lock()
 	s.ensureLoaded()
 	groups := make([]*Group, len(s.groups))
@@ -584,12 +637,18 @@ func (s *Service) Settle(ctx context.Context, now int64) (map[int32][]rank.RankM
 		if group == nil || group.State == GroupStateSettled {
 			continue
 		}
-		if err := s.rankService.CloseInstance(ctx, group.InstanceID, s.config.CloseTime); err != nil && err != rank.ErrInstanceNotFound {
+		if err := s.rankService.CloseInstance(ctx, group.InstanceID, settleAt); err != nil && err != rank.ErrInstanceNotFound {
 			return nil, err
 		}
-		members, err := s.rankService.SettleInstance(ctx, group.InstanceID, now)
+		members, err := s.rankService.SettleInstance(ctx, group.InstanceID, settleAt)
 		if err != nil {
 			if err == rank.ErrInstanceNotFound {
+				// 底层榜单实例不存在（从未有成员加入），仍需将分组标记为已结算，
+				// 避免 Tick 在 GameEndTime 后反复重试。
+				s.mu.Lock()
+				group.State = GroupStateSettled
+				_ = s.store.SaveGroup(group)
+				s.mu.Unlock()
 				continue
 			}
 			return nil, err
@@ -598,13 +657,12 @@ func (s *Service) Settle(ctx context.Context, now int64) (map[int32][]rank.RankM
 
 		s.mu.Lock()
 		group.State = GroupStateSettled
-		group.SettleTime = now
 		s.settledGroup[group.GroupID] = cloneSnapshots(members)
 		_ = s.store.SaveGroup(group)
 		s.mu.Unlock()
 
 		// 将结算快照写入 MongoDB（write-through，冷启动后可从 MongoDB 恢复 rank:settled）。
-		if err := s.store.SaveSettled(group.GroupID, cloneSnapshots(members), now); err != nil {
+		if err := s.store.SaveSettled(group.GroupID, cloneSnapshots(members), settleAt); err != nil {
 			zaplog.LoggerSugar.Warnf("balloon: save settled to mongo group=%d: %v", group.GroupID, err)
 		}
 		// 更新 MongoDB 中的实例元数据（State → Settled，SettleTime 已填入）。
@@ -711,6 +769,9 @@ func (s *Service) UpdateConfig(cfg Config) {
 	}
 	if cfg.CloseTime > 0 {
 		s.config.CloseTime = cfg.CloseTime
+	}
+	if cfg.GameEndTime > 0 {
+		s.config.GameEndTime = cfg.GameEndTime
 	}
 	s.config.AutoSettle = cfg.AutoSettle
 }

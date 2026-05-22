@@ -15,7 +15,10 @@ import (
 	"socialserver/internal/rank/balloon"
 )
 
-const syncIntervalMs = 30_000 // 30秒同步一次
+const (
+	syncInterval = 30 * time.Second // 数据同步间隔（MongoDB/Redis）
+	tickInterval = time.Second      // 实例状态推进间隔
+)
 
 type Manager struct {
 	mu              sync.RWMutex
@@ -25,7 +28,7 @@ type Manager struct {
 	memberIndex     *MemberIndex
 	services        map[string]RankBizService
 	balloonServices map[string]*balloon.Service
-	lastSyncTime    int64 // 上次同步时间（毫秒）
+	stopCh          chan struct{}
 }
 
 var globalManager *Manager
@@ -42,6 +45,7 @@ func InitGlobalManager(rdb *goredis.Redis, dbName string) error {
 		memberIndex:     NewMemberIndex(rdb),
 		services:        make(map[string]RankBizService),
 		balloonServices: make(map[string]*balloon.Service),
+		stopCh:          make(chan struct{}),
 	}
 	if dao != nil {
 		dao.EnsureIndexes()
@@ -54,6 +58,7 @@ func InitGlobalManager(rdb *goredis.Redis, dbName string) error {
 	manager.warmUpAllServices(context.Background())
 	globalManager = manager
 	zaplog.LoggerSugar.Infof("rank global manager initialized")
+	manager.startBackground()
 	return nil
 }
 
@@ -65,11 +70,64 @@ func (m *Manager) Close() {
 	if m == nil {
 		return
 	}
+	close(m.stopCh)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.services = make(map[string]RankBizService)
 	m.balloonServices = make(map[string]*balloon.Service)
 	zaplog.LoggerSugar.Infof("rank global manager closed")
+}
+
+// startBackground 启动两个后台 goroutine：
+// - tickLoop：每秒推进所有服务实例状态（结算、机器人等）
+// - syncLoop：每 30 秒从 MongoDB/Redis 同步活动列表（多节点感知新增/删除）
+func (m *Manager) startBackground() {
+	go m.tickLoop()
+	go m.syncLoop()
+}
+
+func (m *Manager) tickLoop() {
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case now := <-ticker.C:
+			m.tickServices(context.Background(), now.UnixMilli())
+		}
+	}
+}
+
+func (m *Manager) syncLoop() {
+	ticker := time.NewTicker(syncInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+			ctx := context.Background()
+			m.syncFromMongo(ctx)
+			m.syncFromRedis(ctx)
+			m.warmUpAllServices(ctx)
+		}
+	}
+}
+
+// tickServices 推进所有服务实例的内存状态（每秒调用）。
+func (m *Manager) tickServices(ctx context.Context, now int64) {
+	m.mu.RLock()
+	svcs := make([]RankBizService, 0, len(m.services))
+	for _, svc := range m.services {
+		svcs = append(svcs, svc)
+	}
+	m.mu.RUnlock()
+	for _, svc := range svcs {
+		if err := svc.Tick(ctx, now); err != nil {
+			zaplog.LoggerSugar.Warnf("rank: tick service error: %v", err)
+		}
+	}
 }
 
 func (m *Manager) registerBalloon(ctx context.Context, cfg balloon.Config) (*balloon.Service, error) {
@@ -285,28 +343,7 @@ func (m *Manager) Tick(ctx context.Context, now int64) error {
 	if m == nil {
 		return nil
 	}
-
-	// 定期从 MongoDB 同步（发现其他节点新增/删除的活动）
-	if now-m.lastSyncTime >= syncIntervalMs {
-		m.lastSyncTime = now
-		m.syncFromMongo(ctx)
-		// Redis 补充注册：应对 syncFromMongo 取不到 MongoDB 数据时 Redis 中仍有排行榜配置的场景
-		m.syncFromRedis(ctx)
-		// 预热本次周期同步中新增的服务（其 ensureLoaded 尚未执行）
-		m.warmUpAllServices(ctx)
-	}
-
-	m.mu.RLock()
-	svcs := make([]RankBizService, 0, len(m.services))
-	for _, svc := range m.services {
-		svcs = append(svcs, svc)
-	}
-	m.mu.RUnlock()
-	for _, svc := range svcs {
-		if err := svc.Tick(ctx, now); err != nil {
-			return err
-		}
-	}
+	m.tickServices(ctx, now)
 	return nil
 }
 
@@ -360,9 +397,9 @@ func (m *Manager) syncFromRedis(ctx context.Context) {
 			continue
 		}
 
-		// 从 meta hash 中读取 openTime / closeTime（由 NewService 写入）
+		// 从 meta hash 中读取 openTime / closeTime / gameEndTime（由 NewService 写入）
 		tmpStore := balloon.NewStore(m.rdb, nil, bizId)
-		openTime, closeTime, ok := tmpStore.LoadActivityTimes()
+		openTime, closeTime, gameEndTime, ok := tmpStore.LoadActivityTimes()
 		if !ok {
 			// meta hash 缺少活动时间数据，跳过（数据不完整）
 			continue
@@ -375,11 +412,12 @@ func (m *Manager) syncFromRedis(ctx context.Context) {
 
 		rankCode := fmt.Sprintf("%s_score_%d", bizType, actID)
 		cfg := balloon.Config{
-			BizType:   string(bizType),
-			ActID:     actID,
-			RankCode:  rankCode,
-			OpenTime:  openTime,
-			CloseTime: closeTime,
+			BizType:     string(bizType),
+			ActID:       actID,
+			RankCode:    rankCode,
+			OpenTime:    openTime,
+			CloseTime:   closeTime,
+			GameEndTime: gameEndTime,
 			// AutoSettle 无法从 Redis 运行时数据恢复，默认 false（安全默认：不自动结算）
 		}
 

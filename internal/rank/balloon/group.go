@@ -50,14 +50,15 @@ func (s *Service) ensureGroupInstance(ctx context.Context, instanceID string, gr
 		return err
 	}
 	newInst := rank.RankInstance{
-		InstanceId: instanceID,
-		RankCode:   s.config.RankCode,
-		BizId:      s.bizId(),
-		State:      rank.InstanceStateOpen,
-		OpenTime:   s.config.OpenTime,
-		CloseTime:  s.config.CloseTime,
-		CreateTime: now,
-		UpdateTime: now,
+		InstanceId:  instanceID,
+		RankCode:    s.config.RankCode,
+		BizId:       s.bizId(),
+		State:       rank.InstanceStateOpen,
+		OpenTime:    s.config.OpenTime,
+		CloseTime:   s.config.CloseTime,
+		GameEndTime: s.config.GameEndTime,
+		CreateTime:  now,
+		UpdateTime:  now,
 	}
 	if openErr := s.rankService.OpenInstance(ctx, newInst); openErr != nil {
 		return openErr

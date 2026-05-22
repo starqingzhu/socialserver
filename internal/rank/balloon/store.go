@@ -115,19 +115,20 @@ func (st *Store) NextGroupID() (int32, error) {
 	return int32(val), nil
 }
 
-// SaveActivityTimes 将活动的 openTime / closeTime 写入 meta hash，用于重启后的 Redis 恢复。
-func (st *Store) SaveActivityTimes(openTime, closeTime int64) {
+// SaveActivityTimes 将活动的 openTime / closeTime / gameEndTime 写入 meta hash，用于重启后的 Redis 恢复。
+func (st *Store) SaveActivityTimes(openTime, closeTime, gameEndTime int64) {
 	if !st.available() {
 		return
 	}
 	key := rediskeys.GetRankMetaKey(st.bizId)
 	st.rdb.HSet(key, "openTime", strconv.FormatInt(openTime, 10))
 	st.rdb.HSet(key, "closeTime", strconv.FormatInt(closeTime, 10))
+	st.rdb.HSet(key, "gameEndTime", strconv.FormatInt(gameEndTime, 10))
 }
 
-// LoadActivityTimes 从 meta hash 读取活动的 openTime / closeTime。
+// LoadActivityTimes 从 meta hash 读取活动的 openTime / closeTime / gameEndTime。
 // ok=false 表示数据不存在或不完整。
-func (st *Store) LoadActivityTimes() (openTime, closeTime int64, ok bool) {
+func (st *Store) LoadActivityTimes() (openTime, closeTime, gameEndTime int64, ok bool) {
 	if !st.available() {
 		return
 	}
@@ -138,6 +139,7 @@ func (st *Store) LoadActivityTimes() (openTime, closeTime int64, ok bool) {
 	}
 	openTime, _ = strconv.ParseInt(fields["openTime"], 10, 64)
 	closeTime, _ = strconv.ParseInt(fields["closeTime"], 10, 64)
+	gameEndTime, _ = strconv.ParseInt(fields["gameEndTime"], 10, 64)
 	ok = openTime > 0 && closeTime > 0
 	return
 }

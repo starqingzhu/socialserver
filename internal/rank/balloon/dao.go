@@ -288,7 +288,7 @@ func (d *DAO) LoadRobots(bizId string, groupID int32) ([]*robotState, error) {
 	return robots, nil
 }
 
-// EnsureIndexes 创建 MongoDB 索引。
+// EnsureIndexes 创建 MongoDB 索引，并清理历史遗留的错误索引。
 func (d *DAO) EnsureIndexes() {
 	if !d.available() {
 		return
@@ -296,6 +296,11 @@ func (d *DAO) EnsureIndexes() {
 	session := d.session()
 	ctx, cancel := session.GetDefaultContext()
 	defer cancel()
+
+	// 清理旧版本遗留的错误唯一索引（这些集合文档无 userId 字段，唯一索引导致第二条插入失败）。
+	for _, coll := range []string{CollRankGroup, CollRankInst} {
+		_, _ = session.Database(d.dbName).Collection(coll).Indexes().DropOne(ctx, "idx_userId_unique")
+	}
 
 	indexes := map[string][]mongo.IndexModel{
 		CollRankGroup: {

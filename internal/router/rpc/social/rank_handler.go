@@ -18,6 +18,7 @@ import (
 
 // --- 排行榜业务接口 ---
 
+// S2SUpsertScore 服务器间接口：更新用户积分并返回最新排名信息。
 func (h *ServerHandler) S2SUpsertScore(ctx context.Context, req *pb.PBS2SUpsertScoreRequest) (resp *pb.PBS2SUpsertScoreResponse, retErr error) {
 	zaplog.LoggerSugar.Infof("[rank] S2SUpsertScore req bizType=%s actId=%d userId=%d totalScore=%d ts=%d",
 		req.BizType, req.ActId, req.UserId, req.TotalScore, req.Timestamp)
@@ -37,6 +38,10 @@ func (h *ServerHandler) S2SUpsertScore(ctx context.Context, req *pb.PBS2SUpsertS
 		return nil, err
 	}
 	if err := bsvc.Svc.UpsertScore(ctx, req.UserId, req.TotalScore, req.Timestamp, protoAvatarInfoToRank(req.AvatarInfo)); err != nil {
+		if errors.Is(err, rank.ErrInstanceClosed) {
+			zaplog.LoggerSugar.Infof("[rank] S2SUpsertScore activity closed userId=%d bizType=%s", req.UserId, req.BizType)
+			return &pb.PBS2SUpsertScoreResponse{MsgCode: commonMsg.MsgCode_CODE_RANK_ACTIVITY_CLOSED}, nil
+		}
 		return nil, rankErrorToStatus(err)
 	}
 	snapshot, _, err := bsvc.Svc.GetMemberRank(ctx, req.UserId)
@@ -45,9 +50,17 @@ func (h *ServerHandler) S2SUpsertScore(ctx context.Context, req *pb.PBS2SUpsertS
 		zaplog.LoggerSugar.Warnf("[rank] S2SUpsertScore GetMemberRank userId=%d err=%v", req.UserId, err)
 		return &pb.PBS2SUpsertScoreResponse{MsgCode: commonMsg.MsgCode_CODE_OK}, nil
 	}
-	return &pb.PBS2SUpsertScoreResponse{MsgCode: commonMsg.MsgCode_CODE_OK, MyRank: snapshotToProto(snapshot)}, nil
+
+	myRank := snapshotToProto(snapshot)
+	ret := &pb.PBS2SUpsertScoreResponse{
+		MsgCode: commonMsg.MsgCode_CODE_OK,
+		MyRank:  myRank,
+	}
+	zaplog.LoggerSugar.Infof("[rank] S2SUpsertScore updated score for userId=%d resp:%s", req.UserId, ret.String())
+	return ret, nil
 }
 
+// 获取排行榜列表
 func (h *ServerHandler) S2SGetRankList(ctx context.Context, req *pb.PBS2SGetRankListRequest) (resp *pb.PBS2SGetRankListResponse, retErr error) {
 	zaplog.LoggerSugar.Infof("[rank] S2SGetRankList req bizType=%s actId=%d userId=%d start=%d end=%d",
 		req.BizType, req.ActId, req.UserId, req.Start, req.End)
@@ -62,7 +75,7 @@ func (h *ServerHandler) S2SGetRankList(ctx context.Context, req *pb.PBS2SGetRank
 	if err != nil {
 		return nil, err
 	}
-	_, groupID, err := bsvc.Svc.GetMemberRank(ctx, req.UserId)
+	snapshot, groupID, err := bsvc.Svc.GetMemberRank(ctx, req.UserId)
 	if err != nil {
 		return nil, rankErrorToStatus(err)
 	}
@@ -73,7 +86,17 @@ func (h *ServerHandler) S2SGetRankList(ctx context.Context, req *pb.PBS2SGetRank
 	if err != nil {
 		return nil, rankErrorToStatus(err)
 	}
-	return &pb.PBS2SGetRankListResponse{Members: snapshotsToProto(snapshots)}, nil
+
+	myRank := snapshotToProto(snapshot)
+	members := snapshotsToProto(snapshots)
+	ret := &pb.PBS2SGetRankListResponse{
+		MsgCode: commonMsg.MsgCode_CODE_OK,
+		Members: members,
+		MyRank:  myRank,
+	}
+
+	zaplog.LoggerSugar.Infof("[rank] S2SGetRankList updated score for userId=%d myRank=%s membersCount=%d", req.UserId, myRank.String(), len(members))
+	return ret, nil
 }
 
 func (h *ServerHandler) S2SGetMemberRank(ctx context.Context, req *pb.PBS2SGetMemberRankRequest) (resp *pb.PBS2SGetMemberRankResponse, retErr error) {
@@ -100,7 +123,8 @@ func (h *ServerHandler) S2SGetMemberRank(ctx context.Context, req *pb.PBS2SGetMe
 	}
 	settleStage := int32(0)
 	if groupID > 0 {
-		if g := bsvc.Svc.GetGroup(groupID); g != nil && g.State == balloon.GroupStateSettled {
+		g := bsvc.Svc.GetGroup(groupID)
+		if g != nil && g.State == balloon.GroupStateSettled {
 			settleStage = 1
 		}
 	}
@@ -121,7 +145,7 @@ func (h *ServerHandler) S2SSettle(ctx context.Context, req *pb.PBS2SSettleReques
 	if err != nil {
 		return nil, err
 	}
-	results, err := bsvc.Svc.Settle(ctx, req.Timestamp)
+	results, err := bsvc.Svc.Settle(ctx)
 	if err != nil {
 		return nil, rankErrorToStatus(err)
 	}
@@ -195,8 +219,8 @@ func (h *ServerHandler) S2SGetClaimStatus(ctx context.Context, req *pb.PBS2SGetC
 // --- GM 管理接口 ---
 
 func (h *ServerHandler) S2SCreateRankConfig(ctx context.Context, req *pb.PBS2SCreateRankConfigRequest) (resp *pb.PBS2SCreateRankConfigResponse, retErr error) {
-	zaplog.LoggerSugar.Infof("[rank] S2SCreateRankConfig req bizType=%s actId=%d openTime=%d closeTime=%d autoSettle=%v",
-		req.BizType, req.ActId, req.OpenTime, req.CloseTime, req.AutoSettle)
+	zaplog.LoggerSugar.Infof("[rank] S2SCreateRankConfig req bizType=%s actId=%d openTime=%d closeTime=%d gameEndTime=%d autoSettle=%v",
+		req.BizType, req.ActId, req.OpenTime, req.CloseTime, req.GameEndTime, req.AutoSettle)
 	defer func() {
 		if retErr != nil {
 			zaplog.LoggerSugar.Warnf("[rank] S2SCreateRankConfig resp err=%v", retErr)
@@ -209,10 +233,11 @@ func (h *ServerHandler) S2SCreateRankConfig(ctx context.Context, req *pb.PBS2SCr
 		return nil, status.Error(codes.Internal, "rank manager not initialized")
 	}
 	cfg := balloon.Config{
-		ActID:      req.ActId,
-		OpenTime:   req.OpenTime,
-		CloseTime:  req.CloseTime,
-		AutoSettle: req.AutoSettle,
+		ActID:       req.ActId,
+		OpenTime:    req.OpenTime,
+		CloseTime:   req.CloseTime,
+		GameEndTime: req.GameEndTime,
+		AutoSettle:  true, //req.AutoSettle,
 	}
 	if err := manager.Register(ctx, rankservice.BizType(req.BizType), cfg); err != nil {
 		return nil, rankErrorToStatus(err)
@@ -238,15 +263,15 @@ func (h *ServerHandler) S2SGetRankConfig(ctx context.Context, req *pb.PBS2SGetRa
 	return &pb.PBS2SGetRankConfigResponse{
 		BizType: cfg.BizType, ActId: cfg.ActID, RankCode: cfg.RankCode,
 		RankPeopleNum: cfg.RankPeopleNum, OpenToken: cfg.OpenToken,
-		OpenTime: cfg.OpenTime, CloseTime: cfg.CloseTime, AutoSettle: cfg.AutoSettle,
+		OpenTime: cfg.OpenTime, CloseTime: cfg.CloseTime, GameEndTime: cfg.GameEndTime, AutoSettle: cfg.AutoSettle,
 		RobotTiers: cfgRobotTiersToProto(cfg.RobotTiers), RobotInfos: cfgRobotInfosToProto(cfg.RobotInfos),
 		Settled: bsvc.Svc.IsSettled(), GroupCount: bsvc.Svc.GroupCount(), MemberCount: bsvc.Svc.MemberCount(),
 	}, nil
 }
 
 func (h *ServerHandler) S2SUpdateRankConfig(ctx context.Context, req *pb.PBS2SUpdateRankConfigRequest) (resp *pb.PBS2SUpdateRankConfigResponse, retErr error) {
-	zaplog.LoggerSugar.Infof("[rank] S2SUpdateRankConfig req bizType=%s actId=%d openTime=%d closeTime=%d autoSettle=%v",
-		req.BizType, req.ActId, req.OpenTime, req.CloseTime, req.AutoSettle)
+	zaplog.LoggerSugar.Infof("[rank] S2SUpdateRankConfig req bizType=%s actId=%d openTime=%d closeTime=%d gameEndTime=%d autoSettle=%v",
+		req.BizType, req.ActId, req.OpenTime, req.CloseTime, req.GameEndTime, req.AutoSettle)
 	defer func() {
 		if retErr != nil {
 			zaplog.LoggerSugar.Warnf("[rank] S2SUpdateRankConfig resp err=%v", retErr)
@@ -259,9 +284,10 @@ func (h *ServerHandler) S2SUpdateRankConfig(ctx context.Context, req *pb.PBS2SUp
 		return nil, status.Error(codes.Internal, "rank manager not initialized")
 	}
 	cfg := balloon.Config{
-		OpenTime:   req.OpenTime,
-		CloseTime:  req.CloseTime,
-		AutoSettle: req.AutoSettle,
+		OpenTime:    req.OpenTime,
+		CloseTime:   req.CloseTime,
+		GameEndTime: req.GameEndTime,
+		AutoSettle:  true, //req.AutoSettle,
 	}
 	if err := manager.UpdateService(rankservice.BizType(req.BizType), req.ActId, cfg); err != nil {
 		return nil, status.Error(codes.NotFound, err.Error())
@@ -306,7 +332,7 @@ func (h *ServerHandler) S2SListRankConfigs(ctx context.Context, req *pb.PBS2SLis
 	for i, info := range infos {
 		ranks[i] = &pb.PBRankConfigSummary{
 			BizType: string(info.BizType), ActId: info.ActID, RankCode: info.Config.RankCode,
-			OpenTime: info.Config.OpenTime, CloseTime: info.Config.CloseTime,
+			OpenTime: info.Config.OpenTime, CloseTime: info.Config.CloseTime, GameEndTime: info.Config.GameEndTime,
 			AutoSettle: info.Config.AutoSettle, Settled: info.Settled,
 			GroupCount: info.GroupCount, MemberCount: info.MemberCount,
 		}
@@ -370,8 +396,10 @@ func snapshotToProto(s *rank.RankMemberSnapshot) *pb.PBRankMemberSnapshot {
 	}
 	if s.AvatarInfo != nil {
 		snap.AvatarInfo = &commonMsg.PBAvatarInfo{
-			UserId: s.AvatarInfo.UserId, Name: s.AvatarInfo.Name,
-			Avatar: s.AvatarInfo.Avatar, Frame: s.AvatarInfo.Frame,
+			UserId: s.AvatarInfo.UserId,
+			Name:   s.AvatarInfo.Name,
+			Avatar: s.AvatarInfo.Avatar,
+			Frame:  s.AvatarInfo.Frame,
 		}
 	}
 	return snap

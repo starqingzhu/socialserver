@@ -60,7 +60,7 @@ func (s *Service) spawnRobotsForGroup(ctx context.Context, groupID int32, capaci
 				AtTime:    now,
 				EnterTime: now,
 				AvatarInfo: &rank.AvatarInfo{
-					UserId: info.InfoID,
+					UserId: memberID, // 机器人 userId 必须与 key 一致（负数）
 					Name:   info.Name,
 					Avatar: info.Avatar,
 					Frame:  info.Frame,
@@ -140,9 +140,10 @@ func (s *Service) tickGroupRobots(ctx context.Context, groupID int32, instanceID
 		if newScore != oldScore {
 			changed = append(changed, robot)
 			updates = append(updates, rank.RankScoreItem{
-				MemberId: robot.MemberID,
-				Score:    newScore,
-				AtTime:   nowMs,
+				MemberId:   robot.MemberID,
+				Score:      newScore,
+				AtTime:     nowMs,
+				AvatarInfo: s.robotAvatarInfo(robot), // 同步修正 userId（确保与负数 key 一致）
 			})
 		}
 	}
@@ -153,6 +154,21 @@ func (s *Service) tickGroupRobots(ctx context.Context, groupID int32, instanceID
 		}
 		_ = s.store.SaveRobots(groupID, changed)
 	}
+}
+
+// robotAvatarInfo 根据机器人状态构造正确的 AvatarInfo：userId 使用负数 memberID。
+func (s *Service) robotAvatarInfo(robot *robotState) *rank.AvatarInfo {
+	for _, info := range s.config.RobotInfos {
+		if info.InfoID == robot.InfoID {
+			return &rank.AvatarInfo{
+				UserId: robot.MemberID,
+				Name:   info.Name,
+				Avatar: info.Avatar,
+				Frame:  info.Frame,
+			}
+		}
+	}
+	return &rank.AvatarInfo{UserId: robot.MemberID}
 }
 
 // findTier 在配置中查找指定档次，未找到时返回 nil。

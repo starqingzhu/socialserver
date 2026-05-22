@@ -19,8 +19,9 @@ type Config struct {
 	RankPeopleNum int32 // 每组最大人数（含机器人）
 	OpenToken     int64 // 进榜最低积分门槛（大于等于，不受商店消耗影响）
 	OpenTime      int64 // 活动开放时间（Unix 毫秒，UTC+0）
-	CloseTime     int64 // 活动关闭时间（Unix 毫秒，UTC+0）
-	AutoSettle    bool  // 活动结束后是否自动结算
+	CloseTime     int64 // 活动关闭时间（Unix 毫秒，UTC+0）：超过此时间停止接受积分
+	GameEndTime   int64 // 玩法结束时间（Unix 毫秒，UTC+0）：超过此时间触发结算（0 则退化为 CloseTime）
+	AutoSettle    bool  // 活动结束后是否自动结算（保留字段，已不作为结算开关）
 
 	// 机器人配置（可选；为空则不生成机器人）
 	RobotTiers []RobotTierCfg   // 各档次机器人配置
@@ -51,7 +52,6 @@ type Group struct {
 	RealCount  int32      `json:"realCount" bson:"realCount"`
 	RobotCount int32      `json:"robotCount" bson:"robotCount"`
 	State      GroupState `json:"state" bson:"state"`
-	SettleTime int64      `json:"settleTime" bson:"settleTime"`
 }
 
 // totalCount 返回分组的总人数（真实玩家 + 机器人）。
