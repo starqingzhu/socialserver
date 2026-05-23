@@ -14,17 +14,6 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// MongoDB collection 名称（与 Redis key 前缀保持一致，均使用 rank_ 前缀）
-const (
-	CollRankConfig  = "rank_config"  // 所有业务排行榜配置（通用集合，跨业务类型共用）
-	CollRankGroup   = "rank_group"   // 分组数据
-	CollRankInst    = "rank_inst"    // 榜单实例元数据（rank:inst 持久化备份）
-	CollRankScore   = "rank_score"   // 成员积分（rank:mb 持久化备份）
-	CollRankMember  = "rank_member"  // 成员→分组映射
-	CollRankRobot   = "rank_robot"   // 机器人状态
-	CollRankSettled = "rank_settled" // 结算快照（rank:settled 持久化备份）
-	CollRankClaim   = "rank_claim"   // 奖励领取记录
-)
 
 // DAO 封装 balloon 业务层的 MongoDB 持久化操作。
 // 所有写入、更新、删除操作（包括配置类）均通过 mongoTask.GWriteTaskBuilder 异步队列执行，不阻塞业务 goroutine。
@@ -49,7 +38,7 @@ func (d *DAO) session() *mongodbmodule.Session {
 
 // --- 活动注册表 ---
 
-// RankConfigDoc 排行榜配置文档，所有业务类型统一存储于 CollRankConfig 集合。
+// RankConfigDoc 排行榜配置文档，所有业务类型统一存储于 commonrank.CT_RANK_CONFIG 集合。
 type RankConfigDoc struct {
 	BizKey string `bson:"_id"` // "{bizType}:{actID}" 格式，跨业务唯一
 	Config Config `bson:"config"`
@@ -64,7 +53,7 @@ func (d *DAO) SaveRankConfig(bizKey string, cfg Config) error {
 	persisted.RobotTiers = nil
 	persisted.RobotInfos = nil
 	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
-		CollRankConfig,
+		commonrank.CT_RANK_CONFIG,
 		bizKey,
 		bson.M{"_id": bizKey},
 		bson.M{"$set": bson.M{"config": persisted}},
@@ -79,7 +68,7 @@ func (d *DAO) LoadAllRankConfigs() ([]RankConfigDoc, error) {
 	if !d.available() {
 		return nil, nil
 	}
-	cursor, err := d.session().Find(d.dbName, CollRankConfig, bson.M{})
+	cursor, err := d.session().Find(d.dbName, commonrank.CT_RANK_CONFIG, bson.M{})
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +86,7 @@ func (d *DAO) DeleteRankConfig(bizKey string) error {
 		return nil
 	}
 	task := mongoTask.GWriteTaskBuilder.BuildDeleteTask(
-		CollRankConfig,
+		commonrank.CT_RANK_CONFIG,
 		bizKey,
 		bson.M{"_id": bizKey},
 	)
@@ -128,7 +117,7 @@ func (d *DAO) SaveGroup(bizId string, group *Group) error {
 	g := *group // copy to avoid aliasing
 	docID := groupDocID(bizId, g.GroupID)
 	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
-		CollRankGroup,
+		commonrank.CT_RANK_GROUP,
 		docID,
 		bson.M{"_id": docID},
 		// 不在 $set 中包含 _id，MongoDB 不允许通过 $set 修改已有文档的 _id
@@ -144,7 +133,7 @@ func (d *DAO) LoadGroups(bizId string) ([]*Group, error) {
 	if !d.available() {
 		return nil, nil
 	}
-	cursor, err := d.session().Find(d.dbName, CollRankGroup, bson.M{"bizId": bizId})
+	cursor, err := d.session().Find(d.dbName, commonrank.CT_RANK_GROUP, bson.M{"bizId": bizId})
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +171,7 @@ func (d *DAO) SaveMember(bizId string, userID int64, groupID int32) error {
 	}
 	docID := memberDocID(bizId, userID)
 	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
-		CollRankMember,
+		commonrank.CT_RANK_MEMBER,
 		docID,
 		bson.M{"_id": docID},
 		bson.M{"$set": bson.M{"bizId": bizId, "userId": userID, "groupId": groupID}},
@@ -198,7 +187,7 @@ func (d *DAO) GetMember(bizId string, userID int64) (int32, bool, error) {
 		return 0, false, nil
 	}
 	var doc MemberDoc
-	err := d.session().FindOne(d.dbName, CollRankMember,
+	err := d.session().FindOne(d.dbName, commonrank.CT_RANK_MEMBER,
 		bson.M{"_id": memberDocID(bizId, userID)}, &doc)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
@@ -213,7 +202,7 @@ func (d *DAO) LoadAllMembers(bizId string) (map[int64]int32, error) {
 	if !d.available() {
 		return nil, nil
 	}
-	cursor, err := d.session().Find(d.dbName, CollRankMember, bson.M{"bizId": bizId})
+	cursor, err := d.session().Find(d.dbName, commonrank.CT_RANK_MEMBER, bson.M{"bizId": bizId})
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +242,7 @@ func (d *DAO) SaveRobots(bizId string, groupID int32, robots []*robotState) erro
 		rCopy := *r
 		docID := robotDocID(bizId, groupID, rCopy.MemberID)
 		task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
-			CollRankRobot,
+			commonrank.CT_RANK_ROBOT,
 			docID,
 			bson.M{"_id": docID},
 			bson.M{"$set": bson.M{"bizId": bizId, "groupId": groupID, "memberId": rCopy.MemberID, "state": rCopy}},
@@ -269,7 +258,7 @@ func (d *DAO) LoadRobots(bizId string, groupID int32) ([]*robotState, error) {
 	if !d.available() {
 		return nil, nil
 	}
-	cursor, err := d.session().Find(d.dbName, CollRankRobot,
+	cursor, err := d.session().Find(d.dbName, commonrank.CT_RANK_ROBOT,
 		bson.M{"bizId": bizId, "groupId": groupID})
 	if err != nil {
 		return nil, err
@@ -298,32 +287,32 @@ func (d *DAO) EnsureIndexes() {
 	defer cancel()
 
 	// 清理旧版本遗留的错误唯一索引（这些集合文档无 userId 字段，唯一索引导致第二条插入失败）。
-	for _, coll := range []string{CollRankGroup, CollRankInst} {
+	for _, coll := range []string{commonrank.CT_RANK_GROUP, commonrank.CT_RANK_INST} {
 		_, _ = session.Database(d.dbName).Collection(coll).Indexes().DropOne(ctx, "idx_userId_unique")
 	}
 
 	indexes := map[string][]mongo.IndexModel{
-		CollRankGroup: {
+		commonrank.CT_RANK_GROUP: {
 			{Keys: bson.D{{Key: "bizId", Value: 1}}, Options: options.Index().SetName("idx_bizId")},
 		},
-		CollRankMember: {
-			{Keys: bson.D{{Key: "bizId", Value: 1}}, Options: options.Index().SetName("idx_bizId")},
-			{Keys: bson.D{{Key: "userId", Value: 1}}, Options: options.Index().SetName("idx_userId")},
-		},
-		CollRankRobot: {
-			{Keys: bson.D{{Key: "bizId", Value: 1}, {Key: "groupId", Value: 1}}, Options: options.Index().SetName("idx_bizId_groupId")},
-		},
-		CollRankClaim: {
+		commonrank.CT_RANK_MEMBER: {
 			{Keys: bson.D{{Key: "bizId", Value: 1}}, Options: options.Index().SetName("idx_bizId")},
 			{Keys: bson.D{{Key: "userId", Value: 1}}, Options: options.Index().SetName("idx_userId")},
 		},
-		CollRankScore: {
+		commonrank.CT_RANK_ROBOT: {
 			{Keys: bson.D{{Key: "bizId", Value: 1}, {Key: "groupId", Value: 1}}, Options: options.Index().SetName("idx_bizId_groupId")},
 		},
-		CollRankSettled: {
+		commonrank.CT_RANK_CLAIM: {
+			{Keys: bson.D{{Key: "bizId", Value: 1}}, Options: options.Index().SetName("idx_bizId")},
+			{Keys: bson.D{{Key: "userId", Value: 1}}, Options: options.Index().SetName("idx_userId")},
+		},
+		commonrank.CT_RANK_SCORE: {
+			{Keys: bson.D{{Key: "bizId", Value: 1}, {Key: "groupId", Value: 1}}, Options: options.Index().SetName("idx_bizId_groupId")},
+		},
+		commonrank.CT_RANK_SETTLED: {
 			{Keys: bson.D{{Key: "bizId", Value: 1}}, Options: options.Index().SetName("idx_bizId")},
 		},
-		CollRankInst: {
+		commonrank.CT_RANK_INST: {
 			{Keys: bson.D{{Key: "bizId", Value: 1}}, Options: options.Index().SetName("idx_bizId")},
 		},
 	}
@@ -353,7 +342,7 @@ func (d *DAO) SaveClaim(bizId string, userID int64, claimTime int64) error {
 	}
 	docID := claimDocID(bizId, userID)
 	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
-		CollRankClaim,
+		commonrank.CT_RANK_CLAIM,
 		docID,
 		bson.M{"_id": docID},
 		bson.M{"$set": bson.M{"bizId": bizId, "userId": userID, "claimTime": claimTime}},
@@ -369,7 +358,7 @@ func (d *DAO) GetClaim(bizId string, userID int64) (int64, bool, error) {
 		return 0, false, nil
 	}
 	var doc ClaimDoc
-	err := d.session().FindOne(d.dbName, CollRankClaim,
+	err := d.session().FindOne(d.dbName, commonrank.CT_RANK_CLAIM,
 		bson.M{"_id": claimDocID(bizId, userID)}, &doc)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
@@ -427,7 +416,7 @@ func (d *DAO) SaveScore(bizId string, groupID int32, userID int64, score int64, 
 		setOnInsert["sequence"] = sequence
 	}
 	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
-		CollRankScore,
+		commonrank.CT_RANK_SCORE,
 		docID,
 		bson.M{"_id": docID},
 		bson.M{
@@ -444,7 +433,7 @@ func (d *DAO) LoadGroupScores(bizId string, groupID int32) ([]ScoreDoc, error) {
 	if !d.available() {
 		return nil, nil
 	}
-	cursor, err := d.session().Find(d.dbName, CollRankScore,
+	cursor, err := d.session().Find(d.dbName, commonrank.CT_RANK_SCORE,
 		bson.M{"bizId": bizId, "groupId": groupID})
 	if err != nil {
 		return nil, err
@@ -481,7 +470,7 @@ func (d *DAO) SaveSettled(bizId string, groupID int32, snaps []commonrank.RankMe
 	copy(snapsCopy, snaps)
 	docID := settledDocID(bizId, groupID)
 	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
-		CollRankSettled,
+		commonrank.CT_RANK_SETTLED,
 		docID,
 		bson.M{"_id": docID},
 		bson.M{"$set": bson.M{"bizId": bizId, "groupId": groupID, "snapshots": snapsCopy, "settleTime": settleTime}},
@@ -497,7 +486,7 @@ func (d *DAO) LoadGroupSettled(bizId string, groupID int32) ([]commonrank.RankMe
 		return nil, nil
 	}
 	var doc SettledDoc
-	err := d.session().FindOne(d.dbName, CollRankSettled,
+	err := d.session().FindOne(d.dbName, commonrank.CT_RANK_SETTLED,
 		bson.M{"_id": settledDocID(bizId, groupID)}, &doc)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
@@ -530,7 +519,7 @@ func (d *DAO) SaveRankInst(bizId string, groupID int32, inst commonrank.RankInst
 	}
 	docID := rankInstDocID(bizId, groupID)
 	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
-		CollRankInst,
+		commonrank.CT_RANK_INST,
 		docID,
 		bson.M{"_id": docID},
 		bson.M{"$set": bson.M{"bizId": bizId, "groupId": groupID, "instanceId": inst.InstanceId, "instance": inst}},
@@ -547,7 +536,7 @@ func (d *DAO) LoadGroupInst(bizId string, groupID int32) (*commonrank.RankInstan
 		return nil, nil
 	}
 	var doc RankInstDoc
-	err := d.session().FindOne(d.dbName, CollRankInst,
+	err := d.session().FindOne(d.dbName, commonrank.CT_RANK_INST,
 		bson.M{"_id": rankInstDocID(bizId, groupID)}, &doc)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
@@ -564,7 +553,7 @@ func (d *DAO) LoadAllRankInsts(bizId string) ([]RankInstDoc, error) {
 	if !d.available() {
 		return nil, nil
 	}
-	cursor, err := d.session().Find(d.dbName, CollRankInst, bson.M{"bizId": bizId})
+	cursor, err := d.session().Find(d.dbName, commonrank.CT_RANK_INST, bson.M{"bizId": bizId})
 	if err != nil {
 		return nil, err
 	}
@@ -587,7 +576,7 @@ func (d *DAO) DeleteAllByBizId(bizId string) error {
 		return nil
 	}
 	filter := bson.M{"bizId": bizId}
-	for _, coll := range []string{CollRankGroup, CollRankMember, CollRankRobot, CollRankClaim, CollRankScore, CollRankSettled, CollRankInst} {
+	for _, coll := range []string{commonrank.CT_RANK_GROUP, commonrank.CT_RANK_MEMBER, commonrank.CT_RANK_ROBOT, commonrank.CT_RANK_CLAIM, commonrank.CT_RANK_SCORE, commonrank.CT_RANK_SETTLED, commonrank.CT_RANK_INST} {
 		if _, err := d.session().DeleteMany(d.dbName, coll, filter); err != nil {
 			return err
 		}
