@@ -442,3 +442,123 @@ func rankErrorToStatus(err error) error {
 		return status.Error(codes.Internal, err.Error())
 	}
 }
+
+// --- GM 查询接口（独立，不与玩家接口共用） ---
+
+// S2SGMGetUserRankList GM：通过userId查询该用户所在的所有排行榜列表（含当前排名快照）。
+func (h *ServerHandler) S2SGMGetUserRankList(ctx context.Context, req *pb.PBS2SGMGetUserRankListRequest) (resp *pb.PBS2SGMGetUserRankListResponse, retErr error) {
+	zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetUserRankList req userId=%d", req.UserId)
+	defer func() {
+		if retErr != nil {
+			zaplog.LoggerSugar.Warnf("[rank][gm] S2SGMGetUserRankList resp err=%v", retErr)
+		} else {
+			zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetUserRankList resp entryCount=%d", len(resp.Entries))
+		}
+	}()
+	manager := rankservice.GetGlobalManager()
+	if manager == nil {
+		return nil, status.Error(codes.Internal, "rank manager not initialized")
+	}
+	rankEntries, err := manager.GetMemberRankEntries(ctx, req.UserId)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	entries := make([]*pb.PBGMUserRankEntry, 0, len(rankEntries))
+	for _, e := range rankEntries {
+		entry := &pb.PBGMUserRankEntry{
+			BizType:  string(e.BizType),
+			ActId:    e.ActID,
+			GroupId:  e.GroupID,
+			Snapshot: snapshotToProto(e.Snapshot),
+		}
+		entries = append(entries, entry)
+	}
+	return &pb.PBS2SGMGetUserRankListResponse{Entries: entries}, nil
+}
+
+// S2SGMGetGroupRankList GM：通过排行榜列表某一项（bizType+actId+groupId）查该榜所有排名。
+func (h *ServerHandler) S2SGMGetGroupRankList(ctx context.Context, req *pb.PBS2SGMGetGroupRankListRequest) (resp *pb.PBS2SGMGetGroupRankListResponse, retErr error) {
+	zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetGroupRankList req bizType=%s actId=%d groupId=%d",
+		req.BizType, req.ActId, req.GroupId)
+	defer func() {
+		if retErr != nil {
+			zaplog.LoggerSugar.Warnf("[rank][gm] S2SGMGetGroupRankList resp err=%v", retErr)
+		} else {
+			zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetGroupRankList resp memberCount=%d", len(resp.Members))
+		}
+	}()
+	bsvc, err := lookupBalloonService(rankservice.BizType(req.BizType), req.ActId)
+	if err != nil {
+		return nil, err
+	}
+	snapshots, err := bsvc.Svc.ListGroupRank(ctx, req.GroupId, 0, -1)
+	if err != nil {
+		return nil, rankErrorToStatus(err)
+	}
+	members := snapshotsToProto(snapshots)
+	ret := &pb.PBS2SGMGetGroupRankListResponse{
+		Members: members,
+		MsgCode: commonMsg.MsgCode_CODE_OK,
+	}
+	zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetGroupRankList bizType=%s actId=%d groupId=%d memberCount=%d",
+		req.BizType, req.ActId, req.GroupId, len(members))
+	return ret, nil
+}
+
+// S2SGMGetRankInstanceList GM：通过排行榜配置（bizType+actId）查该配置的所有组实例列表。
+func (h *ServerHandler) S2SGMGetRankInstanceList(ctx context.Context, req *pb.PBS2SGMGetRankInstanceListRequest) (resp *pb.PBS2SGMGetRankInstanceListResponse, retErr error) {
+	zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetRankInstanceList req bizType=%s actId=%d", req.BizType, req.ActId)
+	defer func() {
+		if retErr != nil {
+			zaplog.LoggerSugar.Warnf("[rank][gm] S2SGMGetRankInstanceList resp err=%v", retErr)
+		} else {
+			zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetRankInstanceList resp groupCount=%d", len(resp.Groups))
+		}
+	}()
+	bsvc, err := lookupBalloonService(rankservice.BizType(req.BizType), req.ActId)
+	if err != nil {
+		return nil, err
+	}
+	groups := bsvc.Svc.ListGroups()
+	pbGroups := make([]*pb.PBGMRankGroupInstance, 0, len(groups))
+	for _, g := range groups {
+		pbGroups = append(pbGroups, &pb.PBGMRankGroupInstance{
+			GroupId:    g.GroupID,
+			InstanceId: g.InstanceID,
+			RealCount:  g.RealCount,
+			RobotCount: g.RobotCount,
+			State:      string(g.State),
+		})
+	}
+	return &pb.PBS2SGMGetRankInstanceListResponse{Groups: pbGroups}, nil
+}
+
+// S2SGMGetInstanceRankList GM：通过组实例信息（bizType+actId+groupId）查该组全部排名列表。
+func (h *ServerHandler) S2SGMGetInstanceRankList(ctx context.Context, req *pb.PBS2SGMGetInstanceRankListRequest) (resp *pb.PBS2SGMGetInstanceRankListResponse, retErr error) {
+	zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetInstanceRankList req bizType=%s actId=%d groupId=%d",
+		req.BizType, req.ActId, req.GroupId)
+	defer func() {
+		if retErr != nil {
+			zaplog.LoggerSugar.Warnf("[rank][gm] S2SGMGetInstanceRankList resp err=%v", retErr)
+		} else {
+			zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetInstanceRankList resp memberCount=%d", len(resp.Members))
+		}
+	}()
+	bsvc, err := lookupBalloonService(rankservice.BizType(req.BizType), req.ActId)
+	if err != nil {
+		return nil, err
+	}
+	g := bsvc.Svc.GetGroup(req.GroupId)
+	if g == nil {
+		return nil, status.Errorf(codes.NotFound, "group %d not found in bizType=%s actId=%d", req.GroupId, req.BizType, req.ActId)
+	}
+	snapshots, err := bsvc.Svc.ListGroupRank(ctx, req.GroupId, 0, -1)
+	if err != nil {
+		return nil, rankErrorToStatus(err)
+	}
+	return &pb.PBS2SGMGetInstanceRankListResponse{
+		GroupId: g.GroupID,
+		State:   string(g.State),
+		Members: snapshotsToProto(snapshots),
+	}, nil
+}

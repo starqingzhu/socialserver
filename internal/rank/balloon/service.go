@@ -131,6 +131,27 @@ func (s *Service) ensureLoaded() {
 			// 方向1：rank:mb 已存在。
 			// (a) MongoDB 积分记录为空 → backfill；
 			// (b) rank:max_score 缺失（单独清空场景）→ 从 rank:mb 重建，防止机器人增长上限失控。
+			// rank:mb 存在但 rank:inst 可能缺失（如仅 rank:inst 被清除）→ 先恢复实例元数据，
+			// 否则后续 Snapshot/Range 都会因 GetInstance 返回 ErrInstanceNotFound 而失败。
+			if instExists, _ := s.store.RdbExists(rediskeys.GetRankInstKey(instanceID)); !instExists {
+				instToRestore := rank.RankInstance{
+					InstanceId:  instanceID,
+					RankCode:    s.config.RankCode,
+					BizId:       s.bizId(),
+					State:       rank.InstanceStateOpen,
+					OpenTime:    s.config.OpenTime,
+					CloseTime:   s.config.CloseTime,
+					GameEndTime: s.config.GameEndTime,
+					CreateTime:  s.config.OpenTime,
+					UpdateTime:  s.config.OpenTime,
+				}
+				if mongoInst, err2 := s.store.LoadGroupInst(g.GroupID); err2 == nil && mongoInst != nil {
+					instToRestore = *mongoInst
+				}
+				_ = s.rankService.RestoreInstance(ctx, instToRestore)
+				zaplog.LoggerSugar.Infof("balloon: restored missing rank:inst for group %d instanceID=%s", g.GroupID, instanceID)
+			}
+
 			needBackfill := len(mongoScores) == 0
 			needMaxScore := s.groupMaxRealScore[g.GroupID] == 0
 			if needBackfill || needMaxScore {
@@ -574,7 +595,11 @@ func (s *Service) ListGroupRank(ctx context.Context, groupID int32, start int64,
 	if len(settled) > 0 {
 		return sliceSnapshots(settled, start, end), nil
 	}
-	return s.rankService.Range(ctx, s.groupInstanceID(groupID), start, end)
+	members, err := s.rankService.Range(ctx, s.groupInstanceID(groupID), start, end)
+	if err != nil {
+		return nil, err
+	}
+	return members, nil
 }
 
 // GetMemberRank 查询指定用户的名次快照及所在分组。未上榜时返回 (nil, 0, nil)。
@@ -713,6 +738,20 @@ func (s *Service) GetGroup(groupID int32) *Group {
 		}
 	}
 	return nil
+}
+
+// ListGroups 返回所有分组信息的副本列表。
+func (s *Service) ListGroups() []Group {
+	s.mu.Lock()
+	s.ensureLoaded()
+	defer s.mu.Unlock()
+	result := make([]Group, 0, len(s.groups))
+	for _, g := range s.groups {
+		if g != nil {
+			result = append(result, *g)
+		}
+	}
+	return result
 }
 
 // IsSettled 返回是否所有分组均已结算。无分组时返回 false。
