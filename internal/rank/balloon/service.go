@@ -754,6 +754,20 @@ func (s *Service) ListGroups() []Group {
 	return result
 }
 
+// GetGroupCreateTime 返回指定分组底层实例的创建时间（Unix毫秒）。
+// 未找到分组或实例时返回 0。
+func (s *Service) GetGroupCreateTime(ctx context.Context, groupID int32) int64 {
+	g := s.GetGroup(groupID)
+	if g == nil {
+		return 0
+	}
+	inst, err := s.rankService.GetInstance(ctx, g.InstanceID)
+	if err != nil || inst == nil {
+		return 0
+	}
+	return inst.CreateTime
+}
+
 // IsSettled 返回是否所有分组均已结算。无分组时返回 false。
 func (s *Service) IsSettled() bool {
 	s.mu.Lock()
@@ -812,7 +826,6 @@ func (s *Service) UpdateConfig(cfg Config) {
 	if cfg.GameEndTime > 0 {
 		s.config.GameEndTime = cfg.GameEndTime
 	}
-	s.config.AutoSettle = cfg.AutoSettle
 }
 
 func (s *Service) Cleanup() {

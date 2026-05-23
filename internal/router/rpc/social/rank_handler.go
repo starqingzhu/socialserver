@@ -90,9 +90,10 @@ func (h *ServerHandler) S2SGetRankList(ctx context.Context, req *pb.PBS2SGetRank
 	myRank := snapshotToProto(snapshot)
 	members := snapshotsToProto(snapshots)
 	ret := &pb.PBS2SGetRankListResponse{
-		MsgCode: commonMsg.MsgCode_CODE_OK,
-		Members: members,
-		MyRank:  myRank,
+		MsgCode:    commonMsg.MsgCode_CODE_OK,
+		Members:    members,
+		MyRank:     myRank,
+		CreateTime: bsvc.Svc.GetGroupCreateTime(ctx, groupID),
 	}
 
 	zaplog.LoggerSugar.Infof("[rank] S2SGetRankList updated score for userId=%d myRank=%s membersCount=%d", req.UserId, myRank.String(), len(members))
@@ -219,8 +220,8 @@ func (h *ServerHandler) S2SGetClaimStatus(ctx context.Context, req *pb.PBS2SGetC
 // --- GM 管理接口 ---
 
 func (h *ServerHandler) S2SCreateRankConfig(ctx context.Context, req *pb.PBS2SCreateRankConfigRequest) (resp *pb.PBS2SCreateRankConfigResponse, retErr error) {
-	zaplog.LoggerSugar.Infof("[rank] S2SCreateRankConfig req bizType=%s actId=%d openTime=%d closeTime=%d gameEndTime=%d autoSettle=%v",
-		req.BizType, req.ActId, req.OpenTime, req.CloseTime, req.GameEndTime, req.AutoSettle)
+	zaplog.LoggerSugar.Infof("[rank] S2SCreateRankConfig req bizType=%s actId=%d openTime=%d closeTime=%d gameEndTime=%d",
+		req.BizType, req.ActId, req.OpenTime, req.CloseTime, req.GameEndTime)
 	defer func() {
 		if retErr != nil {
 			zaplog.LoggerSugar.Warnf("[rank] S2SCreateRankConfig resp err=%v", retErr)
@@ -237,7 +238,6 @@ func (h *ServerHandler) S2SCreateRankConfig(ctx context.Context, req *pb.PBS2SCr
 		OpenTime:    req.OpenTime,
 		CloseTime:   req.CloseTime,
 		GameEndTime: req.GameEndTime,
-		AutoSettle:  true, //req.AutoSettle,
 	}
 	if err := manager.Register(ctx, rankservice.BizType(req.BizType), cfg); err != nil {
 		return nil, rankErrorToStatus(err)
@@ -263,15 +263,15 @@ func (h *ServerHandler) S2SGetRankConfig(ctx context.Context, req *pb.PBS2SGetRa
 	return &pb.PBS2SGetRankConfigResponse{
 		BizType: cfg.BizType, ActId: cfg.ActID, RankCode: cfg.RankCode,
 		RankPeopleNum: cfg.RankPeopleNum, OpenToken: cfg.OpenToken,
-		OpenTime: cfg.OpenTime, CloseTime: cfg.CloseTime, GameEndTime: cfg.GameEndTime, AutoSettle: cfg.AutoSettle,
+		OpenTime: cfg.OpenTime, CloseTime: cfg.CloseTime, GameEndTime: cfg.GameEndTime,
 		RobotTiers: cfgRobotTiersToProto(cfg.RobotTiers), RobotInfos: cfgRobotInfosToProto(cfg.RobotInfos),
 		Settled: bsvc.Svc.IsSettled(), GroupCount: bsvc.Svc.GroupCount(), MemberCount: bsvc.Svc.MemberCount(),
 	}, nil
 }
 
 func (h *ServerHandler) S2SUpdateRankConfig(ctx context.Context, req *pb.PBS2SUpdateRankConfigRequest) (resp *pb.PBS2SUpdateRankConfigResponse, retErr error) {
-	zaplog.LoggerSugar.Infof("[rank] S2SUpdateRankConfig req bizType=%s actId=%d openTime=%d closeTime=%d gameEndTime=%d autoSettle=%v",
-		req.BizType, req.ActId, req.OpenTime, req.CloseTime, req.GameEndTime, req.AutoSettle)
+	zaplog.LoggerSugar.Infof("[rank] S2SUpdateRankConfig req bizType=%s actId=%d openTime=%d closeTime=%d gameEndTime=%d",
+		req.BizType, req.ActId, req.OpenTime, req.CloseTime, req.GameEndTime)
 	defer func() {
 		if retErr != nil {
 			zaplog.LoggerSugar.Warnf("[rank] S2SUpdateRankConfig resp err=%v", retErr)
@@ -287,7 +287,6 @@ func (h *ServerHandler) S2SUpdateRankConfig(ctx context.Context, req *pb.PBS2SUp
 		OpenTime:    req.OpenTime,
 		CloseTime:   req.CloseTime,
 		GameEndTime: req.GameEndTime,
-		AutoSettle:  true, //req.AutoSettle,
 	}
 	if err := manager.UpdateService(rankservice.BizType(req.BizType), req.ActId, cfg); err != nil {
 		return nil, status.Error(codes.NotFound, err.Error())
@@ -331,10 +330,16 @@ func (h *ServerHandler) S2SListRankConfigs(ctx context.Context, req *pb.PBS2SLis
 	ranks := make([]*pb.PBRankConfigSummary, len(infos))
 	for i, info := range infos {
 		ranks[i] = &pb.PBRankConfigSummary{
-			BizType: string(info.BizType), ActId: info.ActID, RankCode: info.Config.RankCode,
-			OpenTime: info.Config.OpenTime, CloseTime: info.Config.CloseTime, GameEndTime: info.Config.GameEndTime,
-			AutoSettle: info.Config.AutoSettle, Settled: info.Settled,
-			GroupCount: info.GroupCount, MemberCount: info.MemberCount,
+			BizType:     string(info.BizType),
+			ActId:       info.ActID,
+			RankCode:    info.Config.RankCode,
+			OpenTime:    info.Config.OpenTime,
+			CloseTime:   info.Config.CloseTime,
+			GameEndTime: info.Config.GameEndTime,
+			Settled:     info.Settled,
+			GroupCount:  info.GroupCount,
+			MemberCount: info.MemberCount,
+			CreateTime:  info.CreateTime,
 		}
 	}
 	return &pb.PBS2SListRankConfigsResponse{Ranks: ranks}, nil

@@ -143,6 +143,9 @@ func (m *Manager) registerBalloon(ctx context.Context, cfg balloon.Config) (*bal
 	if svc, ok := m.balloonServices[key]; ok {
 		return svc, nil
 	}
+	if cfg.CreateTime == 0 {
+		cfg.CreateTime = time.Now().UnixMilli()
+	}
 	if err := m.rankService.RegisterRank(ctx, commonrank.Rank{
 		RankCode:       cfg.RankCode,
 		RankName:       fmt.Sprintf("%s_rank_%d", bizType, cfg.ActID),
@@ -270,6 +273,7 @@ type ServiceInfo struct {
 	Settled     bool
 	GroupCount  int32
 	MemberCount int32
+	CreateTime  int64
 }
 
 // ListServices 返回已注册的排行榜服务摘要，可按 bizType 过滤（空=全部）。
@@ -293,6 +297,7 @@ func (m *Manager) ListServices(filterBizType BizType) []ServiceInfo {
 			Settled:     svc.IsSettled(),
 			GroupCount:  svc.GroupCount(),
 			MemberCount: svc.MemberCount(),
+			CreateTime:  cfg.CreateTime,
 		})
 	}
 	return result
@@ -418,7 +423,6 @@ func (m *Manager) syncFromRedis(ctx context.Context) {
 			OpenTime:    openTime,
 			CloseTime:   closeTime,
 			GameEndTime: gameEndTime,
-			// AutoSettle 无法从 Redis 运行时数据恢复，默认 false（安全默认：不自动结算）
 		}
 
 		// 从本地配置文件填充 RankPeopleNum / OpenToken / RobotTiers / RobotInfos

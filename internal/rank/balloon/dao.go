@@ -48,10 +48,11 @@ func (d *DAO) SaveRankConfig(bizKey string, cfg Config) error {
 	if !d.available() {
 		return nil
 	}
-	// 去除可从本地配置文件恢复的字段（RobotTiers / RobotInfos），避免占用 MongoDB 存储空间并防止版本漂移。
 	persisted := cfg
 	persisted.RobotTiers = nil
 	persisted.RobotInfos = nil
+	// $set 覆盖整个 config 对象（包含 CreateTime），$setOnInsert 在首次插入时确保 CreateTime 有值。
+	// 更新已有文档时 $setOnInsert 不执行，所以 CreateTime 由调用方在注册时赋值并通过 $set 写入后不再改变。
 	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
 		commonrank.CT_RANK_CONFIG,
 		bizKey,

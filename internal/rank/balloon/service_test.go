@@ -25,7 +25,6 @@ func TestBalloonServiceAssignsGroupAndRanks(t *testing.T) {
 		OpenToken:     100,
 		OpenTime:      1000,
 		CloseTime:     999999,
-		AutoSettle:    true,
 	}, nil, nil)
 	if err != nil {
 		t.Fatalf("new service: %v", err)
@@ -121,7 +120,6 @@ func TestBalloonServiceRejectsClosedActivityAndSettles(t *testing.T) {
 		OpenToken:     100,
 		OpenTime:      1000,
 		CloseTime:     2000,
-		AutoSettle:    true,
 	}, nil, nil)
 	if err != nil {
 		t.Fatalf("new service: %v", err)
@@ -220,7 +218,6 @@ func TestBalloonServiceIsSettled(t *testing.T) {
 		OpenToken:     100,
 		OpenTime:      1000,
 		CloseTime:     2000,
-		AutoSettle:    true,
 	}, nil, nil)
 	if err != nil {
 		t.Fatalf("new service: %v", err)

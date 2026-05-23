@@ -21,7 +21,7 @@ type Config struct {
 	OpenTime      int64 // 活动开放时间（Unix 毫秒，UTC+0）
 	CloseTime     int64 // 活动关闭时间（Unix 毫秒，UTC+0）：超过此时间停止接受积分
 	GameEndTime   int64 // 玩法结束时间（Unix 毫秒，UTC+0）：超过此时间触发结算（0 则退化为 CloseTime）
-	AutoSettle    bool  // 活动结束后是否自动结算（保留字段，已不作为结算开关）
+	CreateTime    int64 // 配置创建时间（Unix 毫秒，$setOnInsert 写入 MongoDB，不随更新覆盖）
 
 	// 机器人配置（可选；为空则不生成机器人）
 	RobotTiers []RobotTierCfg   // 各档次机器人配置

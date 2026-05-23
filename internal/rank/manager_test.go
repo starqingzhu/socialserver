@@ -31,7 +31,6 @@ func TestManagerBalloonScenario(t *testing.T) {
 		OpenToken:     100,
 		OpenTime:      1000,
 		CloseTime:     5000,
-		AutoSettle:    true,
 	})
 	if err != nil {
 		t.Fatalf("register balloon service: %v", err)
@@ -107,7 +106,6 @@ func BenchmarkManagerBalloonScenario(b *testing.B) {
 			OpenToken:     100,
 			OpenTime:      1000,
 			CloseTime:     100000,
-			AutoSettle:    true,
 		})
 		if err != nil {
 			b.Fatalf("register balloon: %v", err)

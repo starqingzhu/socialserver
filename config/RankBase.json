@@ -1,9 +1,9 @@
 [
   {
-    "balloonRankOpenToken": "5000",
-    "beiZhu": "气球竞速赛",
+    "balloonRankOpenToken": "30000",
     "bizType": "balloon",
     "id": "1",
+    "name": "rank_name_01",
     "rankPeopleNum": "30"
   }
 ]
