@@ -1,7 +1,7 @@
 [
   {
     "LockTokenTime": "43200",
-    "MaxToken": "20000",
+    "MaxToken": "30000",
     "beiZhu": "A级",
     "bizType": "balloon",
     "defaultTokenRange": "9300,9500",
@@ -14,7 +14,7 @@
   },
   {
     "LockTokenTime": "64800",
-    "MaxToken": "15000",
+    "MaxToken": "20000",
     "beiZhu": "B级",
     "bizType": "balloon",
     "defaultTokenRange": "9200,9300",
@@ -22,12 +22,12 @@
     "growTokenRange": "9000,10000",
     "id": "2",
     "maxDifferenceToken": "500",
-    "num": "1",
+    "num": "5",
     "overtakeTime": "60"
   },
   {
     "LockTokenTime": "86400",
-    "MaxToken": "10000",
+    "MaxToken": "15000",
     "beiZhu": "C级",
     "bizType": "balloon",
     "defaultTokenRange": "9100,9200",
@@ -35,12 +35,12 @@
     "growTokenRange": "8000,9000",
     "id": "3",
     "maxDifferenceToken": "200",
-    "num": "1",
+    "num": "8",
     "overtakeTime": "90"
   },
   {
     "LockTokenTime": "86400",
-    "MaxToken": "5000",
+    "MaxToken": "10000",
     "beiZhu": "D级",
     "bizType": "balloon",
     "defaultTokenRange": "9000,9100",
@@ -48,7 +48,7 @@
     "growTokenRange": "6000,8000",
     "id": "4",
     "maxDifferenceToken": "100",
-    "num": "2",
+    "num": "20",
     "overtakeTime": "120"
   }
 ]
