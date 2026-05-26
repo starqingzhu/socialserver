@@ -84,6 +84,7 @@ func (m *Manager) Close() {
 func (m *Manager) startBackground() {
 	go m.tickLoop()
 	go m.syncLoop()
+	go m.subscribeDeleteEvents()
 }
 
 func (m *Manager) tickLoop() {
@@ -265,6 +266,13 @@ func (m *Manager) RemoveService(bizType BizType, actID int32) error {
 
 	if m.dao != nil {
 		m.dao.DeleteRankConfig(key)
+	}
+
+	// 广播删除事件，通知所有节点立即停止该 Service 的 tick，防止其他节点继续写入 MongoDB。
+	if m.rdb != nil {
+		if _, err := m.rdb.Publish(rediskeys.RankDeleteChannel, key); err != nil {
+			zaplog.LoggerSugar.Warnf("rank: publish delete event bizKey=%s: %v", key, err)
+		}
 	}
 	return nil
 }
@@ -535,6 +543,65 @@ func (m *Manager) warmUpAllServices(ctx context.Context) {
 	}
 	wg.Wait()
 	zaplog.LoggerSugar.Infof("rank: warmUpAllServices completed, services=%d", len(svcs))
+}
+
+// subscribeDeleteEvents 订阅排行榜删除广播，收到消息后立即在本节点移除对应 Service。
+// 这解决了多节点场景下节点A删除排行榜、节点B不知情仍持续写入 MongoDB 的问题：
+// 节点B收到通知后立即停止 tick（不再产生新写任务），然后执行本地清理。
+func (m *Manager) subscribeDeleteEvents() {
+	if m.rdb == nil {
+		return
+	}
+	ps, err := m.rdb.Subscribe(rediskeys.RankDeleteChannel)
+	if err != nil {
+		zaplog.LoggerSugar.Errorf("rank: subscribe delete channel: %v", err)
+		return
+	}
+	defer ps.Close()
+
+	ch := ps.Channel()
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			bizKey := msg.Payload
+			if bizKey == "" {
+				continue
+			}
+			// 解析 bizKey（"balloon:1068"）→ bizType + actID
+			sep := strings.LastIndex(bizKey, ":")
+			if sep <= 0 {
+				continue
+			}
+			bizType := BizType(bizKey[:sep])
+			actIDInt, err := strconv.ParseInt(bizKey[sep+1:], 10, 32)
+			if err != nil {
+				continue
+			}
+			actID := int32(actIDInt)
+
+			m.mu.Lock()
+			svc, ok := m.balloonServices[bizKey]
+			if ok {
+				delete(m.services, bizKey)
+				delete(m.balloonServices, bizKey)
+				m.memberIndex.RemoveByKey(bizKey)
+			}
+			m.mu.Unlock()
+
+			if ok {
+				zaplog.LoggerSugar.Infof("rank: subscribeDeleteEvents received delete bizKey=%s, cleaning up", bizKey)
+				if members, err := svc.GetAllMembers(); err == nil && len(members) > 0 {
+					m.memberIndex.RemoveUserEntries(bizType, actID, members)
+				}
+				svc.Cleanup()
+			}
+		}
+	}
 }
 
 // syncFromMongo 从 MongoDB 同步活动列表：新增本节点缺少的、移除 MongoDB 中已删除的。
