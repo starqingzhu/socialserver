@@ -499,14 +499,16 @@ func (s *Service) UpsertScore(ctx context.Context, userID int64, totalScore int6
 		}
 	}
 
-	group, err := s.ensureGroupLocked()
-	if err != nil {
-		s.mu.Unlock()
-		return err
-	}
-
 	isNewMember := false
+	needSpawnRobots := false
+	spawnCapacity := int32(0)
 	if _, ok := s.memberGroup[userID]; !ok {
+		// 新成员：找一个有空位的分组（或创建新分组）
+		group, err := s.ensureGroupLocked()
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
 		isNewMember = true
 		s.memberGroup[userID] = group.GroupID
 		group.RealCount++
@@ -515,24 +517,24 @@ func (s *Service) UpsertScore(ctx context.Context, userID int64, totalScore int6
 		if s.onMemberJoin != nil {
 			s.onMemberJoin(userID, group.GroupID)
 		}
+
+		needSpawnRobots = group.RealCount == 1 && s.config.hasRobots()
+		spawnCapacity = s.config.RankPeopleNum - group.RealCount
+		if needSpawnRobots {
+			plan := buildRobotSpawnPlan(s.config.RobotTiers, spawnCapacity)
+			group.RobotCount = totalRobotsInPlan(plan)
+			_ = s.store.SaveGroup(group)
+		}
+		if group.totalCount() >= s.config.RankPeopleNum {
+			group.State = GroupStateFull
+			_ = s.store.SaveGroup(group)
+		}
 	}
 	groupID := s.memberGroup[userID]
 
 	if totalScore > s.groupMaxRealScore[groupID] {
 		s.groupMaxRealScore[groupID] = totalScore
 		_ = s.store.UpdateMaxScore(groupID, totalScore)
-	}
-
-	needSpawnRobots := isNewMember && group.RealCount == 1 && s.config.hasRobots()
-	spawnCapacity := s.config.RankPeopleNum - group.RealCount
-	if needSpawnRobots {
-		plan := buildRobotSpawnPlan(s.config.RobotTiers, spawnCapacity)
-		group.RobotCount = totalRobotsInPlan(plan)
-		_ = s.store.SaveGroup(group)
-	}
-	if group.totalCount() >= s.config.RankPeopleNum {
-		group.State = GroupStateFull
-		_ = s.store.SaveGroup(group)
 	}
 
 	instanceID := s.groupInstanceID(groupID)
