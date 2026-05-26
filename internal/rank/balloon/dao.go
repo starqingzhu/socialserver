@@ -569,18 +569,44 @@ func (d *DAO) LoadAllRankInsts(bizId string) ([]RankInstDoc, error) {
 
 // --- 按 bizId 批量删除 ---
 
-// DeleteAllByBizId 删除指定 bizId 下的全部分组、成员、机器人和领奖记录文档。
-// 注意：此操作使用 DeleteMany 语义，mongoTask.GWriteTaskBuilder 目前仅支持 DeleteOne，
-// 故保留同步 session 调用，确保批量清理的原子一致性。
+// DeleteAllByBizId 同步删除指定 bizId 下的全部关联文档（DeleteMany 语义）。
+// 此方法处理调用时 MongoDB 中已存在的文档。
+// 对于调用前已在写队列中但尚未落库的文档，由调用方提前通过 QueueDeleteDocIDs 推入删除任务覆盖。
 func (d *DAO) DeleteAllByBizId(bizId string) error {
 	if !d.available() {
 		return nil
 	}
 	filter := bson.M{"bizId": bizId}
-	for _, coll := range []string{commonrank.CT_RANK_GROUP, commonrank.CT_RANK_MEMBER, commonrank.CT_RANK_ROBOT, commonrank.CT_RANK_CLAIM, commonrank.CT_RANK_SCORE, commonrank.CT_RANK_SETTLED, commonrank.CT_RANK_INST} {
-		if _, err := d.session().DeleteMany(d.dbName, coll, filter); err != nil {
-			return err
+	colls := []string{
+		commonrank.CT_RANK_GROUP,
+		commonrank.CT_RANK_MEMBER,
+		commonrank.CT_RANK_ROBOT,
+		commonrank.CT_RANK_CLAIM,
+		commonrank.CT_RANK_SCORE,
+		commonrank.CT_RANK_SETTLED,
+		commonrank.CT_RANK_INST,
+	}
+	session := d.session()
+	for _, coll := range colls {
+		if _, err := session.DeleteMany(d.dbName, coll, filter); err != nil {
+			zaplog.LoggerSugar.Errorf("balloon dao: DeleteAllByBizId %s bizId=%s: %v", coll, bizId, err)
 		}
 	}
 	return nil
+}
+
+// QueueDeleteDocIDs 通过异步队列为已知 docID 列表逐条推送 DeleteOne 任务。
+// hashFactor 与写任务保持一致（均为 docID），确保删除任务排在同 docID 的写任务之后执行，
+// 覆盖因写任务在 DeleteMany 之后执行而重新写入的文档。
+func (d *DAO) QueueDeleteDocIDs(coll string, docIDs []string) {
+	if !d.available() || len(docIDs) == 0 {
+		return
+	}
+	for _, docID := range docIDs {
+		id := docID
+		task := mongoTask.GWriteTaskBuilder.BuildDeleteTask(coll, id, bson.M{"_id": id})
+		if err := queue.PushMongoTask(task); err != nil {
+			zaplog.LoggerSugar.Errorf("balloon dao: QueueDeleteDocIDs %s id=%s: %v", coll, id, err)
+		}
+	}
 }

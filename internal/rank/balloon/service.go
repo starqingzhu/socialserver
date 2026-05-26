@@ -829,11 +829,16 @@ func (s *Service) UpdateConfig(cfg Config) {
 }
 
 func (s *Service) Cleanup() {
-	// 确保分组列表已从 Redis 加载，避免因懒加载未触发而遗漏分组级 key 的清理。
+	// 直接从 Redis 读取分组列表，不调用 ensureLoaded 避免触发 backfill 写任务入队。
+	// ensureLoaded 的 backfill 逻辑会把尚未写入 MongoDB 的数据推入写队列，
+	// 这些写任务会在 DeleteAllByBizId 的查询之后执行，导致数据在删除后重新出现。
 	s.mu.Lock()
-	s.ensureLoaded()
 	groups := s.groups
 	s.mu.Unlock()
+	if len(groups) == 0 {
+		// 内存中没有分组，从 Redis 读一次（只读 groups key，不触发全量 ensureLoaded）。
+		groups, _ = s.store.LoadGroups()
+	}
 
 	s.store.CleanupAll(groups)
 

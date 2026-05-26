@@ -234,7 +234,9 @@ func (m *Manager) UpdateService(bizType BizType, actID int32, cfg balloon.Config
 	return nil
 }
 
-// RemoveService 按业务类型移除排行榜服务并清理持久化数据。
+// RemoveService 按业务类型移除排行榜服务并清理所有相关持久化数据。
+// 若服务已在内存中，走正常卸载路径；若服务不在内存中（如重启后遗留数据），
+// 直接通过 Store/DAO 强制清理 Redis 和 MongoDB 中的全部关联数据。
 func (m *Manager) RemoveService(bizType BizType, actID int32) error {
 	if m == nil {
 		return fmt.Errorf("rank manager is nil")
@@ -243,26 +245,63 @@ func (m *Manager) RemoveService(bizType BizType, actID int32) error {
 
 	m.mu.Lock()
 	svc, ok := m.balloonServices[key]
-	if !ok {
-		m.mu.Unlock()
-		return fmt.Errorf("service not found: %s", key)
+	if ok {
+		delete(m.services, key)
+		delete(m.balloonServices, key)
+		m.memberIndex.RemoveByKey(key)
 	}
-	delete(m.services, key)
-	delete(m.balloonServices, key)
-	m.memberIndex.RemoveByKey(key)
 	m.mu.Unlock()
 
-	// 在清理 Redis 数据之前加载所有成员，以便清理各用户的成员索引条目。
-	if members, err := svc.GetAllMembers(); err == nil && len(members) > 0 {
-		m.memberIndex.RemoveUserEntries(bizType, actID, members)
+	if ok {
+		// 在清理 Redis 数据之前加载所有成员，以便清理各用户的成员索引条目。
+		if members, err := svc.GetAllMembers(); err == nil && len(members) > 0 {
+			m.memberIndex.RemoveUserEntries(bizType, actID, members)
+		}
+		svc.Cleanup()
+	} else {
+		// 服务不在内存中，直接通过 Store/DAO 强制清理持久化数据。
+		m.forceCleanupOrphan(context.Background(), bizType, actID)
 	}
-
-	svc.Cleanup()
 
 	if m.dao != nil {
 		m.dao.DeleteRankConfig(key)
 	}
 	return nil
+}
+
+// forceCleanupOrphan 清理不在内存中的排行榜服务的所有持久化数据（Redis + MongoDB）。
+// 用于服务重启后遗留数据、或 GM 强制删除时服务已不在内存的场景。
+func (m *Manager) forceCleanupOrphan(ctx context.Context, bizType BizType, actID int32) {
+	bizId := fmt.Sprintf("%s_%d", bizType, actID)
+	rankCode := fmt.Sprintf("%s_score_%d", bizType, actID)
+
+	store := balloon.NewStore(m.rdb, m.dao, bizId)
+
+	// 清理各用户的全局成员索引（rank:member_index:{userID}）。
+	if members, err := store.GetAllMembers(); err == nil && len(members) > 0 {
+		m.memberIndex.RemoveUserEntries(bizType, actID, members)
+	}
+
+	// 加载分组列表，用于删除各分组的 commonRank 实例。
+	groups, _ := store.LoadGroups()
+
+	// 清理 Redis 中所有 rank:* key（含分组级 key）及 MongoDB 中全部关联集合文档。
+	store.CleanupAll(groups)
+
+	// 删除每个分组对应的 commonRank 实例 Redis 数据。
+	for _, g := range groups {
+		if g == nil {
+			continue
+		}
+		instanceID := commonrank.NewInstanceID(rankCode, bizId, fmt.Sprintf("group_%d", g.GroupID))
+		if err := m.rankService.DeleteInstance(ctx, instanceID); err != nil {
+			zaplog.LoggerSugar.Warnf("rank: forceCleanup delete rank instance %s: %v", instanceID, err)
+		}
+	}
+	// 删除榜单定义。
+	if err := m.rankService.DeleteRankDef(ctx, rankCode); err != nil {
+		zaplog.LoggerSugar.Warnf("rank: forceCleanup delete rank def %s: %v", rankCode, err)
+	}
 }
 
 // ServiceInfo 包含排行榜服务的摘要信息。
@@ -602,10 +641,20 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 			}
 		}
 	}
-	removedSvcs := make([]*balloon.Service, 0, len(removed))
+	type removedEntry struct {
+		svc     *balloon.Service
+		bizType BizType
+		actID   int32
+	}
+	removedSvcs := make([]removedEntry, 0, len(removed))
 	for _, key := range removed {
 		if svc, ok := m.balloonServices[key]; ok {
-			removedSvcs = append(removedSvcs, svc)
+			cfg := svc.GetConfig()
+			removedSvcs = append(removedSvcs, removedEntry{
+				svc:     svc,
+				bizType: BizType(cfg.BizType),
+				actID:   cfg.ActID,
+			})
 			delete(m.services, key)
 			delete(m.balloonServices, key)
 			m.memberIndex.RemoveByKey(key)
@@ -613,8 +662,11 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 	}
 	m.mu.Unlock()
 
-	for _, svc := range removedSvcs {
-		svc.Cleanup()
+	for _, e := range removedSvcs {
+		if members, err := e.svc.GetAllMembers(); err == nil && len(members) > 0 {
+			m.memberIndex.RemoveUserEntries(e.bizType, e.actID, members)
+		}
+		e.svc.Cleanup()
 	}
 
 	if added > 0 || len(removed) > 0 {

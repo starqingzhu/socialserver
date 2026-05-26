@@ -386,6 +386,14 @@ func (st *Store) CleanupAll(groups []*Group) {
 			groups = loaded
 		}
 	}
+
+	// 在清除 Redis 之前，先根据 Redis 中现有数据计算所有可能的 MongoDB docID，
+	// 通过写队列推送 DeleteOne 任务（hashFactor = docID，与写任务一致），
+	// 确保删除任务排在队列中所有同 docID 的写任务之后执行，覆盖尚未落库的 upsert。
+	if st.hasMongo() {
+		st.queueDeleteAllDocIDs(groups)
+	}
+
 	st.rdb.Del(rediskeys.GetRankMetaKey(st.bizId))
 	st.rdb.Del(rediskeys.GetRankGroupsKey(st.bizId))
 	st.rdb.Del(rediskeys.GetRankMembersKey(st.bizId))
@@ -399,12 +407,73 @@ func (st *Store) CleanupAll(groups []*Group) {
 		st.rdb.Del(rediskeys.GetRankRobotsKey(st.bizId, g.GroupID))
 		st.rdb.Del(rediskeys.GetRankRobotInfosKey(st.bizId, g.GroupID))
 	}
-	// 删除 MongoDB 中该活动的全部关联文档。
+
+	// 同步 DeleteMany 清除调用时 MongoDB 中已存在的文档。
+	// 与 queueDeleteAllDocIDs 组合：前者覆盖写任务后写入的数据，后者覆盖当前已有数据。
 	if st.hasMongo() {
 		if err := st.dao.DeleteAllByBizId(st.bizId); err != nil {
 			zaplog.LoggerSugar.Errorf("balloon: CleanupAll delete mongo bizId=%s: %v", st.bizId, err)
 		}
 	}
+}
+
+// queueDeleteAllDocIDs 在清 Redis 之前，根据 Redis 中 groups/members/robots 数据
+// 计算出所有可能的 MongoDB docID，逐条推入写队列（hashFactor = docID）。
+// 这保证即使写任务在 DeleteMany 之后执行写入了数据，后入队的删除任务也会将其清除。
+func (st *Store) queueDeleteAllDocIDs(groups []*Group) {
+	if !st.hasMongo() {
+		return
+	}
+
+	// 读取 members（userID→groupID）
+	members, _ := st.GetAllMembers()
+
+	// 按分组计算并推送所有集合的删除任务
+	for _, g := range groups {
+		if g == nil {
+			continue
+		}
+		gid := g.GroupID
+		bizId := st.bizId
+
+		// rank_group
+		st.dao.QueueDeleteDocIDs(commonrank.CT_RANK_GROUP, []string{
+			fmt.Sprintf("%s:%d", bizId, gid),
+		})
+		// rank_inst
+		st.dao.QueueDeleteDocIDs(commonrank.CT_RANK_INST, []string{
+			fmt.Sprintf("%s:%d", bizId, gid),
+		})
+		// rank_settled
+		st.dao.QueueDeleteDocIDs(commonrank.CT_RANK_SETTLED, []string{
+			fmt.Sprintf("%s:%d", bizId, gid),
+		})
+
+		// rank_robot：从 Redis 读取该 group 的所有机器人 memberID
+		robotRaw, err := st.rdb.HGetAll(rediskeys.GetRankRobotsKey(bizId, gid))
+		if err == nil {
+			robotIDs := make([]string, 0, len(robotRaw))
+			for memberIDStr := range robotRaw {
+				robotIDs = append(robotIDs, fmt.Sprintf("%s:%d:%s", bizId, gid, memberIDStr))
+			}
+			st.dao.QueueDeleteDocIDs(commonrank.CT_RANK_ROBOT, robotIDs)
+		}
+	}
+
+	// rank_member 和 rank_score：遍历所有 members
+	memberDocIDs := make([]string, 0, len(members))
+	scoreDocIDs := make([]string, 0, len(members))
+	claimDocIDs := make([]string, 0, len(members))
+	for uid, gid := range members {
+		uidStr := strconv.FormatInt(uid, 10)
+		bizId := st.bizId
+		memberDocIDs = append(memberDocIDs, fmt.Sprintf("%s:%s", bizId, uidStr))
+		scoreDocIDs = append(scoreDocIDs, fmt.Sprintf("%s:%d:%s", bizId, gid, uidStr))
+		claimDocIDs = append(claimDocIDs, fmt.Sprintf("%s:%s", bizId, uidStr))
+	}
+	st.dao.QueueDeleteDocIDs(commonrank.CT_RANK_MEMBER, memberDocIDs)
+	st.dao.QueueDeleteDocIDs(commonrank.CT_RANK_SCORE, scoreDocIDs)
+	st.dao.QueueDeleteDocIDs(commonrank.CT_RANK_CLAIM, claimDocIDs)
 }
 
 // --- 奖励领取记录 ---
