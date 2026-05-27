@@ -8,6 +8,7 @@ import (
 	"common/defines"
 	cetcd "common/etcd"
 	mongoTask "common/task/mongo"
+	gohttp "golib/http"
 	mongodbmodule "golib/mongodb"
 	"golib/node"
 	"golib/queue"
@@ -16,7 +17,10 @@ import (
 	"golib/yamlcfg"
 	"golib/zaplog"
 	rankservice "socialserver/internal/rank"
+	hrouter "socialserver/internal/router/http"
 	rpcservice "socialserver/internal/router/rpc"
+
+	"github.com/gin-gonic/gin"
 )
 
 type Server struct {
@@ -29,6 +33,7 @@ func (s *Server) Name() string {
 }
 
 func (s *Server) Run(closeChan chan struct{}) {
+	gohttp.Main.Run()
 	<-closeChan
 }
 
@@ -130,6 +135,8 @@ func (s *Server) OnInit() {
 	}
 	rpcservice.InitAllRPC()
 
+	s.initHTTPServer()
+
 	cetcd.RefreshNodeStateInNormal()
 
 	zaplog.LoggerSugar.Infof("socialserver init complete, commitId:%s, compileDate:%s", s.GitCommitSha1, s.CompileDate)
@@ -154,6 +161,13 @@ func (s *Server) OnClose() {
 			zaplog.LoggerSugar.Error("mongodb close err:", e)
 		}
 	}
+}
+
+func (s *Server) initHTTPServer() {
+	gin.SetMode(gin.ReleaseMode)
+	gohttp.InitMainServer(config.Default.HttpCfg)
+	hrouter.InitRouter(gohttp.Main.Engine)
+	zaplog.LoggerSugar.Infof("initHTTPServer: HTTP server initialized on %s", config.Default.HttpCfg.HttpListenAddr)
 }
 
 func (s *Server) initServerNodeInfo() {
