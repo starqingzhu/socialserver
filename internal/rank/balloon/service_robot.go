@@ -130,11 +130,21 @@ func (s *Service) tickAllRobots(ctx context.Context, nowMs int64) {
 
 // tickGroupRobots 推进单个分组内所有机器人的积分并持久化变更。
 func (s *Service) tickGroupRobots(ctx context.Context, groupID int32, instanceID string, robots []*robotState, nowMs int64) {
-	topSnapshots, err := s.rankService.Range(ctx, instanceID, 0, 0)
-	if err != nil || len(topSnapshots) == 0 {
+	// 取组内全员榜单（含机器人），用于计算增长目标分
+	allSnapshots, err := s.rankService.Range(ctx, instanceID, 0, -1)
+	if err != nil || len(allSnapshots) == 0 {
 		return
 	}
-	firstScore := topSnapshots[0].Score
+	firstScore := allSnapshots[0].Score
+
+	// 找出真实玩家第一名分值，作为 maxDifferenceToken 的约束基准
+	var realFirstScore int64
+	for _, snap := range allSnapshots {
+		if !IsRobotMemberID(snap.MemberId) {
+			realFirstScore = snap.Score
+			break
+		}
+	}
 
 	var updates []rank.RankScoreItem
 	var changed []*robotState
@@ -144,7 +154,7 @@ func (s *Service) tickGroupRobots(ctx context.Context, groupID int32, instanceID
 			continue
 		}
 		oldScore := robot.Score
-		newScore := tickRobotScore(robot, tier, firstScore, nowMs, s.config.GameEndTime)
+		newScore := tickRobotScore(robot, tier, firstScore, realFirstScore, nowMs, s.config.GameEndTime)
 		if newScore != oldScore {
 			changed = append(changed, robot)
 			updates = append(updates, rank.RankScoreItem{

@@ -113,14 +113,15 @@ func initRobotScore(min, max int64) int64 {
 
 // tickRobotScore 按机器人分数变化流程图推进一步。
 // 参数：
-//   - robot         机器人状态（in/out）
-//   - tier          档次配置
-//   - firstScore    组内当前第一名积分（含机器人），用于计算目标分和 maxDifferenceToken 约束
-//   - nowMs         当前时间（Unix 毫秒）
-//   - gameEndTimeMs 玩法结束时间（Unix 毫秒），LockTokenTime 以此为基准
+//   - robot          机器人状态（in/out）
+//   - tier           档次配置
+//   - firstScore     组内当前第一名积分（含机器人），用于计算增长目标分
+//   - realFirstScore 真实玩家第一名积分，用于 maxDifferenceToken 约束（0 表示无真实玩家，不约束）
+//   - nowMs          当前时间（Unix 毫秒）
+//   - gameEndTimeMs  玩法结束时间（Unix 毫秒），LockTokenTime 以此为基准
 //
 // 返回实际写入的新积分（若未变动则返回当前积分）。
-func tickRobotScore(robot *robotState, tier *RobotTierCfg, firstScore int64, nowMs int64, gameEndTimeMs int64) int64 {
+func tickRobotScore(robot *robotState, tier *RobotTierCfg, firstScore int64, realFirstScore int64, nowMs int64, gameEndTimeMs int64) int64 {
 	// 1. 距玩法结束剩余时间 ≤ LockTokenTime → 停止增长
 	if gameEndTimeMs > 0 && gameEndTimeMs-nowMs <= tier.LockTokenTimeMs {
 		return robot.Score
@@ -141,11 +142,11 @@ func tickRobotScore(robot *robotState, tier *RobotTierCfg, firstScore int64, now
 	}
 
 	// 5. 依次应用两条上限：
-	//    a. 与组内第一名的最大分差（maxDifferenceToken）
-	//    b. 积分绝对上限（MaxToken）
+	//    a. 真实玩家第一名 + maxDifferenceToken（有真实玩家时生效）
+	//    b. 积分绝对上限 MaxToken
 	newScore := targetScore
-	if firstScore > 0 && newScore > firstScore+tier.MaxDifferenceToken {
-		newScore = firstScore + tier.MaxDifferenceToken
+	if realFirstScore > 0 && newScore > realFirstScore+tier.MaxDifferenceToken {
+		newScore = realFirstScore + tier.MaxDifferenceToken
 	}
 	if newScore > tier.MaxToken {
 		newScore = tier.MaxToken
