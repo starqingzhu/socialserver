@@ -46,6 +46,9 @@ func (s *Service) spawnRobotsForGroup(ctx context.Context, groupID int32, capaci
 
 			memberID := robotMemberID(groupID, robotIndex)
 			initScore := initRobotScore(tier.DefaultTokenMin, tier.DefaultTokenMax)
+			if initScore > tier.MaxToken {
+				initScore = tier.MaxToken
+			}
 
 			newRobots = append(newRobots, &robotState{
 				MemberID:   memberID,
@@ -136,7 +139,7 @@ func (s *Service) tickGroupRobots(ctx context.Context, groupID int32, instanceID
 			continue
 		}
 		oldScore := robot.Score
-		newScore := tickRobotScore(robot, tier, firstScore, realFirstScore, nowMs, s.config.CloseTime)
+		newScore := tickRobotScore(robot, tier, firstScore, realFirstScore, nowMs, s.config.GameEndTime)
 		if newScore != oldScore {
 			changed = append(changed, robot)
 			updates = append(updates, rank.RankScoreItem{

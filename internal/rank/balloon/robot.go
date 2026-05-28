@@ -113,45 +113,47 @@ func initRobotScore(min, max int64) int64 {
 
 // tickRobotScore 按机器人分数变化流程图推进一步。
 // 参数：
-//   - robot         机器人状态（in/out）
-//   - tier          档次配置
-//   - firstScore    当前第一名积分（无论是否为机器人，用于计算增长目标）
+//   - robot          机器人状态（in/out）
+//   - tier           档次配置
+//   - firstScore     当前第一名积分（无论是否为机器人，用于计算增长目标）
 //   - realFirstScore 真实玩家第一名积分（用于 maxDifferenceToken 判断）
-//   - nowMs         当前时间（Unix 毫秒）
-//   - closeTimeMs   排行榜关闭时间（Unix 毫秒）
+//   - nowMs          当前时间（Unix 毫秒）
+//   - gameEndTimeMs  玩法结束时间（Unix 毫秒），LockTokenTime 以此为基准
 //
 // 返回实际写入的新积分（若未变动则返回当前积分）。
-func tickRobotScore(robot *robotState, tier *RobotTierCfg, firstScore int64, realFirstScore int64, nowMs int64, closeTimeMs int64) int64 {
-	// 1. 排行榜剩余时间 ≤ LockTokenTime → 停止增长
-	if closeTimeMs-nowMs <= tier.LockTokenTimeMs {
+func tickRobotScore(robot *robotState, tier *RobotTierCfg, firstScore int64, realFirstScore int64, nowMs int64, gameEndTimeMs int64) int64 {
+	// 1. 距玩法结束剩余时间 ≤ LockTokenTime → 停止增长
+	if gameEndTimeMs > 0 && gameEndTimeMs-nowMs <= tier.LockTokenTimeMs {
 		return robot.Score
 	}
 
-	// 2. 已达积分上限 → 停止增长
-	if robot.Score >= tier.MaxToken {
-		return robot.Score
-	}
-
-	// 3. 未到增长CD → 等待
+	// 2. 未到增长CD → 等待
 	if nowMs-robot.LastGrowAt < tier.GrowTokenCdMs {
 		return robot.Score
 	}
 
-	// 4. 机器人当前分 - 玩家第一名分 > maxDifferenceToken → 停止增长
-	if realFirstScore > 0 && robot.Score-realFirstScore > tier.MaxDifferenceToken {
+	// 3. 基于当前第一名积分，在比例范围内随机目标分
+	targetScore := calcGrowTarget(firstScore, tier.GrowTokenMinPermille, tier.GrowTokenMaxPermille)
+
+	// 4. 随机结果不高于当前积分 → 本次不变
+	if targetScore <= robot.Score {
+		robot.LastGrowAt = nowMs
 		return robot.Score
 	}
 
-	// 5. 基于当前第一名积分，在比例范围内随机目标分
-	targetScore := calcGrowTarget(firstScore, tier.GrowTokenMinPermille, tier.GrowTokenMaxPermille)
+	// 5. 计算候选新积分，依次应用两条上限：
+	//    a. 与真实玩家第一名的最大分差（maxDifferenceToken）
+	//    b. 积分绝对上限（MaxToken）
+	newScore := targetScore
+	if realFirstScore > 0 && newScore > realFirstScore+tier.MaxDifferenceToken {
+		newScore = realFirstScore + tier.MaxDifferenceToken
+	}
+	if newScore > tier.MaxToken {
+		newScore = tier.MaxToken
+	}
 
-	// 6. 随机结果高于当前积分则增长；否则本次不变
 	robot.LastGrowAt = nowMs
-	if targetScore > robot.Score {
-		newScore := targetScore
-		if newScore > tier.MaxToken {
-			newScore = tier.MaxToken
-		}
+	if newScore > robot.Score {
 		robot.Score = newScore
 	}
 	return robot.Score
