@@ -9,6 +9,7 @@ import (
 )
 
 // spawnRobotsForGroup 为指定分组生成机器人并持久化到 Redis。
+// 若距玩法结束时间不足任意一档 LockTokenTime，则跳过该档机器人的生成。
 func (s *Service) spawnRobotsForGroup(ctx context.Context, groupID int32, capacity int32, now int64) error {
 	plan := buildRobotSpawnPlan(s.config.RobotTiers, capacity)
 	if len(plan) == 0 {
@@ -31,9 +32,15 @@ func (s *Service) spawnRobotsForGroup(ctx context.Context, groupID int32, capaci
 	var scoreItems []rank.RankScoreItem
 	var newRobots []*robotState
 
+	gameEndTime := s.config.GameEndTime
+
 	for _, entry := range plan {
 		tier := s.findTier(entry.TierID)
 		if tier == nil {
+			continue
+		}
+		// 距玩法结束时间不足 LockTokenTime，不初始化该档机器人
+		if gameEndTime > 0 && gameEndTime-now <= tier.LockTokenTimeMs {
 			continue
 		}
 		for i := int32(0); i < entry.Count; i++ {
@@ -63,7 +70,7 @@ func (s *Service) spawnRobotsForGroup(ctx context.Context, groupID int32, capaci
 				AtTime:    now,
 				EnterTime: now,
 				AvatarInfo: &rank.AvatarInfo{
-					UserId: memberID, // 机器人 userId 必须与 key 一致（负数）
+					UserId: memberID,
 					Name:   info.Name,
 					Avatar: info.Avatar,
 					Frame:  info.Frame,
@@ -93,10 +100,9 @@ func (s *Service) spawnRobotsForGroup(ctx context.Context, groupID int32, capaci
 // tickAllRobots 推进所有活跃分组内机器人的积分增长。
 func (s *Service) tickAllRobots(ctx context.Context, nowMs int64) {
 	type groupSnapshot struct {
-		groupID      int32
-		instanceID   string
-		robots       []*robotState
-		maxRealScore int64
+		groupID    int32
+		instanceID string
+		robots     []*robotState
 	}
 	s.mu.Lock()
 	s.ensureLoaded()
@@ -110,21 +116,20 @@ func (s *Service) tickAllRobots(ctx context.Context, nowMs int64) {
 			continue
 		}
 		snapshots = append(snapshots, groupSnapshot{
-			groupID:      group.GroupID,
-			instanceID:   group.InstanceID,
-			robots:       robots,
-			maxRealScore: s.groupMaxRealScore[group.GroupID],
+			groupID:    group.GroupID,
+			instanceID: group.InstanceID,
+			robots:     robots,
 		})
 	}
 	s.mu.Unlock()
 
 	for _, snap := range snapshots {
-		s.tickGroupRobots(ctx, snap.groupID, snap.instanceID, snap.robots, snap.maxRealScore, nowMs)
+		s.tickGroupRobots(ctx, snap.groupID, snap.instanceID, snap.robots, nowMs)
 	}
 }
 
 // tickGroupRobots 推进单个分组内所有机器人的积分并持久化变更。
-func (s *Service) tickGroupRobots(ctx context.Context, groupID int32, instanceID string, robots []*robotState, realFirstScore int64, nowMs int64) {
+func (s *Service) tickGroupRobots(ctx context.Context, groupID int32, instanceID string, robots []*robotState, nowMs int64) {
 	topSnapshots, err := s.rankService.Range(ctx, instanceID, 0, 0)
 	if err != nil || len(topSnapshots) == 0 {
 		return
@@ -139,14 +144,14 @@ func (s *Service) tickGroupRobots(ctx context.Context, groupID int32, instanceID
 			continue
 		}
 		oldScore := robot.Score
-		newScore := tickRobotScore(robot, tier, firstScore, realFirstScore, nowMs, s.config.GameEndTime)
+		newScore := tickRobotScore(robot, tier, firstScore, nowMs, s.config.GameEndTime)
 		if newScore != oldScore {
 			changed = append(changed, robot)
 			updates = append(updates, rank.RankScoreItem{
 				MemberId:   robot.MemberID,
 				Score:      newScore,
 				AtTime:     nowMs,
-				AvatarInfo: s.robotAvatarInfo(robot), // 同步修正 userId（确保与负数 key 一致）
+				AvatarInfo: s.robotAvatarInfo(robot),
 			})
 		}
 	}

@@ -372,8 +372,8 @@ func cfgRobotTiersToProto(tiers []balloon.RobotTierCfg) []*pb.PBRobotTierCfg {
 		result[i] = &pb.PBRobotTierCfg{
 			TierId: t.TierID, Num: t.Num,
 			DefaultTokenMin: t.DefaultTokenMin, DefaultTokenMax: t.DefaultTokenMax,
-			GrowTokenCdMs: t.GrowTokenCdMs, GrowTokenMinPermille: t.GrowTokenMinPermille,
-			GrowTokenMaxPermille: t.GrowTokenMaxPermille, MaxToken: t.MaxToken,
+			GrowTokenCdMs: t.GrowTokenCdMs, GrowTokenMinPermille: t.GrowTokenMinBps,
+			GrowTokenMaxPermille: t.GrowTokenMaxBps, MaxToken: t.MaxToken,
 			MaxDifferenceToken: t.MaxDifferenceToken, LockTokenTimeMs: t.LockTokenTimeMs,
 		}
 	}

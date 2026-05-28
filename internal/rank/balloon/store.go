@@ -341,41 +341,6 @@ func (st *Store) LoadUsedInfoIDs(groupID int32) (map[int64]struct{}, error) {
 	return result, nil
 }
 
-// --- 真实玩家最高积分 ---
-
-func (st *Store) UpdateMaxScore(groupID int32, score int64) error {
-	if !st.available() {
-		return nil
-	}
-	key := rediskeys.GetRankMaxScoreKey(st.bizId)
-	field := strconv.FormatInt(int64(groupID), 10)
-	cur, err := st.rdb.HGet(key, field)
-	if err != nil && !st.rdb.IsNil(err) {
-		return err
-	}
-	if cur != "" {
-		if curVal, _ := strconv.ParseInt(cur, 10, 64); curVal >= score {
-			return nil
-		}
-	}
-	st.rdb.HSet(key, field, strconv.FormatInt(score, 10))
-	return nil
-}
-
-func (st *Store) GetMaxScore(groupID int32) (int64, error) {
-	if !st.available() {
-		return 0, nil
-	}
-	raw, err := st.rdb.HGet(rediskeys.GetRankMaxScoreKey(st.bizId), strconv.FormatInt(int64(groupID), 10))
-	if err != nil {
-		if st.rdb.IsNil(err) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	return strconv.ParseInt(raw, 10, 64)
-}
-
 func (st *Store) CleanupAll(groups []*Group) {
 	if !st.available() {
 		return
@@ -397,7 +362,6 @@ func (st *Store) CleanupAll(groups []*Group) {
 	st.rdb.Del(rediskeys.GetRankMetaKey(st.bizId))
 	st.rdb.Del(rediskeys.GetRankGroupsKey(st.bizId))
 	st.rdb.Del(rediskeys.GetRankMembersKey(st.bizId))
-	st.rdb.Del(rediskeys.GetRankMaxScoreKey(st.bizId))
 	st.rdb.Del(rediskeys.GetRankClaimsKey(st.bizId))
 	st.rdb.Del(rediskeys.GetRankMongoCheckedKey(st.bizId))
 	for _, g := range groups {

@@ -26,8 +26,8 @@ type RobotTierCfg struct {
 	DefaultTokenMin      int64 // 初始积分下限
 	DefaultTokenMax      int64 // 初始积分上限
 	GrowTokenCdMs        int64 // 增长冷却时间（毫秒）
-	GrowTokenMinPermille int64 // 增长目标最小千分比
-	GrowTokenMaxPermille int64 // 增长目标最大千分比
+	GrowTokenMinBps int64 // 增长目标最小万分比（配置值 / 10000 * firstScore = 目标积分）
+	GrowTokenMaxBps int64 // 增长目标最大万分比
 	MaxToken             int64 // 积分上限
 	MaxDifferenceToken   int64 // 超过玩家第一名的最大分差（超过则停止增长）
 	LockTokenTimeMs      int64 // 结束前停止增长的时间窗口（毫秒）
@@ -113,15 +113,14 @@ func initRobotScore(min, max int64) int64 {
 
 // tickRobotScore 按机器人分数变化流程图推进一步。
 // 参数：
-//   - robot          机器人状态（in/out）
-//   - tier           档次配置
-//   - firstScore     当前第一名积分（无论是否为机器人，用于计算增长目标）
-//   - realFirstScore 真实玩家第一名积分（用于 maxDifferenceToken 判断）
-//   - nowMs          当前时间（Unix 毫秒）
-//   - gameEndTimeMs  玩法结束时间（Unix 毫秒），LockTokenTime 以此为基准
+//   - robot         机器人状态（in/out）
+//   - tier          档次配置
+//   - firstScore    组内当前第一名积分（含机器人），用于计算目标分和 maxDifferenceToken 约束
+//   - nowMs         当前时间（Unix 毫秒）
+//   - gameEndTimeMs 玩法结束时间（Unix 毫秒），LockTokenTime 以此为基准
 //
 // 返回实际写入的新积分（若未变动则返回当前积分）。
-func tickRobotScore(robot *robotState, tier *RobotTierCfg, firstScore int64, realFirstScore int64, nowMs int64, gameEndTimeMs int64) int64 {
+func tickRobotScore(robot *robotState, tier *RobotTierCfg, firstScore int64, nowMs int64, gameEndTimeMs int64) int64 {
 	// 1. 距玩法结束剩余时间 ≤ LockTokenTime → 停止增长
 	if gameEndTimeMs > 0 && gameEndTimeMs-nowMs <= tier.LockTokenTimeMs {
 		return robot.Score
@@ -132,21 +131,21 @@ func tickRobotScore(robot *robotState, tier *RobotTierCfg, firstScore int64, rea
 		return robot.Score
 	}
 
-	// 3. 基于当前第一名积分，在比例范围内随机目标分
-	targetScore := calcGrowTarget(firstScore, tier.GrowTokenMinPermille, tier.GrowTokenMaxPermille)
+	// 3. 基于组内第一名积分，在万分比范围内随机目标分
+	targetScore := calcGrowTarget(firstScore, tier.GrowTokenMinBps, tier.GrowTokenMaxBps)
 
-	// 4. 随机结果不高于当前积分 → 本次不变
+	// 4. 随机结果不高于当前积分 → 本次不变（更新 CD 时间）
 	if targetScore <= robot.Score {
 		robot.LastGrowAt = nowMs
 		return robot.Score
 	}
 
-	// 5. 计算候选新积分，依次应用两条上限：
-	//    a. 与真实玩家第一名的最大分差（maxDifferenceToken）
+	// 5. 依次应用两条上限：
+	//    a. 与组内第一名的最大分差（maxDifferenceToken）
 	//    b. 积分绝对上限（MaxToken）
 	newScore := targetScore
-	if realFirstScore > 0 && newScore > realFirstScore+tier.MaxDifferenceToken {
-		newScore = realFirstScore + tier.MaxDifferenceToken
+	if firstScore > 0 && newScore > firstScore+tier.MaxDifferenceToken {
+		newScore = firstScore + tier.MaxDifferenceToken
 	}
 	if newScore > tier.MaxToken {
 		newScore = tier.MaxToken
@@ -159,11 +158,11 @@ func tickRobotScore(robot *robotState, tier *RobotTierCfg, firstScore int64, rea
 	return robot.Score
 }
 
-// calcGrowTarget 计算增长目标积分：firstScore * randPermille / 1000。
-func calcGrowTarget(firstScore, minPermille, maxPermille int64) int64 {
-	if firstScore <= 0 || minPermille >= maxPermille {
-		return firstScore * minPermille / 1000
+// calcGrowTarget 计算增长目标积分：firstScore * randBps / 10000。
+func calcGrowTarget(firstScore, minBps, maxBps int64) int64 {
+	if firstScore <= 0 || minBps >= maxBps {
+		return firstScore * minBps / 10000
 	}
-	r := minPermille + rand.Int63n(maxPermille-minPermille+1)
-	return firstScore * r / 1000
+	r := minBps + rand.Int63n(maxBps-minBps+1)
+	return firstScore * r / 10000
 }

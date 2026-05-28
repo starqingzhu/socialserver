@@ -29,9 +29,8 @@ type Service struct {
 	settledGroup map[int32][]rank.RankMemberSnapshot
 
 	// 机器人内存缓存
-	groupRobots       map[int32][]*robotState
-	groupUsedInfoIDs  map[int32]map[int64]struct{}
-	groupMaxRealScore map[int32]int64
+	groupRobots      map[int32][]*robotState
+	groupUsedInfoIDs map[int32]map[int64]struct{}
 
 	nextGroupID  int32
 	onMemberJoin func(userID int64, groupID int32)
@@ -48,9 +47,8 @@ func NewService(rankService rank.Service, config Config, rdb *goredis.Redis, dao
 		store:             NewStore(rdb, dao, config.computeBizId()),
 		memberGroup:       make(map[int64]int32),
 		settledGroup:      make(map[int32][]rank.RankMemberSnapshot),
-		groupRobots:       make(map[int32][]*robotState),
-		groupUsedInfoIDs:  make(map[int32]map[int64]struct{}),
-		groupMaxRealScore: make(map[int32]int64),
+		groupRobots:      make(map[int32][]*robotState),
+		groupUsedInfoIDs: make(map[int32]map[int64]struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -111,9 +109,6 @@ func (s *Service) ensureLoaded() {
 			s.groupUsedInfoIDs[g.GroupID] = idSet
 			_ = s.store.SaveUsedInfoIDs(g.GroupID, idSet)
 		}
-		if score, err := s.store.GetMaxScore(g.GroupID); err == nil {
-			s.groupMaxRealScore[g.GroupID] = score
-		}
 	}
 
 	// 4. 双向同步 rank:mb ↔ MongoDB，并在 Redis 清理后恢复 rank:inst / rank:settled。
@@ -129,8 +124,7 @@ func (s *Service) ensureLoaded() {
 
 		if mbExists {
 			// 方向1：rank:mb 已存在。
-			// (a) MongoDB 积分记录为空 → backfill；
-			// (b) rank:max_score 缺失（单独清空场景）→ 从 rank:mb 重建，防止机器人增长上限失控。
+			// MongoDB 积分记录为空 → backfill；
 			// rank:mb 存在但 rank:inst 可能缺失（如仅 rank:inst 被清除）→ 先恢复实例元数据，
 			// 否则后续 Snapshot/Range 都会因 GetInstance 返回 ErrInstanceNotFound 而失败。
 			if instExists, _ := s.store.RdbExists(rediskeys.GetRankInstKey(instanceID)); !instExists {
@@ -153,30 +147,19 @@ func (s *Service) ensureLoaded() {
 			}
 
 			needBackfill := len(mongoScores) == 0
-			needMaxScore := s.groupMaxRealScore[g.GroupID] == 0
-			if needBackfill || needMaxScore {
+			if needBackfill {
 				if snaps, snapErr := s.rankService.Snapshot(ctx, instanceID); snapErr == nil {
-					var maxRealScore int64
 					for _, snap := range snaps {
 						if IsRobotMemberID(snap.MemberId) {
 							continue
 						}
-						if snap.Score > maxRealScore {
-							maxRealScore = snap.Score
+						et := snap.EnterTime
+						if et == 0 {
+							et = snap.UpdateTime
 						}
-						if needBackfill {
-							et := snap.EnterTime
-							if et == 0 {
-								et = snap.UpdateTime
-							}
-							if wErr := s.store.SaveScore(g.GroupID, snap.MemberId, snap.Score, et, snap.Sequence, snap.UpdateTime, snap.AvatarInfo); wErr != nil {
-								zaplog.LoggerSugar.Warnf("balloon: backfill score group=%d member=%d: %v", g.GroupID, snap.MemberId, wErr)
-							}
+						if wErr := s.store.SaveScore(g.GroupID, snap.MemberId, snap.Score, et, snap.Sequence, snap.UpdateTime, snap.AvatarInfo); wErr != nil {
+							zaplog.LoggerSugar.Warnf("balloon: backfill score group=%d member=%d: %v", g.GroupID, snap.MemberId, wErr)
 						}
-					}
-					if needMaxScore && maxRealScore > 0 {
-						s.groupMaxRealScore[g.GroupID] = maxRealScore
-						_ = s.store.UpdateMaxScore(g.GroupID, maxRealScore)
 					}
 				}
 			}
@@ -184,24 +167,16 @@ func (s *Service) ensureLoaded() {
 			// 方向2：rank:mb 缺失 → 从 MongoDB 恢复（真实玩家 + 机器人）
 			items := make([]rank.RankScoreItem, 0, len(mongoScores)+len(s.groupRobots[g.GroupID]))
 
-			// 恢复真实玩家积分，同时重建 rank:max_score
-			var maxRealScore int64
+			// 恢复真实玩家积分
 			for _, doc := range mongoScores {
-				if doc.Score > maxRealScore {
-					maxRealScore = doc.Score
-				}
 				items = append(items, rank.RankScoreItem{
 					MemberId:   doc.UserID,
 					Score:      doc.Score,
 					AtTime:     doc.UpdateTime,
 					EnterTime:  doc.EnterTime,
-					Sequence:   doc.Sequence, // 恢复原始进榜序号，保证同分同 enterTime 时名次顺序不变
+					Sequence:   doc.Sequence,
 					AvatarInfo: doc.AvatarInfo,
 				})
-			}
-			if maxRealScore > s.groupMaxRealScore[g.GroupID] {
-				s.groupMaxRealScore[g.GroupID] = maxRealScore
-				_ = s.store.UpdateMaxScore(g.GroupID, maxRealScore)
 			}
 
 			// 恢复机器人积分（确保排行榜完整）
@@ -305,7 +280,7 @@ func (s *Service) WarmUp(ctx context.Context) {
 }
 
 // recoverGroupData 在运行期间检测到 rank:mb 被 Redis 驱逐后，
-// 从 MongoDB 重建指定分组的排行榜数据（rank:mb / rank:inst / rank:max_score）。
+// 从 MongoDB 重建指定分组的排行榜数据（rank:mb / rank:inst）。
 // 不持有 s.mu，MongoDB 读和 Redis 写均在锁外执行（操作幂等）。
 // 在锁外读取机器人快照前会短暂加锁，避免数据竞争。
 func (s *Service) recoverGroupData(ctx context.Context, groupID int32, instanceID string) {
@@ -318,21 +293,16 @@ func (s *Service) recoverGroupData(ctx context.Context, groupID int32, instanceI
 		return
 	}
 
-	// 在锁下读取机器人快照和当前最大积分，避免与 tickAllRobots 并发时的数据竞争
+	// 在锁下读取机器人快照，避免与 tickAllRobots 并发时的数据竞争
 	s.mu.Lock()
 	robotsCopy := make([]*robotState, len(s.groupRobots[groupID]))
 	copy(robotsCopy, s.groupRobots[groupID])
-	curMaxScore := s.groupMaxRealScore[groupID]
 	robotInfos := s.config.RobotInfos
 	s.mu.Unlock()
 
 	items := make([]rank.RankScoreItem, 0, len(mongoScores)+len(robotsCopy))
-	var maxRealScore int64
 
 	for _, doc := range mongoScores {
-		if doc.Score > maxRealScore {
-			maxRealScore = doc.Score
-		}
 		items = append(items, rank.RankScoreItem{
 			MemberId:   doc.UserID,
 			Score:      doc.Score,
@@ -364,18 +334,6 @@ func (s *Service) recoverGroupData(ctx context.Context, groupID int32, instanceI
 			zaplog.LoggerSugar.Warnf("balloon: runtime recover rank:mb group=%d bizId=%s: %v", groupID, s.bizId(), restoreErr)
 			return
 		}
-	}
-
-	// 重建 rank:max_score hash field
-	if maxRealScore > curMaxScore {
-		s.mu.Lock()
-		if maxRealScore > s.groupMaxRealScore[groupID] {
-			s.groupMaxRealScore[groupID] = maxRealScore
-		}
-		s.mu.Unlock()
-		_ = s.store.UpdateMaxScore(groupID, maxRealScore)
-	} else if curMaxScore > 0 {
-		_ = s.store.UpdateMaxScore(groupID, curMaxScore)
 	}
 
 	// 若 rank:inst 也缺失，同步恢复实例元数据（优先使用 MongoDB 中持久化的精确数据）
@@ -428,7 +386,7 @@ func (s *Service) canUpdateScore(now int64) rank.InstanceStateType {
 }
 
 // Tick 推进活动时间轴：
-// 1. 驱动所有活跃分组内的机器人积分增长（CloseTime 前）。
+// 1. 驱动所有活跃分组内的机器人积分增长（GameEndTime 前）。
 // 2. 到达 GameEndTime（若未设置则退化为 CloseTime）后自动结算。
 func (s *Service) Tick(ctx context.Context, now int64) error {
 
@@ -437,7 +395,7 @@ func (s *Service) Tick(ctx context.Context, now int64) error {
 	s.mu.Unlock()
 
 	// 活动关闭前推进机器人积分；关闭后机器人停止增长，无需再 tick。
-	if s.config.hasRobots() && now < s.config.CloseTime {
+	if s.config.hasRobots() && now < s.config.GameEndTime {
 		s.tickAllRobots(ctx, now)
 	}
 
@@ -531,11 +489,6 @@ func (s *Service) UpsertScore(ctx context.Context, userID int64, totalScore int6
 		}
 	}
 	groupID := s.memberGroup[userID]
-
-	if totalScore > s.groupMaxRealScore[groupID] {
-		s.groupMaxRealScore[groupID] = totalScore
-		_ = s.store.UpdateMaxScore(groupID, totalScore)
-	}
 
 	instanceID := s.groupInstanceID(groupID)
 	alreadyLoaded := s.loaded
