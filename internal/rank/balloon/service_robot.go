@@ -21,14 +21,22 @@ func (s *Service) spawnRobotsForGroup(ctx context.Context, groupID int32, capaci
 		return fmt.Errorf("ensure group instance: %w", err)
 	}
 
-	s.mu.Lock()
-	if s.groupUsedInfoIDs[groupID] == nil {
-		s.groupUsedInfoIDs[groupID] = make(map[int64]struct{})
+	// 多节点：直接从 Redis 读取已用 InfoID，避免内存缓存跨节点不一致。
+	usedInfoIDs, _ := s.store.LoadUsedInfoIDs(groupID)
+	if usedInfoIDs == nil {
+		usedInfoIDs = make(map[int64]struct{})
 	}
-	usedInfoIDs := s.groupUsedInfoIDs[groupID]
-	s.mu.Unlock()
 
+	// 多节点：从 Redis 已有机器人推算下一个 robotIndex，避免并发 spawn 生成重复 MemberID。
+	// 逆向公式：index = -(MemberID) - groupID*stride
+	existingRobots, _ := s.store.LoadRobots(groupID)
 	var robotIndex int32
+	for _, r := range existingRobots {
+		idx := int32(-r.MemberID - int64(groupID)*robotIDGroupStride)
+		if idx > robotIndex {
+			robotIndex = idx
+		}
+	}
 	var scoreItems []rank.RankScoreItem
 	var newRobots []*robotState
 
@@ -86,10 +94,6 @@ func (s *Service) spawnRobotsForGroup(ctx context.Context, groupID int32, capaci
 		return fmt.Errorf("write robot scores: %w", err)
 	}
 
-	s.mu.Lock()
-	s.groupRobots[groupID] = append(s.groupRobots[groupID], newRobots...)
-	s.mu.Unlock()
-
 	_ = s.store.SaveRobots(groupID, newRobots)
 	_ = s.store.SaveUsedInfoIDs(groupID, usedInfoIDs)
 
@@ -98,33 +102,38 @@ func (s *Service) spawnRobotsForGroup(ctx context.Context, groupID int32, capaci
 }
 
 // tickAllRobots 推进所有活跃分组内机器人的积分增长。
+// 多节点：每次 tick 从 Redis 加载最新分组列表和机器人状态，避免内存缓存跨节点不一致。
 func (s *Service) tickAllRobots(ctx context.Context, nowMs int64) {
-	type groupSnapshot struct {
+	// 从 Redis 读取最新分组列表，确保能看到其他节点创建的分组。
+	groups, err := s.store.LoadGroups()
+	if err != nil || len(groups) == 0 {
+		// Redis 不可用时回退到内存缓存
+		s.mu.Lock()
+		s.ensureLoaded()
+		groups = make([]*Group, len(s.groups))
+		copy(groups, s.groups)
+		s.mu.Unlock()
+	}
+
+	type groupEntry struct {
 		groupID    int32
 		instanceID string
-		robots     []*robotState
 	}
-	s.mu.Lock()
-	s.ensureLoaded()
-	var snapshots []groupSnapshot
-	for _, group := range s.groups {
-		if group == nil || group.State == GroupStateSettled {
+	var targets []groupEntry
+	for _, g := range groups {
+		if g == nil || g.State == GroupStateSettled {
 			continue
 		}
-		robots := s.groupRobots[group.GroupID]
-		if len(robots) == 0 {
-			continue
-		}
-		snapshots = append(snapshots, groupSnapshot{
-			groupID:    group.GroupID,
-			instanceID: group.InstanceID,
-			robots:     robots,
-		})
+		targets = append(targets, groupEntry{groupID: g.GroupID, instanceID: g.InstanceID})
 	}
-	s.mu.Unlock()
 
-	for _, snap := range snapshots {
-		s.tickGroupRobots(ctx, snap.groupID, snap.instanceID, snap.robots, nowMs)
+	for _, t := range targets {
+		// 每次 tick 从 Redis 加载最新机器人状态，确保多节点一致。
+		robots, err := s.store.LoadRobots(t.groupID)
+		if err != nil || len(robots) == 0 {
+			continue
+		}
+		s.tickGroupRobots(ctx, t.groupID, t.instanceID, robots, nowMs)
 	}
 }
 

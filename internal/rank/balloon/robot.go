@@ -4,9 +4,8 @@ import (
 	"math/rand"
 )
 
-// robotMemberIDBase 机器人成员ID基准值（负数，与真实玩家正数ID不冲突）。
-// 机器人ID格式：-(groupID * robotIDGroupStride + robotIndex)
-const robotMemberIDBase = int64(-1_000_000_000)
+// robotIDGroupStride 每个分组的机器人ID步长。
+// 机器人ID格式：-(groupID * robotIDGroupStride + robotIndex)，结果为负数，与真实玩家正数ID不冲突。
 const robotIDGroupStride = int64(10_000)
 
 // IsRobotMemberID 判断成员ID是否为机器人。
@@ -14,9 +13,9 @@ func IsRobotMemberID(memberID int64) bool {
 	return memberID < 0
 }
 
-// robotMemberID 根据分组和组内序号生成机器人成员ID。
+// robotMemberID 根据分组和组内序号生成机器人成员ID（负数）。
 func robotMemberID(groupID int32, index int32) int64 {
-	return robotMemberIDBase - int64(groupID)*robotIDGroupStride - int64(index)
+	return -(int64(groupID)*robotIDGroupStride + int64(index))
 }
 
 // RobotTierCfg 单档机器人已解析配置，供 Service 运行时使用。

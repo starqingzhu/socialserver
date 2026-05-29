@@ -103,6 +103,25 @@ func (st *Store) LoadGroups() ([]*Group, error) {
 	return groups, nil
 }
 
+// LoadGroupByID 从 Redis 读取单个分组的最新状态。Redis 无数据时返回 nil, nil。
+func (st *Store) LoadGroupByID(groupID int32) (*Group, error) {
+	if !st.available() {
+		return nil, nil
+	}
+	raw, err := st.rdb.HGet(rediskeys.GetRankGroupsKey(st.bizId), strconv.FormatInt(int64(groupID), 10))
+	if err != nil {
+		if st.rdb.IsNil(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var g Group
+	if err := json.Unmarshal([]byte(raw), &g); err != nil {
+		return nil, err
+	}
+	return &g, nil
+}
+
 // NextGroupID 原子递增分组 ID 计数器。
 func (st *Store) NextGroupID() (int32, error) {
 	if !st.available() {

@@ -3,6 +3,7 @@ package balloon
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"common/rank"
 )
@@ -10,7 +11,18 @@ import (
 // ensureGroupLocked 在持有 s.mu 锁时，获取当前可用分组（有空位且处于 Open 状态）。
 // 分组容量包含真实玩家和机器人，均计入 RankPeopleNum 上限。
 // 若无可用分组则创建新分组并持久化到 Redis。
+//
+// 多节点：每次从 Redis 读取最新分组列表（同步到内存），确保看到其他节点写入的分组和状态变更。
 func (s *Service) ensureGroupLocked() (*Group, error) {
+	// 从 Redis 拉取最新分组列表，合并到内存。
+	// 这样即使其他节点已将某分组标记为 Full / Settled，本节点也能感知到。
+	if s.store.available() {
+		if fresh, err := s.store.LoadGroups(); err == nil && len(fresh) > 0 {
+			sort.Slice(fresh, func(i, j int) bool { return fresh[i].GroupID < fresh[j].GroupID })
+			s.mergeGroupsLocked(fresh)
+		}
+	}
+
 	for _, group := range s.groups {
 		if group.State == GroupStateOpen && group.totalCount() < s.config.RankPeopleNum {
 			return group, nil
@@ -37,6 +49,28 @@ func (s *Service) ensureGroupLocked() (*Group, error) {
 	s.groups = append(s.groups, group)
 	_ = s.store.SaveGroup(group)
 	return group, nil
+}
+
+// mergeGroupsLocked 将从 Redis 加载的分组列表合并到内存。
+// 对已存在的分组，用 Redis 版本覆盖内存版本（Redis 更新）；
+// 对内存中没有的分组，追加进来。
+// 必须在持有 s.mu 锁时调用。
+func (s *Service) mergeGroupsLocked(fresh []*Group) {
+	byID := make(map[int32]*Group, len(s.groups))
+	for _, g := range s.groups {
+		byID[g.GroupID] = g
+	}
+	for _, fg := range fresh {
+		if existing, ok := byID[fg.GroupID]; ok {
+			*existing = *fg // 用 Redis 最新状态覆盖内存
+		} else {
+			s.groups = append(s.groups, fg)
+			byID[fg.GroupID] = fg
+			if fg.GroupID > s.nextGroupID {
+				s.nextGroupID = fg.GroupID
+			}
+		}
+	}
 }
 
 func (s *Service) ensureGroupInstance(ctx context.Context, instanceID string, groupID int32, now int64) error {

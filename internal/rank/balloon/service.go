@@ -28,10 +28,6 @@ type Service struct {
 	memberGroup  map[int64]int32
 	settledGroup map[int32][]rank.RankMemberSnapshot
 
-	// 机器人内存缓存
-	groupRobots      map[int32][]*robotState
-	groupUsedInfoIDs map[int32]map[int64]struct{}
-
 	nextGroupID  int32
 	onMemberJoin func(userID int64, groupID int32)
 	loaded       bool
@@ -45,10 +41,8 @@ func NewService(rankService rank.Service, config Config, rdb *goredis.Redis, dao
 		config:            config,
 		rankService:       rankService,
 		store:             NewStore(rdb, dao, config.computeBizId()),
-		memberGroup:       make(map[int64]int32),
-		settledGroup:      make(map[int32][]rank.RankMemberSnapshot),
-		groupRobots:      make(map[int32][]*robotState),
-		groupUsedInfoIDs: make(map[int32]map[int64]struct{}),
+		memberGroup:  make(map[int64]int32),
+		settledGroup: make(map[int32][]rank.RankMemberSnapshot),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -95,19 +89,15 @@ func (s *Service) ensureLoaded() {
 
 	// 3. 按分组加载机器人、已用 InfoID、最高真实积分
 	for _, g := range s.groups {
-		if robots, err := s.store.LoadRobots(g.GroupID); err == nil && len(robots) > 0 {
-			s.groupRobots[g.GroupID] = robots
-		}
-		// 若 Redis 被清理导致 InfoID SET 为空，从机器人内存状态重建并写回 Redis。
-		if ids, err := s.store.LoadUsedInfoIDs(g.GroupID); err == nil && len(ids) > 0 {
-			s.groupUsedInfoIDs[g.GroupID] = ids
-		} else if len(s.groupRobots[g.GroupID]) > 0 {
-			idSet := make(map[int64]struct{}, len(s.groupRobots[g.GroupID]))
-			for _, r := range s.groupRobots[g.GroupID] {
-				idSet[r.InfoID] = struct{}{}
+		// 若 Redis 被清理导致 InfoID SET 为空，从 MongoDB 重建并写回 Redis。
+		if ids, err := s.store.LoadUsedInfoIDs(g.GroupID); err == nil && len(ids) == 0 {
+			if robots, err2 := s.store.LoadRobots(g.GroupID); err2 == nil && len(robots) > 0 {
+				idSet := make(map[int64]struct{}, len(robots))
+				for _, r := range robots {
+					idSet[r.InfoID] = struct{}{}
+				}
+				_ = s.store.SaveUsedInfoIDs(g.GroupID, idSet)
 			}
-			s.groupUsedInfoIDs[g.GroupID] = idSet
-			_ = s.store.SaveUsedInfoIDs(g.GroupID, idSet)
 		}
 	}
 
@@ -165,7 +155,8 @@ func (s *Service) ensureLoaded() {
 			}
 		} else {
 			// 方向2：rank:mb 缺失 → 从 MongoDB 恢复（真实玩家 + 机器人）
-			items := make([]rank.RankScoreItem, 0, len(mongoScores)+len(s.groupRobots[g.GroupID]))
+			robotsForGroup, _ := s.store.LoadRobots(g.GroupID)
+			items := make([]rank.RankScoreItem, 0, len(mongoScores)+len(robotsForGroup))
 
 			// 恢复真实玩家积分
 			for _, doc := range mongoScores {
@@ -180,7 +171,7 @@ func (s *Service) ensureLoaded() {
 			}
 
 			// 恢复机器人积分（确保排行榜完整）
-			for _, r := range s.groupRobots[g.GroupID] {
+			for _, r := range robotsForGroup {
 				var ai *rank.AvatarInfo
 				for _, info := range s.config.RobotInfos {
 					if info.InfoID == r.InfoID {
@@ -293,12 +284,9 @@ func (s *Service) recoverGroupData(ctx context.Context, groupID int32, instanceI
 		return
 	}
 
-	// 在锁下读取机器人快照，避免与 tickAllRobots 并发时的数据竞争
-	s.mu.Lock()
-	robotsCopy := make([]*robotState, len(s.groupRobots[groupID]))
-	copy(robotsCopy, s.groupRobots[groupID])
+	// 多节点：直接从 Redis/MongoDB 加载机器人状态，避免依赖本节点内存缓存。
+	robotsCopy, _ := s.store.LoadRobots(groupID)
 	robotInfos := s.config.RobotInfos
-	s.mu.Unlock()
 
 	items := make([]rank.RankScoreItem, 0, len(mongoScores)+len(robotsCopy))
 
@@ -409,12 +397,14 @@ func (s *Service) Tick(ctx context.Context, now int64) error {
 		return nil
 	}
 
-	// 到达玩法结束时间：先将所有活跃分组的榜单实例推进到 closed 状态，
-	// 确保 rank:inst 中的状态字段及时更新，不再接受新的得分写入。
-	s.mu.Lock()
-	groups := make([]*Group, len(s.groups))
-	copy(groups, s.groups)
-	s.mu.Unlock()
+	// 到达玩法结束时间：从 Redis 读取最新分组列表，将所有活跃分组推进到 closed 状态。
+	groups, err := s.store.LoadGroups()
+	if err != nil || len(groups) == 0 {
+		s.mu.Lock()
+		groups = make([]*Group, len(s.groups))
+		copy(groups, s.groups)
+		s.mu.Unlock()
+	}
 	for _, g := range groups {
 		if g == nil || g.State == GroupStateSettled {
 			continue
@@ -424,7 +414,7 @@ func (s *Service) Tick(ctx context.Context, now int64) error {
 		}
 	}
 
-	_, err := s.Settle(ctx)
+	_, err = s.Settle(ctx)
 	return err
 }
 
@@ -541,12 +531,20 @@ func (s *Service) UpsertScore(ctx context.Context, userID int64, totalScore int6
 }
 
 // ListGroupRank 查询指定分组的排行榜区间（0-based 闭区间）。
-// 已结算时返回缓存快照，未结算时实时查询。
+// 已结算时返回快照（优先内存，内存无则查 Redis/MongoDB），未结算时实时查询。
 func (s *Service) ListGroupRank(ctx context.Context, groupID int32, start int64, end int64) ([]rank.RankMemberSnapshot, error) {
 	s.mu.Lock()
 	s.ensureLoaded()
 	settled := cloneSnapshots(s.settledGroup[groupID])
 	s.mu.Unlock()
+
+	if len(settled) == 0 {
+		// 检查该分组在 Redis 中是否已标记为 Settled（其他节点已结算，本节点内存未同步）
+		if g, _ := s.store.LoadGroupByID(groupID); g != nil && g.State == GroupStateSettled {
+			settled = s.loadAndCacheSettled(groupID, g.InstanceID)
+		}
+	}
+
 	if len(settled) > 0 {
 		return sliceSnapshots(settled, start, end), nil
 	}
@@ -558,7 +556,7 @@ func (s *Service) ListGroupRank(ctx context.Context, groupID int32, start int64,
 }
 
 // GetMemberRank 查询指定用户的名次快照及所在分组。未上榜时返回 (nil, 0, nil)。
-// 已结算的分组直接从内存快照查询（与 ListGroupRank 一致），无需依赖 rank:inst 键存在。
+// 已结算的分组直接从快照查询（优先内存，内存无则查 Redis/MongoDB）。
 func (s *Service) GetMemberRank(ctx context.Context, userID int64) (*rank.RankMemberSnapshot, int32, error) {
 	s.mu.Lock()
 	s.ensureLoaded()
@@ -570,13 +568,20 @@ func (s *Service) GetMemberRank(ctx context.Context, userID int64) (*rank.RankMe
 			ok = true
 		}
 	}
-	// 已结算分组：直接从内存快照查找，避免 Redis 恢复过渡期依赖 rank:inst 键。
 	settled := cloneSnapshots(s.settledGroup[groupID])
 	s.mu.Unlock()
 
 	if !ok {
 		return nil, 0, nil
 	}
+
+	// 内存无快照时，检查 Redis 中该分组是否已结算
+	if len(settled) == 0 {
+		if g, _ := s.store.LoadGroupByID(groupID); g != nil && g.State == GroupStateSettled {
+			settled = s.loadAndCacheSettled(groupID, g.InstanceID)
+		}
+	}
+
 	if len(settled) > 0 {
 		for _, snap := range settled {
 			if snap.MemberId == userID {
@@ -598,19 +603,52 @@ func (s *Service) GetMemberRank(ctx context.Context, userID int64) (*rank.RankMe
 	return snapshot, groupID, nil
 }
 
+// loadAndCacheSettled 从 Redis rank:settled 或 MongoDB 加载结算快照并缓存到内存。
+// 供 ListGroupRank / GetMemberRank 在内存快照缺失时调用（其他节点已结算，本节点尚未同步）。
+func (s *Service) loadAndCacheSettled(groupID int32, instanceID string) []rank.RankMemberSnapshot {
+	// 1. 优先通过 rankService.Snapshot 读取（结算后返回 rank:settled 缓存，跨节点可用）
+	if snaps, err := s.rankService.Snapshot(context.Background(), instanceID); err == nil && len(snaps) > 0 {
+		s.mu.Lock()
+		if s.settledGroup[groupID] == nil {
+			s.settledGroup[groupID] = cloneSnapshots(snaps)
+		}
+		cached := cloneSnapshots(s.settledGroup[groupID])
+		s.mu.Unlock()
+		return cached
+	}
+	// 2. Redis 也没有，从 MongoDB 恢复
+	if snaps, err := s.store.LoadGroupSettled(groupID); err == nil && len(snaps) > 0 {
+		s.mu.Lock()
+		if s.settledGroup[groupID] == nil {
+			s.settledGroup[groupID] = cloneSnapshots(snaps)
+		}
+		cached := cloneSnapshots(s.settledGroup[groupID])
+		s.mu.Unlock()
+		// 同时写回 Redis，让后续查询走 Redis
+		s.store.RestoreSettled(instanceID, snaps)
+		return cached
+	}
+	return nil
+}
+
 // Settle 对所有未结算分组执行最终结算，返回各分组快照。幂等。
 // 结算时间固定为配置的 GameEndTime（未设置时退化为 CloseTime），不依赖调用时刻。
+// 多节点：从 Redis 读取最新分组列表，按 Redis 中的 State 过滤，避免重复结算。
 func (s *Service) Settle(ctx context.Context) (map[int32][]rank.RankMemberSnapshot, error) {
 	settleAt := s.config.GameEndTime
 	if settleAt == 0 {
 		settleAt = s.config.CloseTime
 	}
 
-	s.mu.Lock()
-	s.ensureLoaded()
-	groups := make([]*Group, len(s.groups))
-	copy(groups, s.groups)
-	s.mu.Unlock()
+	// 从 Redis 读取最新分组列表，确保看到所有节点创建/更新的分组状态。
+	groups, err := s.store.LoadGroups()
+	if err != nil || len(groups) == 0 {
+		s.mu.Lock()
+		s.ensureLoaded()
+		groups = make([]*Group, len(s.groups))
+		copy(groups, s.groups)
+		s.mu.Unlock()
+	}
 
 	results := make(map[int32][]rank.RankMemberSnapshot, len(groups))
 	for _, group := range groups {
@@ -625,9 +663,10 @@ func (s *Service) Settle(ctx context.Context) (map[int32][]rank.RankMemberSnapsh
 			if err == rank.ErrInstanceNotFound {
 				// 底层榜单实例不存在（从未有成员加入），仍需将分组标记为已结算，
 				// 避免 Tick 在 GameEndTime 后反复重试。
-				s.mu.Lock()
 				group.State = GroupStateSettled
 				_ = s.store.SaveGroup(group)
+				s.mu.Lock()
+				s.syncGroupStateLocked(group)
 				s.mu.Unlock()
 				continue
 			}
@@ -635,10 +674,12 @@ func (s *Service) Settle(ctx context.Context) (map[int32][]rank.RankMemberSnapsh
 		}
 		results[group.GroupID] = cloneSnapshots(members)
 
-		s.mu.Lock()
 		group.State = GroupStateSettled
-		s.settledGroup[group.GroupID] = cloneSnapshots(members)
 		_ = s.store.SaveGroup(group)
+
+		s.mu.Lock()
+		s.syncGroupStateLocked(group)
+		s.settledGroup[group.GroupID] = cloneSnapshots(members)
 		s.mu.Unlock()
 
 		// 将结算快照写入 MongoDB（write-through，冷启动后可从 MongoDB 恢复 rank:settled）。
@@ -653,13 +694,39 @@ func (s *Service) Settle(ctx context.Context) (map[int32][]rank.RankMemberSnapsh
 	return results, nil
 }
 
+// syncGroupStateLocked 将外部（Redis）读取的分组状态同步到内存 s.groups。
+// 必须在持有 s.mu 锁时调用。
+func (s *Service) syncGroupStateLocked(updated *Group) {
+	for _, g := range s.groups {
+		if g != nil && g.GroupID == updated.GroupID {
+			*g = *updated
+			return
+		}
+	}
+	// 内存中没有该分组（其他节点创建），追加进来。
+	cp := *updated
+	s.groups = append(s.groups, &cp)
+}
+
 // GetOpenRewardUserIDs 返回所有已进入排行榜的真实玩家ID（开启奖励资格）。
+// 多节点：直接从 Redis 读取全量成员映射，避免内存缓存不完整。
 func (s *Service) GetOpenRewardUserIDs() []int64 {
-	s.mu.Lock()
-	s.ensureLoaded()
-	defer s.mu.Unlock()
-	users := make([]int64, 0, len(s.memberGroup))
-	for userID := range s.memberGroup {
+	allMembers, err := s.store.GetAllMembers()
+	if err != nil || len(allMembers) == 0 {
+		// Redis 不可用时回退到内存缓存
+		s.mu.Lock()
+		s.ensureLoaded()
+		defer s.mu.Unlock()
+		users := make([]int64, 0, len(s.memberGroup))
+		for userID := range s.memberGroup {
+			if userID > 0 {
+				users = append(users, userID)
+			}
+		}
+		return users
+	}
+	users := make([]int64, 0, len(allMembers))
+	for userID := range allMembers {
 		if userID > 0 {
 			users = append(users, userID)
 		}
@@ -751,11 +818,21 @@ func (s *Service) GroupCount() int32 {
 }
 
 func (s *Service) MemberCount() int32 {
-	s.mu.Lock()
-	s.ensureLoaded()
-	defer s.mu.Unlock()
+	allMembers, err := s.store.GetAllMembers()
+	if err != nil {
+		s.mu.Lock()
+		s.ensureLoaded()
+		defer s.mu.Unlock()
+		count := int32(0)
+		for uid := range s.memberGroup {
+			if uid > 0 {
+				count++
+			}
+		}
+		return count
+	}
 	count := int32(0)
-	for uid := range s.memberGroup {
+	for uid := range allMembers {
 		if uid > 0 {
 			count++
 		}
