@@ -32,16 +32,18 @@ func LoadRobotTiers(bizType BizType) []balloon.RobotTierCfg {
 		growMin, growMax := parseRange(cfg.GrowTokenRange)
 
 		tiers = append(tiers, balloon.RobotTierCfg{
-			TierID:               cfg.Id,
-			Num:                  cfg.Num,
-			DefaultTokenMin:      defaultMin,
-			DefaultTokenMax:      defaultMax,
-			GrowTokenCdMs:        int64(cfg.GrowTokenCd) * 1000,
-			GrowTokenMinBps: growMin,
-			GrowTokenMaxBps: growMax,
-			MaxToken:             int64(cfg.MaxToken),
-			MaxDifferenceToken:   int64(cfg.MaxDifferenceToken),
-			LockTokenTimeMs:      int64(cfg.LockTokenTime) * 1000,
+			TierID:             cfg.Id,
+			Num:                cfg.Num,
+			DefaultTokenMin:    defaultMin,
+			DefaultTokenMax:    defaultMax,
+			GrowTokenCdMs:      int64(cfg.GrowTokenCd) * 1000,
+			GrowTokenMinBps:    growMin,
+			GrowTokenMaxBps:    growMax,
+			MaxToken:           int64(cfg.MaxToken),
+			MaxDifferenceToken: int64(cfg.MaxDifferenceToken),
+			LockTokenTimeMs:    int64(cfg.LockTokenTime) * 1000,
+			OvertakeTimeMs:     int64(cfg.OvertakeTime) * 1000,
+			OvertakeIntervalMs: int64(cfg.OvertakeInterval) * 1000,
 		})
 	}
 	return tiers
