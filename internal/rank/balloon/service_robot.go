@@ -163,9 +163,14 @@ func (s *Service) tickGroupRobots(ctx context.Context, groupID int32, instanceID
 			continue
 		}
 		oldScore := robot.Score
+		oldPending := robot.PendingScore
 		newScore := tickRobotScore(robot, tier, firstScore, realFirstScore, nowMs, s.config.GameEndTime)
-		if newScore != oldScore {
+		scoreChanged := newScore != oldScore
+		pendingChanged := robot.PendingScore != oldPending
+		if scoreChanged || pendingChanged {
 			changed = append(changed, robot)
+		}
+		if scoreChanged {
 			updates = append(updates, rank.RankScoreItem{
 				MemberId:   robot.MemberID,
 				Score:      newScore,
@@ -179,6 +184,8 @@ func (s *Service) tickGroupRobots(ctx context.Context, groupID int32, instanceID
 			zaplog.LoggerSugar.Warnf("balloon: tick robots for group %d failed: %v", groupID, err)
 			return
 		}
+	}
+	if len(changed) > 0 {
 		_ = s.store.SaveRobots(groupID, changed)
 	}
 }

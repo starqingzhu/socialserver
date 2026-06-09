@@ -20,16 +20,18 @@ func robotMemberID(groupID int32, index int32) int64 {
 
 // RobotTierCfg 单档机器人已解析配置，供 Service 运行时使用。
 type RobotTierCfg struct {
-	TierID               int32
-	Num                  int32 // 每组生成数量
-	DefaultTokenMin      int64 // 初始积分下限
-	DefaultTokenMax      int64 // 初始积分上限
-	GrowTokenCdMs        int64 // 增长冷却时间（毫秒）
-	GrowTokenMinBps int64 // 增长目标最小万分比（配置值 / 10000 * firstScore = 目标积分）
-	GrowTokenMaxBps int64 // 增长目标最大万分比
-	MaxToken             int64 // 积分上限
-	MaxDifferenceToken   int64 // 超过玩家第一名的最大分差（超过则停止增长）
-	LockTokenTimeMs      int64 // 结束前停止增长的时间窗口（毫秒）
+	TierID             int32
+	Num                int32 // 每组生成数量
+	DefaultTokenMin    int64 // 初始积分下限
+	DefaultTokenMax    int64 // 初始积分上限
+	GrowTokenCdMs      int64 // 增长冷却时间（毫秒）
+	GrowTokenMinBps    int64 // 增长目标最小万分比（配置值 / 10000 * firstScore = 目标积分）
+	GrowTokenMaxBps    int64 // 增长目标最大万分比
+	MaxToken           int64 // 积分上限
+	MaxDifferenceToken int64 // 超过玩家第一名的最大分差（超过则停止增长）
+	LockTokenTimeMs    int64 // 结束前停止增长的时间窗口（毫秒）
+	OvertakeTimeMs     int64 // 追超表现总用时（毫秒）：计算出的增长分值将在此时间内分阶段释放；0 表示不启用分阶段
+	OvertakeIntervalMs int64 // 追超阶段间隔（毫秒）：每隔此时间释放一份；需 > 0 且 ≤ OvertakeTimeMs
 }
 
 // RobotInfoEntry 机器人展示信息条目。
@@ -42,11 +44,14 @@ type RobotInfoEntry struct {
 
 // robotState 运行时机器人状态，每分组每机器人一个实例。
 type robotState struct {
-	MemberID   int64 `json:"memberId" bson:"memberId"`
-	TierID     int32 `json:"tierId" bson:"tierId"`
-	InfoID     int64 `json:"infoId" bson:"infoId"`
-	Score      int64 `json:"score" bson:"score"`
-	LastGrowAt int64 `json:"lastGrowAt" bson:"lastGrowAt"`
+	MemberID        int64 `json:"memberId" bson:"memberId"`
+	TierID          int32 `json:"tierId" bson:"tierId"`
+	InfoID          int64 `json:"infoId" bson:"infoId"`
+	Score           int64 `json:"score" bson:"score"`
+	LastGrowAt      int64 `json:"lastGrowAt" bson:"lastGrowAt"`
+	PendingScore    int64 `json:"pendingScore,omitempty" bson:"pendingScore,omitempty"`       // 待分阶段释放的剩余分值
+	PendingStartAt  int64 `json:"pendingStartAt,omitempty" bson:"pendingStartAt,omitempty"`   // 阶段性增长开始时间（毫秒）
+	PendingPerSlice int64 `json:"pendingPerSlice,omitempty" bson:"pendingPerSlice,omitempty"` // 每阶段释放的分值（首次写入后固定）
 }
 
 // robotSpawnEntry 机器人生成计划条目。
@@ -126,6 +131,22 @@ func tickRobotScore(robot *robotState, tier *RobotTierCfg, firstScore int64, rea
 		return robot.Score
 	}
 
+	// --- 阶段性增长：先消耗 PendingScore ---
+	if tier.OvertakeTimeMs > 0 && tier.OvertakeIntervalMs > 0 && robot.PendingScore > 0 {
+		release, slices := calcPendingRelease(robot, tier, nowMs)
+		if release > 0 {
+			robot.Score += release
+			robot.PendingScore -= release
+			if robot.PendingScore < 0 {
+				robot.PendingScore = 0
+			}
+			// 推进 PendingStartAt，避免下次 tick 重复计算已释放的份数
+			robot.PendingStartAt += slices * tier.OvertakeIntervalMs
+		}
+		// 无论是否释放，pending 阶段内不触发新的 CD 判断
+		return robot.Score
+	}
+
 	// 2. 未到增长CD → 等待
 	if nowMs-robot.LastGrowAt < tier.GrowTokenCdMs {
 		return robot.Score
@@ -134,9 +155,8 @@ func tickRobotScore(robot *robotState, tier *RobotTierCfg, firstScore int64, rea
 	// 3. 基于组内第一名积分，在万分比范围内随机目标分
 	targetScore := calcGrowTarget(firstScore, tier.GrowTokenMinBps, tier.GrowTokenMaxBps)
 
-	// 4. 随机结果不高于当前积分 → 本次不变（更新 CD 时间）
+	// 4. 随机结果不高于当前积分
 	if targetScore <= robot.Score {
-		robot.LastGrowAt = nowMs
 		return robot.Score
 	}
 
@@ -151,11 +171,54 @@ func tickRobotScore(robot *robotState, tier *RobotTierCfg, firstScore int64, rea
 		newScore = tier.MaxToken
 	}
 
+	if newScore <= robot.Score {
+		robot.LastGrowAt = nowMs
+		return robot.Score
+	}
+
+	delta := newScore - robot.Score
 	robot.LastGrowAt = nowMs
-	if newScore > robot.Score {
+
+	// 6. 若启用分阶段追超，将 delta 切分后写入 pending；否则直接加分
+	if tier.OvertakeTimeMs > 0 && tier.OvertakeIntervalMs > 0 {
+		n := (tier.OvertakeTimeMs + tier.OvertakeIntervalMs - 1) / tier.OvertakeIntervalMs
+		if n <= 0 {
+			n = 1
+		}
+		robot.PendingPerSlice = (delta + n - 1) / n
+		robot.PendingScore = delta - robot.PendingPerSlice // 立即释放第一份
+		if robot.PendingScore < 0 {
+			robot.PendingScore = 0
+		}
+		robot.PendingStartAt = nowMs // elapsed 从现在起算，下个 interval 释放下一份
+		robot.Score += robot.PendingPerSlice
+	} else {
 		robot.Score = newScore
 	}
 	return robot.Score
+}
+
+// calcPendingRelease 计算当前时刻应从 PendingScore 释放多少分值。
+// 返回 (release, slices)：本次应释放的分值和对应的阶段数（用于推进 PendingStartAt）。
+// PendingStartAt 每次释放后由调用方推进 slices * OvertakeIntervalMs，避免重复计算。
+func calcPendingRelease(robot *robotState, tier *RobotTierCfg, nowMs int64) (int64, int64) {
+	if robot.PendingScore <= 0 || robot.PendingPerSlice <= 0 || tier.OvertakeIntervalMs <= 0 {
+		return 0, 0
+	}
+	elapsed := nowMs - robot.PendingStartAt
+	if elapsed < tier.OvertakeIntervalMs {
+		return 0, 0
+	}
+	slices := elapsed / tier.OvertakeIntervalMs
+	release := slices * robot.PendingPerSlice
+	if release > robot.PendingScore {
+		release = robot.PendingScore
+		slices = release / robot.PendingPerSlice
+		if slices <= 0 {
+			slices = 1
+		}
+	}
+	return release, slices
 }
 
 // calcGrowTarget 计算增长目标积分：firstScore * randBps / 10000。

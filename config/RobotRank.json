@@ -10,6 +10,7 @@
     "id": "1",
     "maxDifferenceToken": "1011",
     "num": "1",
+    "overtakeInterval": "60",
     "overtakeTime": "300"
   },
   {
@@ -23,6 +24,7 @@
     "id": "2",
     "maxDifferenceToken": "523",
     "num": "1",
+    "overtakeInterval": "120",
     "overtakeTime": "600"
   },
   {
@@ -36,6 +38,7 @@
     "id": "3",
     "maxDifferenceToken": "187",
     "num": "1",
+    "overtakeInterval": "240",
     "overtakeTime": "1200"
   },
   {
@@ -49,6 +52,7 @@
     "id": "4",
     "maxDifferenceToken": "126",
     "num": "2",
+    "overtakeInterval": "360",
     "overtakeTime": "1800"
   }
 ]
