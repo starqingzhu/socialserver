@@ -164,10 +164,11 @@ func (s *Service) tickGroupRobots(ctx context.Context, groupID int32, instanceID
 		}
 		oldScore := robot.Score
 		oldPending := robot.PendingScore
+		oldLastGrowAt := robot.LastGrowAt
 		newScore := tickRobotScore(robot, tier, firstScore, realFirstScore, nowMs, s.config.GameEndTime)
 		scoreChanged := newScore != oldScore
-		pendingChanged := robot.PendingScore != oldPending
-		if scoreChanged || pendingChanged {
+		stateChanged := scoreChanged || robot.PendingScore != oldPending || robot.LastGrowAt != oldLastGrowAt
+		if stateChanged {
 			changed = append(changed, robot)
 		}
 		if scoreChanged {

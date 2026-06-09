@@ -155,8 +155,9 @@ func tickRobotScore(robot *robotState, tier *RobotTierCfg, firstScore int64, rea
 	// 3. 基于组内第一名积分，在万分比范围内随机目标分
 	targetScore := calcGrowTarget(firstScore, tier.GrowTokenMinBps, tier.GrowTokenMaxBps)
 
-	// 4. 随机结果不高于当前积分
+	// 4. 随机结果不高于当前积分 → 重置 CD 等待下次
 	if targetScore <= robot.Score {
+		robot.LastGrowAt = nowMs
 		return robot.Score
 	}
 
