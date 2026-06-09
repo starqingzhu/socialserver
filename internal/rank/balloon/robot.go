@@ -200,8 +200,9 @@ func tickRobotScore(robot *robotState, tier *RobotTierCfg, firstScore int64, rea
 }
 
 // calcPendingRelease 计算当前时刻应从 PendingScore 释放多少分值。
-// 返回 (release, slices)：本次应释放的分值和对应的阶段数（用于推进 PendingStartAt）。
-// PendingStartAt 每次释放后由调用方推进 slices * OvertakeIntervalMs，避免重复计算。
+// 返回 (release, slices)：本次释放的分值（固定 1 份）和推进的阶段数。
+// 每次调用只释放 1 份 PendingPerSlice，保证阶段内均等增长。
+// 即使 tick 跨越多个 interval，也只释放 1 份，下次 tick 继续。
 func calcPendingRelease(robot *robotState, tier *RobotTierCfg, nowMs int64) (int64, int64) {
 	if robot.PendingScore <= 0 || robot.PendingPerSlice <= 0 || tier.OvertakeIntervalMs <= 0 {
 		return 0, 0
@@ -210,16 +211,11 @@ func calcPendingRelease(robot *robotState, tier *RobotTierCfg, nowMs int64) (int
 	if elapsed < tier.OvertakeIntervalMs {
 		return 0, 0
 	}
-	slices := elapsed / tier.OvertakeIntervalMs
-	release := slices * robot.PendingPerSlice
+	release := robot.PendingPerSlice
 	if release > robot.PendingScore {
 		release = robot.PendingScore
-		slices = release / robot.PendingPerSlice
-		if slices <= 0 {
-			slices = 1
-		}
 	}
-	return release, slices
+	return release, 1
 }
 
 // calcGrowTarget 计算增长目标积分：firstScore * randBps / 10000。
