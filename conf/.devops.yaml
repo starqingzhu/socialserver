@@ -8,6 +8,7 @@ redis:
   - group: 1
     host: 172.20.4.73
     port: 6379
+    index: 0
     username: NONE
     password: 123456
 

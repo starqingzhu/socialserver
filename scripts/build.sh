@@ -11,12 +11,13 @@ echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}SocialServer build tool${NC}"
 echo -e "${GREEN}========================================${NC}"
 
-echo -e "${BLUE}Select environment (default local):${NC}"
-echo "1) local (.devops.yaml)"
-echo "2) test (.devops_test.yaml)"
-echo "3) production (.devops_production.yaml)"
+echo -e "${BLUE}Select environment (20秒内选择，超时默认本地环境):${NC}"
+echo "1) 本地开发环境 (.devops.yaml)"
+echo "2) 测试环境 (.devops_test.yaml)"
+echo "3) 生产环境 (.devops_production.yaml)"
+echo "4) 提审环境 (.devops_inter.yaml)"
 
-if read -t 20 -p "Choose [1-3, default 1]: " env_choice; then
+if read -t 20 -p "Choose [1-4, 默认1]: " env_choice; then
     echo ""
 else
     echo ""
@@ -36,6 +37,10 @@ case ${env_choice:-1} in
     3)
         CONFIG_FILE=".devops_production.yaml"
         ENV_NAME="production"
+        ;;
+    4)
+        CONFIG_FILE=".devops_inter.yaml"
+        ENV_NAME="提审"
         ;;
     *)
         echo -e "${YELLOW}Invalid option, using default local environment${NC}"

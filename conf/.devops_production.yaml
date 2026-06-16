@@ -8,6 +8,7 @@ redis:
   - group: 1
     host: "r-0xiljf6en8p0l6yvmk.redis.rds-aliyun-america.rds.aliyuncs.com"
     port: 6379
+    index: 0
     username: NONE
     password: "redis_mNcmNe!6QT"
 
