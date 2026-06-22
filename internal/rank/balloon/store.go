@@ -122,7 +122,34 @@ func (st *Store) LoadGroupByID(groupID int32) (*Group, error) {
 	return &g, nil
 }
 
-// NextGroupID 原子递增分组 ID 计数器。
+// IncrRealCount 原子递增指定分组的真实玩家计数，并更新 Redis 中的分组 JSON。
+// 返回更新后的新计数。多节点并发分配新用户时，防止 read-modify-write 竞争导致 RealCount 偏低。
+func (st *Store) IncrRealCount(group *Group) (int32, error) {
+	if !st.available() {
+		group.RealCount++
+		return group.RealCount, nil
+	}
+	key := rediskeys.GetRankGroupsKey(st.bizId)
+	field := strconv.FormatInt(int64(group.GroupID), 10)
+
+	// 先用 HIncrBy 对 realCount 原子加 1，得到最新值。
+	// 由于 group 以整体 JSON 存储，需读出最新值更新 struct 再写回。
+	newCount, err := st.rdb.HIncrBy(rediskeys.GetRankMetaKey(st.bizId), fmt.Sprintf("realCount_%d", group.GroupID), 1)
+	if err != nil {
+		// Redis 失败时退化为内存递增
+		group.RealCount++
+		return group.RealCount, nil
+	}
+	group.RealCount = int32(newCount)
+	data, _ := json.Marshal(group)
+	st.rdb.HSet(key, field, string(data))
+	if st.hasMongo() {
+		st.dao.SaveGroup(st.bizId, group)
+	}
+	return group.RealCount, nil
+}
+
+
 func (st *Store) NextGroupID() (int32, error) {
 	if !st.available() {
 		return 0, fmt.Errorf("store not available")
@@ -232,8 +259,10 @@ func (st *Store) GetMember(userID int64) (int32, bool, error) {
 			st.rdb.HSet(rediskeys.GetRankMembersKey(st.bizId), uidStr, strconv.FormatInt(int64(gid), 10))
 			return gid, true, nil
 		}
-		// MongoDB 未找到：写入负向缓存，防止同一用户重复查 MongoDB
-		st.rdb.HSet(rediskeys.GetRankMembersKey(st.bizId), uidStr, nullCacheEntry)
+		// 多节点：不写负向缓存。
+		// SetMember 先写 Redis 后写 MongoDB，若另一节点刚完成 SetMember 但 MongoDB 尚未落库，
+		// 写入 nullCacheEntry 会导致本节点在 TTL 内持续误判"用户未进榜"。
+		// members HASH 体积小，Redis 缺失时直接查 MongoDB 即可，无需负向缓存保护。
 	}
 	return 0, false, nil
 }

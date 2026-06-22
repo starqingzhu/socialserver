@@ -459,9 +459,10 @@ func (s *Service) UpsertScore(ctx context.Context, userID int64, totalScore int6
 		}
 		isNewMember = true
 		s.memberGroup[userID] = group.GroupID
-		group.RealCount++
+		// 多节点：用 Redis 原子自增代替内存 read-modify-write，避免并发分配时 RealCount 偏低。
+		newCount, _ := s.store.IncrRealCount(group)
+		group.RealCount = newCount
 		_ = s.store.SetMember(userID, group.GroupID)
-		_ = s.store.SaveGroup(group)
 		if s.onMemberJoin != nil {
 			s.onMemberJoin(userID, group.GroupID)
 		}
@@ -749,7 +750,16 @@ func (s *Service) HasOpenReward(userID int64) bool {
 }
 
 // GetGroup 返回指定分组的当前状态副本，未找到时返回 nil。
+// 多节点：优先从 Redis 读取最新状态并同步到内存，避免其他节点的状态变更（如 Settled）不可见。
 func (s *Service) GetGroup(groupID int32) *Group {
+	if g, err := s.store.LoadGroupByID(groupID); err == nil && g != nil {
+		s.mu.Lock()
+		s.ensureLoaded()
+		s.syncGroupStateLocked(g)
+		s.mu.Unlock()
+		cp := *g
+		return &cp
+	}
 	s.mu.Lock()
 	s.ensureLoaded()
 	defer s.mu.Unlock()
@@ -763,7 +773,25 @@ func (s *Service) GetGroup(groupID int32) *Group {
 }
 
 // ListGroups 返回所有分组信息的副本列表。
+// 多节点：先从 Redis 拉取最新分组列表并同步到内存，确保其他节点创建/更新的分组可见。
 func (s *Service) ListGroups() []Group {
+	if latestGroups, err := s.store.LoadGroups(); err == nil && len(latestGroups) > 0 {
+		s.mu.Lock()
+		s.ensureLoaded()
+		for _, g := range latestGroups {
+			if g != nil {
+				s.syncGroupStateLocked(g)
+			}
+		}
+		result := make([]Group, 0, len(s.groups))
+		for _, g := range s.groups {
+			if g != nil {
+				result = append(result, *g)
+			}
+		}
+		s.mu.Unlock()
+		return result
+	}
 	s.mu.Lock()
 	s.ensureLoaded()
 	defer s.mu.Unlock()
@@ -791,9 +819,26 @@ func (s *Service) GetGroupCreateTime(ctx context.Context, groupID int32) int64 {
 }
 
 // IsSettled 返回是否所有分组均已结算。无分组时返回 false。
+// 多节点场景：先从 Redis 拉取最新分组状态并同步到内存，
+// 避免其他节点已完成结算但本节点内存仍为旧状态导致误判。
 func (s *Service) IsSettled() bool {
+	// 从 Redis 读取最新分组列表，将其他节点写入的状态同步到本节点内存。
+	if latestGroups, err := s.store.LoadGroups(); err == nil && len(latestGroups) > 0 {
+		s.mu.Lock()
+		s.ensureLoaded()
+		for _, g := range latestGroups {
+			if g != nil {
+				s.syncGroupStateLocked(g)
+			}
+		}
+		s.mu.Unlock()
+	} else {
+		s.mu.Lock()
+		s.ensureLoaded()
+		s.mu.Unlock()
+	}
+
 	s.mu.Lock()
-	s.ensureLoaded()
 	defer s.mu.Unlock()
 	if len(s.groups) == 0 {
 		return false
@@ -811,6 +856,10 @@ func (s *Service) GetConfig() Config {
 }
 
 func (s *Service) GroupCount() int32 {
+	// 多节点：直接从 Redis 读取分组数量，避免其他节点新建的分组在内存中不可见。
+	if groups, err := s.store.LoadGroups(); err == nil {
+		return int32(len(groups))
+	}
 	s.mu.Lock()
 	s.ensureLoaded()
 	defer s.mu.Unlock()
