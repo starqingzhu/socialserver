@@ -6,7 +6,7 @@ configDir: "../config"
 #redis - 优化生产配置
 redis:
   - group: 1
-    host: 172.20.4.73
+    host: 172.20.4.224
     port: 6379
     index: 0
     username: NONE
@@ -14,13 +14,13 @@ redis:
 
 etcd:
   - group: 1
-    host: 172.20.4.73:2379
+    host: 172.20.4.224:3379
     username: NONE
     password: NONE
 
 #mongodb - 阿里云副本集配置
 mongodb:
-  uri: mongodb://172.20.4.73:27017
+  uri: mongodb://172.20.4.224:27017
   username: admin
   password: 123456
   authSource: admin
