@@ -274,7 +274,7 @@ func (h *ServerHandler) S2SGetRankConfig(ctx context.Context, req *pb.PBS2SGetRa
 	return &pb.PBS2SGetRankConfigResponse{
 		BizType: cfg.BizType, ActId: cfg.ActID, RankCode: cfg.RankCode,
 		RankPeopleNum: cfg.RankPeopleNum, OpenToken: cfg.OpenToken,
-		OpenTime: cfg.OpenTime, CloseTime: cfg.CloseTime, GameEndTime: cfg.GameEndTime,
+		OpenTime: cfg.OpenTime, CloseTime: cfg.CloseTime, GameEndTime: effectiveGameEndTime(cfg.GameEndTime, cfg.CloseTime),
 		RobotTiers: cfgRobotTiersToProto(cfg.RobotTiers), RobotInfos: cfgRobotInfosToProto(cfg.RobotInfos),
 		Settled: bsvc.Svc.IsSettled(), GroupCount: bsvc.Svc.GroupCount(), MemberCount: bsvc.Svc.MemberCount(),
 	}, nil
@@ -346,7 +346,7 @@ func (h *ServerHandler) S2SListRankConfigs(ctx context.Context, req *pb.PBS2SLis
 			RankCode:    info.Config.RankCode,
 			OpenTime:    info.Config.OpenTime,
 			CloseTime:   info.Config.CloseTime,
-			GameEndTime: info.Config.GameEndTime,
+			GameEndTime: effectiveGameEndTime(info.Config.GameEndTime, info.Config.CloseTime),
 			Settled:     info.Settled,
 			GroupCount:  info.GroupCount,
 			MemberCount: info.MemberCount,
@@ -457,6 +457,15 @@ func rankErrorToStatus(err error) error {
 	default:
 		return status.Error(codes.Internal, err.Error())
 	}
+}
+
+// effectiveGameEndTime 返回实际生效的玩法结束时间。
+// GameEndTime==0 表示退化为 CloseTime，直接返回 CloseTime 避免 proto omitempty 将0省略导致前端显示"-"。
+func effectiveGameEndTime(gameEndTime, closeTime int64) int64 {
+	if gameEndTime == 0 {
+		return closeTime
+	}
+	return gameEndTime
 }
 
 // --- GM 查询接口（独立，不与玩家接口共用） ---
