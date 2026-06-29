@@ -540,18 +540,44 @@ func (s *Service) ListGroupRank(ctx context.Context, groupID int32, start int64,
 	s.mu.Unlock()
 
 	if len(settled) == 0 {
-		// 检查该分组在 Redis 中是否已标记为 Settled（其他节点已结算，本节点内存未同步）
-		if g, _ := s.store.LoadGroupByID(groupID); g != nil && g.State == GroupStateSettled {
-			settled = s.loadAndCacheSettled(groupID, g.InstanceID)
+		// 优先查 Redis；Redis 被驱逐时回退到内存 s.groups。
+		instanceID := s.groupInstanceID(groupID)
+		if g, _ := s.store.LoadGroupByID(groupID); g != nil {
+			if g.State == GroupStateSettled {
+				settled = s.loadAndCacheSettled(groupID, g.InstanceID)
+			}
+		} else {
+			s.mu.Lock()
+			for _, mg := range s.groups {
+				if mg != nil && mg.GroupID == groupID {
+					if mg.State == GroupStateSettled {
+						settled = cloneSnapshots(s.settledGroup[groupID])
+						if len(settled) == 0 {
+							settled = s.loadAndCacheSettled(groupID, instanceID)
+						}
+					}
+					break
+				}
+			}
+			s.mu.Unlock()
 		}
 	}
 
 	if len(settled) > 0 {
 		return sliceSnapshots(settled, start, end), nil
 	}
-	members, err := s.rankService.Range(ctx, s.groupInstanceID(groupID), start, end)
+
+	instanceID := s.groupInstanceID(groupID)
+	members, err := s.rankService.Range(ctx, instanceID, start, end)
 	if err != nil {
-		return nil, err
+		if err == rank.ErrInstanceNotFound {
+			// rank:inst 被 Redis 驱逐，尝试从 MongoDB 恢复后重试一次。
+			s.recoverGroupData(ctx, groupID, instanceID)
+			members, err = s.rankService.Range(ctx, instanceID, start, end)
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	return members, nil
 }
@@ -576,10 +602,27 @@ func (s *Service) GetMemberRank(ctx context.Context, userID int64) (*rank.RankMe
 		return nil, 0, nil
 	}
 
-	// 内存无快照时，检查 Redis 中该分组是否已结算
+	// 内存无快照时，检查 Redis 中该分组是否已结算；Redis 被驱逐时回退到内存 s.groups。
 	if len(settled) == 0 {
-		if g, _ := s.store.LoadGroupByID(groupID); g != nil && g.State == GroupStateSettled {
-			settled = s.loadAndCacheSettled(groupID, g.InstanceID)
+		instanceID := s.groupInstanceID(groupID)
+		if g, _ := s.store.LoadGroupByID(groupID); g != nil {
+			if g.State == GroupStateSettled {
+				settled = s.loadAndCacheSettled(groupID, g.InstanceID)
+			}
+		} else {
+			s.mu.Lock()
+			for _, mg := range s.groups {
+				if mg != nil && mg.GroupID == groupID {
+					if mg.State == GroupStateSettled {
+						settled = cloneSnapshots(s.settledGroup[groupID])
+						if len(settled) == 0 {
+							settled = s.loadAndCacheSettled(groupID, instanceID)
+						}
+					}
+					break
+				}
+			}
+			s.mu.Unlock()
 		}
 	}
 
@@ -597,9 +640,17 @@ func (s *Service) GetMemberRank(ctx context.Context, userID int64) (*rank.RankMe
 		return nil, groupID, nil
 	}
 
-	snapshot, err := s.rankService.GetMemRank(ctx, s.groupInstanceID(groupID), userID)
+	instanceID := s.groupInstanceID(groupID)
+	snapshot, err := s.rankService.GetMemRank(ctx, instanceID, userID)
 	if err != nil {
-		return nil, 0, err
+		if err == rank.ErrInstanceNotFound {
+			// rank:inst 被 Redis 驱逐，尝试从 MongoDB 恢复后重试一次。
+			s.recoverGroupData(ctx, groupID, instanceID)
+			snapshot, err = s.rankService.GetMemRank(ctx, instanceID, userID)
+		}
+		if err != nil {
+			return nil, 0, err
+		}
 	}
 	return snapshot, groupID, nil
 }
