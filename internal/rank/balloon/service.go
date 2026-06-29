@@ -658,8 +658,9 @@ func (s *Service) GetMemberRank(ctx context.Context, userID int64) (*rank.RankMe
 // loadAndCacheSettled 从 Redis rank:settled 或 MongoDB 加载结算快照并缓存到内存。
 // 供 ListGroupRank / GetMemberRank 在内存快照缺失时调用（其他节点已结算，本节点尚未同步）。
 func (s *Service) loadAndCacheSettled(groupID int32, instanceID string) []rank.RankMemberSnapshot {
+	ctx := context.Background()
 	// 1. 优先通过 rankService.Snapshot 读取（结算后返回 rank:settled 缓存，跨节点可用）
-	if snaps, err := s.rankService.Snapshot(context.Background(), instanceID); err == nil && len(snaps) > 0 {
+	if snaps, err := s.rankService.Snapshot(ctx, instanceID); err == nil && len(snaps) > 0 {
 		s.mu.Lock()
 		if s.settledGroup[groupID] == nil {
 			s.settledGroup[groupID] = cloneSnapshots(snaps)
@@ -668,7 +669,7 @@ func (s *Service) loadAndCacheSettled(groupID int32, instanceID string) []rank.R
 		s.mu.Unlock()
 		return cached
 	}
-	// 2. Redis 也没有，从 MongoDB 恢复
+	// 2. Redis rank:settled 不存在，从 MongoDB 恢复
 	if snaps, err := s.store.LoadGroupSettled(groupID); err == nil && len(snaps) > 0 {
 		s.mu.Lock()
 		if s.settledGroup[groupID] == nil {
@@ -678,6 +679,20 @@ func (s *Service) loadAndCacheSettled(groupID int32, instanceID string) []rank.R
 		s.mu.Unlock()
 		// 同时写回 Redis，让后续查询走 Redis
 		s.store.RestoreSettled(instanceID, snaps)
+		return cached
+	}
+	// 3. rank:settled 和 MongoDB settled 均不存在（异步写尚未完成或被驱逐）：
+	//    从 MongoDB 积分数据重建 rank:mb，再通过 Snapshot 重新计算结算快照并写回 Redis。
+	s.recoverGroupData(ctx, groupID, instanceID)
+	if snaps, err := s.rankService.Snapshot(ctx, instanceID); err == nil && len(snaps) > 0 {
+		// 重建的快照补写 rank:settled，下次查询直接命中
+		s.store.RestoreSettled(instanceID, snaps)
+		s.mu.Lock()
+		if s.settledGroup[groupID] == nil {
+			s.settledGroup[groupID] = cloneSnapshots(snaps)
+		}
+		cached := cloneSnapshots(s.settledGroup[groupID])
+		s.mu.Unlock()
 		return cached
 	}
 	return nil
