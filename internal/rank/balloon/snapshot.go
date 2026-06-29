@@ -24,6 +24,9 @@ func sliceSnapshots(src []rank.RankMemberSnapshot, start int64, end int64) []ran
 	if start < 0 {
 		start = 0
 	}
+	if end < 0 {
+		end = int64(len(src)) - 1
+	}
 	if end < start {
 		return []rank.RankMemberSnapshot{}
 	}
