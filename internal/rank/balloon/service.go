@@ -547,19 +547,25 @@ func (s *Service) ListGroupRank(ctx context.Context, groupID int32, start int64,
 				settled = s.loadAndCacheSettled(groupID, g.InstanceID)
 			}
 		} else {
+			// Redis 中 group 数据被驱逐，回退到内存。
+			// 先加锁读取内存状态，再释放锁后调用 loadAndCacheSettled（该函数内部会再次加锁）。
+			needLoad := false
 			s.mu.Lock()
 			for _, mg := range s.groups {
 				if mg != nil && mg.GroupID == groupID {
 					if mg.State == GroupStateSettled {
 						settled = cloneSnapshots(s.settledGroup[groupID])
 						if len(settled) == 0 {
-							settled = s.loadAndCacheSettled(groupID, instanceID)
+							needLoad = true
 						}
 					}
 					break
 				}
 			}
 			s.mu.Unlock()
+			if needLoad {
+				settled = s.loadAndCacheSettled(groupID, instanceID)
+			}
 		}
 	}
 
@@ -610,19 +616,25 @@ func (s *Service) GetMemberRank(ctx context.Context, userID int64) (*rank.RankMe
 				settled = s.loadAndCacheSettled(groupID, g.InstanceID)
 			}
 		} else {
+			// Redis 中 group 数据被驱逐，回退到内存。
+			// 先加锁读取内存状态，再释放锁后调用 loadAndCacheSettled（该函数内部会再次加锁）。
+			needLoad := false
 			s.mu.Lock()
 			for _, mg := range s.groups {
 				if mg != nil && mg.GroupID == groupID {
 					if mg.State == GroupStateSettled {
 						settled = cloneSnapshots(s.settledGroup[groupID])
 						if len(settled) == 0 {
-							settled = s.loadAndCacheSettled(groupID, instanceID)
+							needLoad = true
 						}
 					}
 					break
 				}
 			}
 			s.mu.Unlock()
+			if needLoad {
+				settled = s.loadAndCacheSettled(groupID, instanceID)
+			}
 		}
 	}
 
