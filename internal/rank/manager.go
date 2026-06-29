@@ -457,8 +457,8 @@ func (m *Manager) syncFromRedis(ctx context.Context) {
 			continue
 		}
 
-		// 跳过超过关闭时间 24h 的过期活动
-		if closeTime > 0 && now > closeTime+86400_000 {
+		// 跳过超过关闭时间 7 天的过期活动
+		if closeTime > 0 && now > closeTime+7*86400000 {
 			continue
 		}
 
@@ -633,7 +633,7 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 	added := 0
 	for _, doc := range docs {
 		cfg := doc.Config
-		if cfg.CloseTime > 0 && now > cfg.CloseTime+86400_000 {
+		if cfg.CloseTime > 0 && now > cfg.CloseTime+7*86400000 {
 			continue
 		}
 
