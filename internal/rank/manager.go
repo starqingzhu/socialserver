@@ -696,9 +696,11 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 		m.mu.Unlock()
 	}
 
-	// 删除：本次同步开始时已在内存、但 MongoDB 中已不存在的服务。
-	// 使用 existingKeys 快照而非实时 m.balloonServices，防止把 registerBalloon
-	// 在本次同步读取 MongoDB 之后新增的服务误判为"不在 MongoDB 中"而删除。
+	// 移除：本次同步开始时已在内存、但 MongoDB 中已不存在（或已过期）的服务。
+	// 注意：此处只做内存移除，不调用 Cleanup() 删除数据。
+	// 数据清理由 RemoveService（GM 主动删除）负责，syncFromMongo 只是感知已删除的服务并停止 tick。
+	// 若在此处调用 Cleanup()，会因 SaveRankConfig 异步写入延迟（config 暂时不在 MongoDB）
+	// 而误删仍在运行的活动的所有业务数据。
 	m.mu.Lock()
 	var removed []string
 	for key := range existingKeys {
@@ -733,7 +735,8 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 		if members, err := e.svc.GetAllMembers(); err == nil && len(members) > 0 {
 			m.memberIndex.RemoveUserEntries(e.bizType, e.actID, members)
 		}
-		e.svc.Cleanup()
+		// 只停止 tick，不清理数据（数据清理由 RemoveService 负责）
+		zaplog.LoggerSugar.Infof("rank: syncFromMongo removed service bizType=%s actID=%d (config not in mongo)", e.bizType, e.actID)
 	}
 
 	if added > 0 || len(removed) > 0 {
