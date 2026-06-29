@@ -80,7 +80,18 @@ func (h *ServerHandler) S2SGetRankList(ctx context.Context, req *pb.PBS2SGetRank
 		return nil, rankErrorToStatus(err)
 	}
 	if groupID == 0 {
-		return nil, status.Errorf(codes.NotFound, "user %d not found in any group for bizType=%s actId=%d", req.UserId, req.BizType, req.ActId)
+		// 用户未参与排行榜（活动结束后仍可查看榜单）：fallback 到第1个分组。
+		groups := bsvc.Svc.ListGroups()
+		if len(groups) == 0 {
+			return nil, status.Errorf(codes.NotFound, "user %d not found in any group for bizType=%s actId=%d", req.UserId, req.BizType, req.ActId)
+		}
+		minGroup := groups[0]
+		for _, g := range groups[1:] {
+			if g.GroupID < minGroup.GroupID {
+				minGroup = g
+			}
+		}
+		groupID = minGroup.GroupID
 	}
 	snapshots, err := bsvc.Svc.ListGroupRank(ctx, groupID, req.Start, req.End)
 	if err != nil {
