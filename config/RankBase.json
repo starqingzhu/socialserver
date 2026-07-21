@@ -4,6 +4,15 @@
     "bizType": "balloon",
     "id": "1",
     "name": "rank_name_01",
-    "rankPeopleNum": "30"
+    "rankPeopleNum": "30",
+    "topNameColor": "#266519"
+  },
+  {
+    "balloonRankOpenToken": "9000",
+    "bizType": "egg",
+    "id": "2",
+    "name": "rank_name_egg",
+    "rankPeopleNum": "30",
+    "topNameColor": "#266519"
   }
 ]

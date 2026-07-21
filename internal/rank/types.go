@@ -11,6 +11,7 @@ type BizType string
 
 const (
 	BizTypeBalloon BizType = "balloon"
+	BizTypeEgg     BizType = "egg"
 )
 
 // BizKey 唯一标识一个业务排行榜服务实例（业务类型 + 活动ID）。

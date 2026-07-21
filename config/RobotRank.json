@@ -4,9 +4,15 @@
     "MaxToken": "30124",
     "beiZhu": "A级",
     "bizType": "balloon",
-    "defaultTokenRange": "9300,9500",
+    "defaultTokenRange": [
+      9300,
+      9500
+    ],
     "growTokenCd": "600",
-    "growTokenRange": "9000,11000",
+    "growTokenRange": [
+      9000,
+      11000
+    ],
     "id": "1",
     "maxDifferenceToken": "1011",
     "num": "1",
@@ -18,9 +24,15 @@
     "MaxToken": "21057",
     "beiZhu": "B级",
     "bizType": "balloon",
-    "defaultTokenRange": "9200,9300",
+    "defaultTokenRange": [
+      9200,
+      9300
+    ],
     "growTokenCd": "1200",
-    "growTokenRange": "9000,10200",
+    "growTokenRange": [
+      9000,
+      10200
+    ],
     "id": "2",
     "maxDifferenceToken": "523",
     "num": "1",
@@ -32,9 +44,15 @@
     "MaxToken": "15010",
     "beiZhu": "C级",
     "bizType": "balloon",
-    "defaultTokenRange": "9100,9200",
+    "defaultTokenRange": [
+      9100,
+      9200
+    ],
     "growTokenCd": "2400",
-    "growTokenRange": "7500,9000",
+    "growTokenRange": [
+      7500,
+      9000
+    ],
     "id": "3",
     "maxDifferenceToken": "187",
     "num": "1",
@@ -46,10 +64,96 @@
     "MaxToken": "10209",
     "beiZhu": "D级",
     "bizType": "balloon",
-    "defaultTokenRange": "9000,9100",
+    "defaultTokenRange": [
+      9000,
+      9100
+    ],
     "growTokenCd": "3600",
-    "growTokenRange": "6000,7500",
+    "growTokenRange": [
+      6000,
+      7500
+    ],
     "id": "4",
+    "maxDifferenceToken": "126",
+    "num": "2",
+    "overtakeInterval": "360",
+    "overtakeTime": "1800"
+  },
+  {
+    "LockTokenTime": "43200",
+    "MaxToken": "30124",
+    "beiZhu": "A级",
+    "bizType": "egg",
+    "defaultTokenRange": [
+      9300,
+      9500
+    ],
+    "growTokenCd": "600",
+    "growTokenRange": [
+      9000,
+      11000
+    ],
+    "id": "5",
+    "maxDifferenceToken": "1011",
+    "num": "1",
+    "overtakeInterval": "60",
+    "overtakeTime": "300"
+  },
+  {
+    "LockTokenTime": "64800",
+    "MaxToken": "21057",
+    "beiZhu": "B级",
+    "bizType": "egg",
+    "defaultTokenRange": [
+      9200,
+      9300
+    ],
+    "growTokenCd": "1200",
+    "growTokenRange": [
+      9000,
+      10200
+    ],
+    "id": "6",
+    "maxDifferenceToken": "523",
+    "num": "1",
+    "overtakeInterval": "120",
+    "overtakeTime": "600"
+  },
+  {
+    "LockTokenTime": "86400",
+    "MaxToken": "15010",
+    "beiZhu": "C级",
+    "bizType": "egg",
+    "defaultTokenRange": [
+      9100,
+      9200
+    ],
+    "growTokenCd": "2400",
+    "growTokenRange": [
+      7500,
+      9000
+    ],
+    "id": "7",
+    "maxDifferenceToken": "187",
+    "num": "1",
+    "overtakeInterval": "240",
+    "overtakeTime": "1200"
+  },
+  {
+    "LockTokenTime": "86400",
+    "MaxToken": "10209",
+    "beiZhu": "D级",
+    "bizType": "egg",
+    "defaultTokenRange": [
+      9000,
+      9100
+    ],
+    "growTokenCd": "3600",
+    "growTokenRange": [
+      6000,
+      7500
+    ],
+    "id": "8",
     "maxDifferenceToken": "126",
     "num": "2",
     "overtakeInterval": "360",

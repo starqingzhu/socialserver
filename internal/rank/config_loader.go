@@ -146,6 +146,8 @@ func ValidateBizType(bizType BizType) error {
 	switch bizType {
 	case BizTypeBalloon:
 		return nil
+	case BizTypeEgg:
+		return nil
 	default:
 		return fmt.Errorf("unsupported biz type: %s", bizType)
 	}

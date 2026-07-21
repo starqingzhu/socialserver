@@ -206,6 +206,9 @@ func (m *Manager) Register(ctx context.Context, bizType BizType, cfg balloon.Con
 	case BizTypeBalloon:
 		_, err := m.registerBalloon(ctx, cfg)
 		return err
+	case BizTypeEgg:
+		_, err := m.registerBalloon(ctx, cfg)
+		return err
 	default:
 		return fmt.Errorf("unsupported biz type: %s", bizType)
 	}
