@@ -8,17 +8,17 @@ import (
 	"common/configmgr"
 	cfgtypes "common/configmgr/types"
 	"golib/zaplog"
-	"socialserver/internal/rank/balloon"
+	"socialserver/internal/rank/engine"
 )
 
-func LoadRobotTiers(bizType BizType) []balloon.RobotTierCfg {
+func LoadRobotTiers(bizType BizType) []engine.RobotTierCfg {
 	cf, err := configmgr.GetConfigByFileName("RobotRank")
 	if err != nil {
 		zaplog.LoggerSugar.Warnf("rank: load RobotRank config: %v", err)
 		return nil
 	}
 
-	var tiers []balloon.RobotTierCfg
+	var tiers []engine.RobotTierCfg
 	for _, item := range cf.GetData() {
 		cfg, ok := item.(cfgtypes.RobotRankConfig)
 		if !ok {
@@ -31,7 +31,7 @@ func LoadRobotTiers(bizType BizType) []balloon.RobotTierCfg {
 		defaultMin, defaultMax := parseRange(cfg.DefaultTokenRange)
 		growMin, growMax := parseRange(cfg.GrowTokenRange)
 
-		tiers = append(tiers, balloon.RobotTierCfg{
+		tiers = append(tiers, engine.RobotTierCfg{
 			TierID:             cfg.Id,
 			Num:                cfg.Num,
 			DefaultTokenMin:    defaultMin,
@@ -49,20 +49,20 @@ func LoadRobotTiers(bizType BizType) []balloon.RobotTierCfg {
 	return tiers
 }
 
-func LoadRobotInfos() []balloon.RobotInfoEntry {
+func LoadRobotInfos() []engine.RobotInfoEntry {
 	cf, err := configmgr.GetConfigByFileName("RobotName")
 	if err != nil {
 		zaplog.LoggerSugar.Warnf("rank: load RobotName config: %v", err)
 		return nil
 	}
 
-	var infos []balloon.RobotInfoEntry
+	var infos []engine.RobotInfoEntry
 	for _, item := range cf.GetData() {
 		cfg, ok := item.(cfgtypes.RobotNameConfig)
 		if !ok {
 			continue
 		}
-		infos = append(infos, balloon.RobotInfoEntry{
+		infos = append(infos, engine.RobotInfoEntry{
 			InfoID: int64(cfg.Id),
 			Name:   cfg.Name,
 			Avatar: cfg.Avatar,
@@ -78,7 +78,14 @@ func parseRange(s string) (int64, int64) {
 	}
 	parts := strings.Split(s, ",")
 	if len(parts) < 2 {
-		v, _ := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+		if len(parts) == 0 {
+			return 0, 0
+		}
+		v, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+		if err != nil {
+			zaplog.LoggerSugar.Warnf("rank: parseRange single value failed: %q", s)
+			return 0, 0
+		}
 		return v, v
 	}
 	a, err1 := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
@@ -90,7 +97,7 @@ func parseRange(s string) (int64, int64) {
 	return a, b
 }
 
-func LoadRobotConfig(bizType BizType) ([]balloon.RobotTierCfg, []balloon.RobotInfoEntry) {
+func LoadRobotConfig(bizType BizType) ([]engine.RobotTierCfg, []engine.RobotInfoEntry) {
 	tiers := LoadRobotTiers(bizType)
 	if len(tiers) == 0 {
 		return nil, nil
@@ -105,7 +112,7 @@ func LoadRobotConfig(bizType BizType) ([]balloon.RobotTierCfg, []balloon.RobotIn
 }
 
 // FillConfigFromFiles 根据 biz_type 从配置文件加载排行榜基础参数和机器人参数，填充到 Config 中。
-func FillConfigFromFiles(bizType BizType, cfg *balloon.Config) error {
+func FillConfigFromFiles(bizType BizType, cfg *engine.Config) error {
 	if cfg == nil {
 		return fmt.Errorf("config is nil")
 	}

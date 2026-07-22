@@ -1,4 +1,4 @@
-package balloon
+package engine
 
 import (
 	"fmt"
@@ -14,8 +14,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-
-// DAO 封装 balloon 业务层的 MongoDB 持久化操作。
+// DAO 封装排行榜业务层的 MongoDB 持久化操作。
 // 所有写入、更新、删除操作（包括配置类）均通过 mongoTask.GWriteTaskBuilder 异步队列执行，不阻塞业务 goroutine。
 // 批量删除（DeleteAllByBizId）因需要 DeleteMany 语义，暂通过 session 同步执行（队列目前仅支持 DeleteOne）。
 // 读操作保持同步。队列生命周期由外部通过 queue.InitQueues() / queue.Shutdown() 管理。
@@ -51,8 +50,6 @@ func (d *DAO) SaveRankConfig(bizKey string, cfg Config) error {
 	persisted := cfg
 	persisted.RobotTiers = nil
 	persisted.RobotInfos = nil
-	// $set 覆盖整个 config 对象（包含 CreateTime），$setOnInsert 在首次插入时确保 CreateTime 有值。
-	// 更新已有文档时 $setOnInsert 不执行，所以 CreateTime 由调用方在注册时赋值并通过 $set 写入后不再改变。
 	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
 		commonrank.CT_RANK_CONFIG,
 		bizKey,
@@ -60,7 +57,7 @@ func (d *DAO) SaveRankConfig(bizKey string, cfg Config) error {
 		bson.M{"$set": bson.M{"config": persisted}},
 	)
 	if err := queue.PushMongoTask(task); err != nil {
-		zaplog.LoggerSugar.Errorf("balloon dao: save rank config bizKey=%s: %v", bizKey, err)
+		zaplog.LoggerSugar.Errorf("rank engine dao: save rank config bizKey=%s: %v", bizKey, err)
 	}
 	return nil
 }
@@ -92,7 +89,7 @@ func (d *DAO) DeleteRankConfig(bizKey string) error {
 		bson.M{"_id": bizKey},
 	)
 	if err := queue.PushMongoTask(task); err != nil {
-		zaplog.LoggerSugar.Errorf("balloon dao: delete rank config bizKey=%s: %v", bizKey, err)
+		zaplog.LoggerSugar.Errorf("rank engine dao: delete rank config bizKey=%s: %v", bizKey, err)
 	}
 	return nil
 }
@@ -121,11 +118,10 @@ func (d *DAO) SaveGroup(bizId string, group *Group) error {
 		commonrank.CT_RANK_GROUP,
 		docID,
 		bson.M{"_id": docID},
-		// 不在 $set 中包含 _id，MongoDB 不允许通过 $set 修改已有文档的 _id
 		bson.M{"$set": bson.M{"bizId": bizId, "groupId": g.GroupID, "group": g}},
 	)
 	if err := queue.PushMongoTask(task); err != nil {
-		zaplog.LoggerSugar.Errorf("balloon dao: save group bizId=%s groupId=%d: %v", bizId, g.GroupID, err)
+		zaplog.LoggerSugar.Errorf("rank engine dao: save group bizId=%s groupId=%d: %v", bizId, g.GroupID, err)
 	}
 	return nil
 }
@@ -178,7 +174,7 @@ func (d *DAO) SaveMember(bizId string, userID int64, groupID int32) error {
 		bson.M{"$set": bson.M{"bizId": bizId, "userId": userID, "groupId": groupID}},
 	)
 	if err := queue.PushMongoTask(task); err != nil {
-		zaplog.LoggerSugar.Errorf("balloon dao: save member bizId=%s user=%d: %v", bizId, userID, err)
+		zaplog.LoggerSugar.Errorf("rank engine dao: save member bizId=%s user=%d: %v", bizId, userID, err)
 	}
 	return nil
 }
@@ -249,7 +245,7 @@ func (d *DAO) SaveRobots(bizId string, groupID int32, robots []*robotState) erro
 			bson.M{"$set": bson.M{"bizId": bizId, "groupId": groupID, "memberId": rCopy.MemberID, "state": rCopy}},
 		)
 		if err := queue.PushMongoTask(task); err != nil {
-			zaplog.LoggerSugar.Errorf("balloon dao: save robot bizId=%s group=%d member=%d: %v", bizId, groupID, rCopy.MemberID, err)
+			zaplog.LoggerSugar.Errorf("rank engine dao: save robot bizId=%s group=%d member=%d: %v", bizId, groupID, rCopy.MemberID, err)
 		}
 	}
 	return nil
@@ -319,7 +315,7 @@ func (d *DAO) EnsureIndexes() {
 	}
 	for coll, idxs := range indexes {
 		if _, err := session.Database(d.dbName).Collection(coll).Indexes().CreateMany(ctx, idxs); err != nil {
-			zaplog.LoggerSugar.Warnf("balloon: create indexes for %s: %v", coll, err)
+			zaplog.LoggerSugar.Warnf("rank engine: create indexes for %s: %v", coll, err)
 		}
 	}
 }
@@ -349,7 +345,7 @@ func (d *DAO) SaveClaim(bizId string, userID int64, claimTime int64) error {
 		bson.M{"$set": bson.M{"bizId": bizId, "userId": userID, "claimTime": claimTime}},
 	)
 	if err := queue.PushMongoTask(task); err != nil {
-		zaplog.LoggerSugar.Errorf("balloon dao: save claim bizId=%s user=%d: %v", bizId, userID, err)
+		zaplog.LoggerSugar.Errorf("rank engine dao: save claim bizId=%s user=%d: %v", bizId, userID, err)
 	}
 	return nil
 }
@@ -395,7 +391,6 @@ func (d *DAO) SaveScore(bizId string, groupID int32, userID int64, score int64, 
 	if !d.available() {
 		return nil
 	}
-	// Copy avatarInfo pointer content to avoid aliasing.
 	var aiCopy *commonrank.AvatarInfo
 	if avatarInfo != nil {
 		tmp := *avatarInfo
@@ -426,10 +421,11 @@ func (d *DAO) SaveScore(bizId string, groupID int32, userID int64, score int64, 
 		},
 	)
 	if err := queue.PushMongoTask(task); err != nil {
-		zaplog.LoggerSugar.Errorf("balloon dao: save score bizId=%s group=%d user=%d: %v", bizId, groupID, userID, err)
+		zaplog.LoggerSugar.Errorf("rank engine dao: save score bizId=%s group=%d user=%d: %v", bizId, groupID, userID, err)
 	}
 	return nil
 }
+
 func (d *DAO) LoadGroupScores(bizId string, groupID int32) ([]ScoreDoc, error) {
 	if !d.available() {
 		return nil, nil
@@ -477,7 +473,7 @@ func (d *DAO) SaveSettled(bizId string, groupID int32, snaps []commonrank.RankMe
 		bson.M{"$set": bson.M{"bizId": bizId, "groupId": groupID, "snapshots": snapsCopy, "settleTime": settleTime}},
 	)
 	if err := queue.PushMongoTask(task); err != nil {
-		zaplog.LoggerSugar.Errorf("balloon dao: save settled bizId=%s group=%d: %v", bizId, groupID, err)
+		zaplog.LoggerSugar.Errorf("rank engine dao: save settled bizId=%s group=%d: %v", bizId, groupID, err)
 	}
 	return nil
 }
@@ -505,7 +501,7 @@ type RankInstDoc struct {
 	ID         string                  `bson:"_id"` // "{bizId}:{groupID}"
 	BizId      string                  `bson:"bizId"`
 	GroupID    int32                   `bson:"groupId"`
-	InstanceID string                  `bson:"instanceId"` // rank:inst key 中的 instanceId
+	InstanceID string                  `bson:"instanceId"`
 	Instance   commonrank.RankInstance `bson:"instance"`
 }
 
@@ -526,7 +522,7 @@ func (d *DAO) SaveRankInst(bizId string, groupID int32, inst commonrank.RankInst
 		bson.M{"$set": bson.M{"bizId": bizId, "groupId": groupID, "instanceId": inst.InstanceId, "instance": inst}},
 	)
 	if err := queue.PushMongoTask(task); err != nil {
-		zaplog.LoggerSugar.Errorf("balloon dao: save rank inst bizId=%s group=%d: %v", bizId, groupID, err)
+		zaplog.LoggerSugar.Errorf("rank engine dao: save rank inst bizId=%s group=%d: %v", bizId, groupID, err)
 	}
 	return nil
 }
@@ -549,29 +545,7 @@ func (d *DAO) LoadGroupInst(bizId string, groupID int32) (*commonrank.RankInstan
 	return &inst, nil
 }
 
-// LoadAllRankInsts 同步读取指定 bizId 下全部榜单实例元数据。
-func (d *DAO) LoadAllRankInsts(bizId string) ([]RankInstDoc, error) {
-	if !d.available() {
-		return nil, nil
-	}
-	cursor, err := d.session().Find(d.dbName, commonrank.CT_RANK_INST, bson.M{"bizId": bizId})
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancel := d.session().GetDefaultContext()
-	defer cancel()
-	var docs []RankInstDoc
-	if err := cursor.All(ctx, &docs); err != nil {
-		return nil, err
-	}
-	return docs, nil
-}
-
-// --- 按 bizId 批量删除 ---
-
 // DeleteAllByBizId 同步删除指定 bizId 下的全部关联文档（DeleteMany 语义）。
-// 此方法处理调用时 MongoDB 中已存在的文档。
-// 对于调用前已在写队列中但尚未落库的文档，由调用方提前通过 QueueDeleteDocIDs 推入删除任务覆盖。
 func (d *DAO) DeleteAllByBizId(bizId string) error {
 	if !d.available() {
 		return nil
@@ -589,15 +563,13 @@ func (d *DAO) DeleteAllByBizId(bizId string) error {
 	session := d.session()
 	for _, coll := range colls {
 		if _, err := session.DeleteMany(d.dbName, coll, filter); err != nil {
-			zaplog.LoggerSugar.Errorf("balloon dao: DeleteAllByBizId %s bizId=%s: %v", coll, bizId, err)
+			zaplog.LoggerSugar.Errorf("rank engine dao: DeleteAllByBizId %s bizId=%s: %v", coll, bizId, err)
 		}
 	}
 	return nil
 }
 
 // QueueDeleteDocIDs 通过异步队列为已知 docID 列表逐条推送 DeleteOne 任务。
-// hashFactor 与写任务保持一致（均为 docID），确保删除任务排在同 docID 的写任务之后执行，
-// 覆盖因写任务在 DeleteMany 之后执行而重新写入的文档。
 func (d *DAO) QueueDeleteDocIDs(coll string, docIDs []string) {
 	if !d.available() || len(docIDs) == 0 {
 		return
@@ -606,7 +578,7 @@ func (d *DAO) QueueDeleteDocIDs(coll string, docIDs []string) {
 		id := docID
 		task := mongoTask.GWriteTaskBuilder.BuildDeleteTask(coll, id, bson.M{"_id": id})
 		if err := queue.PushMongoTask(task); err != nil {
-			zaplog.LoggerSugar.Errorf("balloon dao: QueueDeleteDocIDs %s id=%s: %v", coll, id, err)
+			zaplog.LoggerSugar.Errorf("rank engine dao: QueueDeleteDocIDs %s id=%s: %v", coll, id, err)
 		}
 	}
 }

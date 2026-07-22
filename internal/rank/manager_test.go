@@ -6,15 +6,16 @@ import (
 	"testing"
 
 	"common/rank"
-	"socialserver/internal/rank/balloon"
+	"socialserver/internal/rank/engine"
 )
 
 func newTestManager() *Manager {
 	return &Manager{
-		rankService:     rank.NewMemoryService(),
-		memberIndex:     NewMemberIndex(nil),
-		services:        make(map[string]RankBizService),
-		balloonServices: make(map[string]*balloon.Service),
+		rankService:    rank.NewMemoryService(),
+		memberIndex:    NewMemberIndex(nil),
+		services:       make(map[string]RankBizService),
+		engineServices: make(map[string]*engine.Service),
+		stopCh:         make(chan struct{}),
 	}
 }
 
@@ -23,7 +24,7 @@ func TestManagerBalloonScenario(t *testing.T) {
 	manager := newTestManager()
 	defer manager.Close()
 
-	service, err := manager.registerBalloon(ctx, balloon.Config{
+	service, err := manager.registerEngine(ctx, BizTypeBalloon, engine.Config{
 		BizType:       "balloon",
 		ActID:         2001,
 		RankCode:      "balloon_score",
@@ -33,7 +34,7 @@ func TestManagerBalloonScenario(t *testing.T) {
 		CloseTime:     5000,
 	})
 	if err != nil {
-		t.Fatalf("register balloon service: %v", err)
+		t.Fatalf("register engine service: %v", err)
 	}
 
 	input := []struct {
@@ -89,7 +90,7 @@ func TestManagerBalloonScenario(t *testing.T) {
 		t.Fatalf("unexpected settled group1: %+v", settledGroup1)
 	}
 
-	if err := service.UpsertScore(ctx, 10005, 190, 5600, nil); err != rank.ErrInstanceNotOpen {
+	if err := service.UpsertScore(ctx, 10005, 190, 5600, nil); err != rank.ErrInstanceClosed {
 		t.Fatalf("expected writes rejected after close, got %v", err)
 	}
 }
@@ -98,7 +99,7 @@ func BenchmarkManagerBalloonScenario(b *testing.B) {
 	ctx := context.Background()
 	for i := 0; i < b.N; i++ {
 		manager := newTestManager()
-		service, err := manager.registerBalloon(ctx, balloon.Config{
+		service, err := manager.registerEngine(ctx, BizTypeBalloon, engine.Config{
 			BizType:       fmt.Sprintf("balloon_bench_%d", i),
 			ActID:         int32(3000 + i),
 			RankCode:      fmt.Sprintf("balloon_bench_%d", i),
@@ -108,7 +109,7 @@ func BenchmarkManagerBalloonScenario(b *testing.B) {
 			CloseTime:     100000,
 		})
 		if err != nil {
-			b.Fatalf("register balloon: %v", err)
+			b.Fatalf("register engine: %v", err)
 		}
 
 		for userID := int64(1); userID <= 1000; userID++ {
@@ -135,7 +136,7 @@ func TestManagerMemberIndex(t *testing.T) {
 	manager := newTestManager()
 	defer manager.Close()
 
-	_, err := manager.registerBalloon(ctx, balloon.Config{
+	service, err := manager.registerEngine(ctx, BizTypeBalloon, engine.Config{
 		BizType:       "balloon",
 		ActID:         6001,
 		RankCode:      "balloon_idx",
@@ -148,13 +149,10 @@ func TestManagerMemberIndex(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 
-	svc := manager.GetService(BizTypeBalloon, 6001)
-	bsvc := svc.(*BalloonBizService)
-
-	if err := bsvc.Svc.UpsertScore(ctx, 2001, 150, 1100, nil); err != nil {
+	if err := service.UpsertScore(ctx, 2001, 150, 1100, nil); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
-	if err := bsvc.Svc.UpsertScore(ctx, 2002, 160, 1200, nil); err != nil {
+	if err := service.UpsertScore(ctx, 2002, 160, 1200, nil); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 
@@ -176,7 +174,7 @@ func TestManagerGetMemberRankEntries(t *testing.T) {
 	manager := newTestManager()
 	defer manager.Close()
 
-	_, err := manager.registerBalloon(ctx, balloon.Config{
+	service, err := manager.registerEngine(ctx, BizTypeBalloon, engine.Config{
 		BizType:       "balloon",
 		ActID:         7001,
 		RankCode:      "balloon_agg",
@@ -189,10 +187,7 @@ func TestManagerGetMemberRankEntries(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 
-	svc := manager.GetService(BizTypeBalloon, 7001)
-	bsvc := svc.(*BalloonBizService)
-
-	if err := bsvc.Svc.UpsertScore(ctx, 3001, 200, 10100, nil); err != nil {
+	if err := service.UpsertScore(ctx, 3001, 200, 10100, nil); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 
@@ -213,7 +208,7 @@ func TestManagerGetService(t *testing.T) {
 	manager := newTestManager()
 	defer manager.Close()
 
-	_, err := manager.registerBalloon(ctx, balloon.Config{
+	_, err := manager.registerEngine(ctx, BizTypeBalloon, engine.Config{
 		BizType:       "balloon",
 		ActID:         8001,
 		RankCode:      "balloon_compat",

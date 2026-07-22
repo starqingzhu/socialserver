@@ -1,4 +1,4 @@
-package balloon
+package engine
 
 import (
 	"context"
@@ -97,7 +97,7 @@ func (s *Service) spawnRobotsForGroup(ctx context.Context, groupID int32, capaci
 	_ = s.store.SaveRobots(groupID, newRobots)
 	_ = s.store.SaveUsedInfoIDs(groupID, usedInfoIDs)
 
-	zaplog.LoggerSugar.Infof("balloon: spawned %d robots for group %d (bizType=%s)", len(newRobots), groupID, s.config.BizType)
+	zaplog.LoggerSugar.Infof("rank engine: spawned %d robots for group %d (bizType=%s)", len(newRobots), groupID, s.config.BizType)
 	return nil
 }
 
@@ -182,7 +182,7 @@ func (s *Service) tickGroupRobots(ctx context.Context, groupID int32, instanceID
 	}
 	if len(updates) > 0 {
 		if err := s.rankService.BatchUpsertScore(ctx, instanceID, updates); err != nil {
-			zaplog.LoggerSugar.Warnf("balloon: tick robots for group %d failed: %v", groupID, err)
+			zaplog.LoggerSugar.Warnf("rank engine: tick robots for group %d failed: %v", groupID, err)
 			return
 		}
 	}

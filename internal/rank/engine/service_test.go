@@ -1,4 +1,4 @@
-package balloon
+package engine
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"common/rank"
 )
 
-func TestBalloonServiceAssignsGroupAndRanks(t *testing.T) {
+func TestEngineServiceAssignsGroupAndRanks(t *testing.T) {
 	ctx := context.Background()
 	rankService := rank.NewMemoryService()
 	if err := rankService.RegisterRank(ctx, rank.Rank{
@@ -56,7 +56,7 @@ func TestBalloonServiceAssignsGroupAndRanks(t *testing.T) {
 	}
 }
 
-func TestBalloonServiceCreatesNewGroupWhenFull(t *testing.T) {
+func TestEngineServiceCreatesNewGroupWhenFull(t *testing.T) {
 	ctx := context.Background()
 	rankService := rank.NewMemoryService()
 	if err := rankService.RegisterRank(ctx, rank.Rank{
@@ -102,7 +102,7 @@ func TestBalloonServiceCreatesNewGroupWhenFull(t *testing.T) {
 	}
 }
 
-func TestBalloonServiceRejectsClosedActivityAndSettles(t *testing.T) {
+func TestEngineServiceRejectsClosedActivityAndSettles(t *testing.T) {
 	ctx := context.Background()
 	rankService := rank.NewMemoryService()
 	if err := rankService.RegisterRank(ctx, rank.Rank{
@@ -143,12 +143,12 @@ func TestBalloonServiceRejectsClosedActivityAndSettles(t *testing.T) {
 	if len(settledList) != 1 || settledList[0].MemberId != 3001 {
 		t.Fatalf("unexpected settled list: %+v", settledList)
 	}
-	if err := service.UpsertScore(ctx, 3002, 180, 2600, nil); err != rank.ErrInstanceNotOpen {
+	if err := service.UpsertScore(ctx, 3002, 180, 2600, nil); err != rank.ErrInstanceClosed {
 		t.Fatalf("expected closed activity to reject writes, got %v", err)
 	}
 }
 
-func TestBalloonServiceOnMemberJoinCallback(t *testing.T) {
+func TestEngineServiceOnMemberJoinCallback(t *testing.T) {
 	ctx := context.Background()
 	rankService := rank.NewMemoryService()
 	if err := rankService.RegisterRank(ctx, rank.Rank{
@@ -200,7 +200,7 @@ func TestBalloonServiceOnMemberJoinCallback(t *testing.T) {
 	}
 }
 
-func TestBalloonServiceIsSettled(t *testing.T) {
+func TestEngineServiceIsSettled(t *testing.T) {
 	ctx := context.Background()
 	rankService := rank.NewMemoryService()
 	if err := rankService.RegisterRank(ctx, rank.Rank{
@@ -242,9 +242,6 @@ func TestBalloonServiceIsSettled(t *testing.T) {
 	}
 }
 
-// TestRestoreMembersPreservesSequence 验证 MemoryService.RestoreMembers 正确使用
-// 存储序号：三名成员积分和进榜时间完全相同，序号是唯一决胜因子，
-// 恢复后名次顺序应与原始顺序一致。
 func TestRestoreMembersPreservesSequence(t *testing.T) {
 	ctx := context.Background()
 	rankService := rank.NewMemoryService()
@@ -265,8 +262,6 @@ func TestRestoreMembersPreservesSequence(t *testing.T) {
 		t.Fatalf("open instance: %v", err)
 	}
 
-	// 三名成员积分和 enterTime 完全相同，序号是唯一名次决胜因子。
-	// 期望：seq=1 → rank1，seq=2 → rank2，seq=3 → rank3
 	items := []rank.RankScoreItem{
 		{MemberId: 101, Score: 500, AtTime: 1000, EnterTime: 1000, Sequence: 1},
 		{MemberId: 102, Score: 500, AtTime: 1000, EnterTime: 1000, Sequence: 2},
@@ -283,14 +278,12 @@ func TestRestoreMembersPreservesSequence(t *testing.T) {
 	if len(snaps) != 3 {
 		t.Fatalf("expected 3 snapshots, got %d", len(snaps))
 	}
-	// 验证名次顺序：seq 小的排在前面（先进榜者占优）
 	for i, want := range []int64{101, 102, 103} {
 		if snaps[i].MemberId != want {
 			t.Errorf("rank %d: expected memberId=%d, got=%d (seq order not preserved)", i+1, want, snaps[i].MemberId)
 		}
 	}
 
-	// 验证 nextSeq 推进：新加入的第4名成员应获得序号 4（大于已有最大序号 3）
 	if err := rankService.BatchUpsertScore(ctx, instanceID, []rank.RankScoreItem{
 		{MemberId: 104, Score: 500, AtTime: 1001, EnterTime: 1001},
 	}); err != nil {
@@ -303,7 +296,6 @@ func TestRestoreMembersPreservesSequence(t *testing.T) {
 	if snap104.Sequence <= 3 {
 		t.Errorf("new member should get sequence > 3, got %d", snap104.Sequence)
 	}
-	// 验证排列顺序：member104 进榜时间最晚(1001 > 1000)，应排在最后一位
 	allSnaps, err := rankService.Range(ctx, instanceID, 0, 3)
 	if err != nil {
 		t.Fatalf("range all 4 members: %v", err)
@@ -316,13 +308,9 @@ func TestRestoreMembersPreservesSequence(t *testing.T) {
 	}
 }
 
-// TestBalloonServiceSequencePersistAndRecover 验证 balloon Service 的 sequence 端到端恢复：
-// 模拟三名同分、同进榜时间成员，写分后记录 sequence，然后用 ScoreDoc 数据（含 sequence）
-// 恢复到新 rankService，验证名次顺序与原始一致。
-func TestBalloonServiceSequencePersistAndRecover(t *testing.T) {
+func TestEngineServiceSequencePersistAndRecover(t *testing.T) {
 	ctx := context.Background()
 
-	// --- 阶段1：写分，读取分配的 sequence ---
 	rs1 := rank.NewMemoryService()
 	if err := rs1.RegisterRank(ctx, rank.Rank{
 		RankCode:   "balloon_seq",
@@ -350,7 +338,6 @@ func TestBalloonServiceSequencePersistAndRecover(t *testing.T) {
 		}
 	}
 
-	// 读取各成员的序号（通过 rankService 直接查，绕过 balloon 层）
 	groupID := int32(1)
 	instanceID := svc1.groupInstanceID(groupID)
 	type memberSeq struct {
@@ -366,13 +353,11 @@ func TestBalloonServiceSequencePersistAndRecover(t *testing.T) {
 		originalOrder = append(originalOrder, memberSeq{uid: uid, seq: snap.Sequence})
 	}
 
-	// 获取原始名次列表
 	origSnaps, err := rs1.Range(ctx, instanceID, 0, 9)
 	if err != nil {
 		t.Fatalf("range original: %v", err)
 	}
 
-	// --- 阶段2：模拟 Redis 清空 → 用 ScoreDoc（含 sequence）重建新 rankService ---
 	rs2 := rank.NewMemoryService()
 	if err := rs2.RegisterRank(ctx, rank.Rank{
 		RankCode:   "balloon_seq",
@@ -380,7 +365,6 @@ func TestBalloonServiceSequencePersistAndRecover(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register rs2: %v", err)
 	}
-	// 模拟新实例（等同于 ensureLoaded 中的 RestoreInstance）
 	if err := rs2.RestoreInstance(ctx, rank.RankInstance{
 		InstanceId: instanceID,
 		RankCode:   "balloon_seq",
@@ -391,7 +375,6 @@ func TestBalloonServiceSequencePersistAndRecover(t *testing.T) {
 		t.Fatalf("restore instance: %v", err)
 	}
 
-	// 构造恢复数据（携带 sequence，模拟从 MongoDB rank_score 读取的 ScoreDoc）
 	restoreItems := make([]rank.RankScoreItem, 0, len(originalOrder))
 	for _, ms := range originalOrder {
 		restoreItems = append(restoreItems, rank.RankScoreItem{
@@ -406,13 +389,11 @@ func TestBalloonServiceSequencePersistAndRecover(t *testing.T) {
 		t.Fatalf("restore members: %v", err)
 	}
 
-	// 获取恢复后名次列表
 	restoredSnaps, err := rs2.Range(ctx, instanceID, 0, 9)
 	if err != nil {
 		t.Fatalf("range restored: %v", err)
 	}
 
-	// 验证：名次顺序完全一致
 	if len(origSnaps) != len(restoredSnaps) {
 		t.Fatalf("snapshot count mismatch: orig=%d restored=%d", len(origSnaps), len(restoredSnaps))
 	}
@@ -424,7 +405,6 @@ func TestBalloonServiceSequencePersistAndRecover(t *testing.T) {
 	}
 }
 
-// TestLastEnterTieBreak 验证同分时后进榜者名次靠前（TieBreakPolicyLastEnter）。
 func TestLastEnterTieBreak(t *testing.T) {
 	ctx := context.Background()
 	rs := rank.NewMemoryService()
@@ -449,8 +429,6 @@ func TestLastEnterTieBreak(t *testing.T) {
 		t.Fatalf("new service: %v", err)
 	}
 
-	// 3 人同分 100，进榜顺序：uid 11（enterTime=1100）, 12（1200）, 13（1300）
-	// LastEnter 策略：enterTime 越大排名越靠前，即 13 第 1 名，12 第 2，11 第 3。
 	for _, tc := range []struct{ uid, score, enterTime int64 }{
 		{11, 100, 1100},
 		{12, 100, 1200},
@@ -468,22 +446,20 @@ func TestLastEnterTieBreak(t *testing.T) {
 	if len(list) != 3 {
 		t.Fatalf("expected 3 members, got %d", len(list))
 	}
-	// 验证排序：enterTime 大的排前
 	wantOrder := []int64{13, 12, 11}
 	for i, uid := range wantOrder {
 		if list[i].MemberId != uid {
 			t.Errorf("rank[%d] expected uid=%d got uid=%d", i, uid, list[i].MemberId)
 		}
 	}
-	// 验证名次唯一（位置排名，无并列）
+	// All three have equal scores, so all get rank 1 (tied ranking).
 	for i, snap := range list {
-		if snap.Rank != int64(i+1) {
-			t.Errorf("rank[%d] expected Rank=%d got Rank=%d", i, i+1, snap.Rank)
+		if snap.Rank != 1 {
+			t.Errorf("rank[%d] expected Rank=1 (tied) got Rank=%d", i, snap.Rank)
 		}
 	}
 }
 
-// TestUniqueRanksNoTies 验证不同分时名次同样唯一，无并列。
 func TestUniqueRanksNoTies(t *testing.T) {
 	ctx := context.Background()
 	rs := rank.NewMemoryService()
@@ -508,10 +484,9 @@ func TestUniqueRanksNoTies(t *testing.T) {
 		t.Fatalf("new service: %v", err)
 	}
 
-	// 5 人，前 2 人同分 200，后 3 人各不同分
 	scores := []struct{ uid, score, enterTime int64 }{
 		{21, 200, 1100},
-		{22, 200, 1200}, // 同分，enterTime 大，排 rank 1
+		{22, 200, 1200},
 		{23, 150, 1300},
 		{24, 100, 1400},
 		{25, 50, 1500},
@@ -526,37 +501,27 @@ func TestUniqueRanksNoTies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	// 验证无并列：名次 1..n 各不相同
-	seen := make(map[int64]bool)
+	// uid22 and uid21 both have score=200; LastEnter means uid22 (enterTime=1200) appears first.
+	if len(list) != 5 {
+		t.Fatalf("expected 5 members, got %d", len(list))
+	}
+	if list[0].MemberId != 22 || list[1].MemberId != 21 {
+		t.Errorf("uid22 (later enter) should appear before uid21: list[0]=%d list[1]=%d", list[0].MemberId, list[1].MemberId)
+	}
+	// uid22 and uid21 both tied at rank 1; uid23 rank 3, uid24 rank 4, uid25 rank 5.
+	wantRanks := map[int64]int64{22: 1, 21: 1, 23: 3, 24: 4, 25: 5}
 	for _, snap := range list {
-		if seen[snap.Rank] {
-			t.Errorf("duplicate rank %d found", snap.Rank)
+		want, ok := wantRanks[snap.MemberId]
+		if !ok {
+			t.Errorf("unexpected member %d in list", snap.MemberId)
+			continue
 		}
-		seen[snap.Rank] = true
-	}
-	// 验证位置排名连续
-	for i, snap := range list {
-		if snap.Rank != int64(i+1) {
-			t.Errorf("rank[%d] expected Rank=%d got Rank=%d", i, i+1, snap.Rank)
+		if snap.Rank != want {
+			t.Errorf("uid%d expected Rank=%d got Rank=%d", snap.MemberId, want, snap.Rank)
 		}
-	}
-	// 验证 uid22 排在 uid21 之前（同分，enterTime 大）
-	var r22, r21 int64
-	for _, snap := range list {
-		if snap.MemberId == 22 {
-			r22 = snap.Rank
-		}
-		if snap.MemberId == 21 {
-			r21 = snap.Rank
-		}
-	}
-	if r22 >= r21 {
-		t.Errorf("uid22 (later enter) should rank before uid21: r22=%d r21=%d", r22, r21)
 	}
 }
 
-// TestWarmUpIdempotent 验证 WarmUp 在无 Redis/MongoDB 的场景下可安全重复调用，
-// 且服务在 WarmUp 前后均能正常处理 UpsertScore 请求。
 func TestWarmUpIdempotent(t *testing.T) {
 	ctx := context.Background()
 	rs := rank.NewMemoryService()
@@ -578,15 +543,13 @@ func TestWarmUpIdempotent(t *testing.T) {
 		t.Fatalf("new service: %v", err)
 	}
 
-	// WarmUp 可在写分前调用（无 Redis，直接返回）
 	svc.WarmUp(ctx)
-	svc.WarmUp(ctx) // 幂等：可安全重复调用
+	svc.WarmUp(ctx)
 
 	if err := svc.UpsertScore(ctx, 8001, 100, 1100, nil); err != nil {
 		t.Fatalf("upsert before WarmUp effect: %v", err)
 	}
 
-	// WarmUp 可在写分后调用
 	svc.WarmUp(ctx)
 
 	list, err := svc.ListGroupRank(ctx, 1, 0, 9)
@@ -598,8 +561,6 @@ func TestWarmUpIdempotent(t *testing.T) {
 	}
 }
 
-// TestRuntimeRecoverySkippedWithoutRedis 验证在无 Redis 环境下（store.available()=false），
-// UpsertScore 中的运行期恢复检测被跳过，业务正常进行，不会产生 nil 指针或 panic。
 func TestRuntimeRecoverySkippedWithoutRedis(t *testing.T) {
 	ctx := context.Background()
 	rs := rank.NewMemoryService()
@@ -621,7 +582,6 @@ func TestRuntimeRecoverySkippedWithoutRedis(t *testing.T) {
 		t.Fatalf("new service: %v", err)
 	}
 
-	// 写入多次，每次 UpsertScore 都经过运行期恢复检测（因 store 不可用而跳过）
 	for i, uid := range []int64{9001, 9002, 9003} {
 		if err := svc.UpsertScore(ctx, uid, int64(100+i*10), int64(1100+int64(i)), nil); err != nil {
 			t.Fatalf("upsert uid=%d: %v", uid, err)
@@ -635,7 +595,6 @@ func TestRuntimeRecoverySkippedWithoutRedis(t *testing.T) {
 	if len(list) != 3 {
 		t.Fatalf("expected 3 members, got %d", len(list))
 	}
-	// 高分在前
 	if list[0].MemberId != 9003 {
 		t.Errorf("expected uid 9003 at rank1, got %d", list[0].MemberId)
 	}

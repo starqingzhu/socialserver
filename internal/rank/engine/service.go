@@ -1,4 +1,4 @@
-package balloon
+package engine
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"golib/zaplog"
 )
 
-// Service 气球活动排行榜业务服务。
+// Service 通用排行榜业务服务。
 // 每个活动对应一个 Service 实例，内部按人数上限自动分组，
 // 同一分组共享一个底层榜单实例。
 //
@@ -38,16 +38,15 @@ func NewService(rankService rank.Service, config Config, rdb *goredis.Redis, dao
 		return nil, rank.ErrInvalidRankSpec
 	}
 	s := &Service{
-		config:            config,
-		rankService:       rankService,
-		store:             NewStore(rdb, dao, config.computeBizId()),
+		config:       config,
+		rankService:  rankService,
+		store:        NewStore(rdb, dao, config.computeBizId()),
 		memberGroup:  make(map[int64]int32),
 		settledGroup: make(map[int32][]rank.RankMemberSnapshot),
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
-	// 将活动时间写入 meta hash，以便节点重启后通过 syncFromRedis 恢复。
 	s.store.SaveActivityTimes(config.OpenTime, config.CloseTime, config.GameEndTime)
 	return s, nil
 }
@@ -60,7 +59,6 @@ func (s *Service) ensureLoaded() {
 	}
 	s.loaded = true
 
-	// 1. 加载分组列表
 	if groups, err := s.store.LoadGroups(); err == nil && len(groups) > 0 {
 		s.groups = groups
 		sort.Slice(s.groups, func(i, j int) bool { return s.groups[i].GroupID < s.groups[j].GroupID })
@@ -69,17 +67,13 @@ func (s *Service) ensureLoaded() {
 				s.nextGroupID = g.GroupID
 			}
 		}
-		// 恢复 nextGroupID 计数器，防止 Redis 清理后新分组 ID 与已有分组冲突。
 		s.store.RestoreNextGroupID(s.nextGroupID)
 	}
 
-	// 2. 加载成员→分组映射
 	if members, err := s.store.GetAllMembers(); err == nil {
 		for uid, gid := range members {
 			s.memberGroup[uid] = gid
 		}
-		// 恢复 rank:member_index：Redis 被清理后每位玩家的分组索引条目会丢失，
-		// 通过 SAdd（幂等）重建，避免玩家查询排名时因索引缺失而返回"未上榜"。
 		if s.onMemberJoin != nil {
 			for uid, gid := range s.memberGroup {
 				s.onMemberJoin(uid, gid)
@@ -87,9 +81,7 @@ func (s *Service) ensureLoaded() {
 		}
 	}
 
-	// 3. 按分组加载机器人、已用 InfoID、最高真实积分
 	for _, g := range s.groups {
-		// 若 Redis 被清理导致 InfoID SET 为空，从 MongoDB 重建并写回 Redis。
 		if ids, err := s.store.LoadUsedInfoIDs(g.GroupID); err == nil && len(ids) == 0 {
 			if robots, err2 := s.store.LoadRobots(g.GroupID); err2 == nil && len(robots) > 0 {
 				idSet := make(map[int64]struct{}, len(robots))
@@ -101,10 +93,6 @@ func (s *Service) ensureLoaded() {
 		}
 	}
 
-	// 4. 双向同步 rank:mb ↔ MongoDB，并在 Redis 清理后恢复 rank:inst / rank:settled。
-	//
-	// 方向1（Redis → MongoDB backfill）：rank:mb 有数据但 rank_score 为空 → 写入 MongoDB。
-	// 方向2（MongoDB → Redis 恢复）：rank:mb 缺失但 MongoDB 有数据 → 重建 Redis。
 	ctx := context.Background()
 	for _, g := range s.groups {
 		instanceID := s.groupInstanceID(g.GroupID)
@@ -113,10 +101,6 @@ func (s *Service) ensureLoaded() {
 		mongoScores, _ := s.store.LoadGroupScores(g.GroupID)
 
 		if mbExists {
-			// 方向1：rank:mb 已存在。
-			// MongoDB 积分记录为空 → backfill；
-			// rank:mb 存在但 rank:inst 可能缺失（如仅 rank:inst 被清除）→ 先恢复实例元数据，
-			// 否则后续 Snapshot/Range 都会因 GetInstance 返回 ErrInstanceNotFound 而失败。
 			if instExists, _ := s.store.RdbExists(rediskeys.GetRankInstKey(instanceID)); !instExists {
 				instToRestore := rank.RankInstance{
 					InstanceId:  instanceID,
@@ -133,7 +117,7 @@ func (s *Service) ensureLoaded() {
 					instToRestore = *mongoInst
 				}
 				_ = s.rankService.RestoreInstance(ctx, instToRestore)
-				zaplog.LoggerSugar.Infof("balloon: restored missing rank:inst for group %d instanceID=%s", g.GroupID, instanceID)
+				zaplog.LoggerSugar.Infof("rank engine: restored missing rank:inst for group %d instanceID=%s", g.GroupID, instanceID)
 			}
 
 			needBackfill := len(mongoScores) == 0
@@ -148,17 +132,15 @@ func (s *Service) ensureLoaded() {
 							et = snap.UpdateTime
 						}
 						if wErr := s.store.SaveScore(g.GroupID, snap.MemberId, snap.Score, et, snap.Sequence, snap.UpdateTime, snap.AvatarInfo); wErr != nil {
-							zaplog.LoggerSugar.Warnf("balloon: backfill score group=%d member=%d: %v", g.GroupID, snap.MemberId, wErr)
+							zaplog.LoggerSugar.Warnf("rank engine: backfill score group=%d member=%d: %v", g.GroupID, snap.MemberId, wErr)
 						}
 					}
 				}
 			}
 		} else {
-			// 方向2：rank:mb 缺失 → 从 MongoDB 恢复（真实玩家 + 机器人）
 			robotsForGroup, _ := s.store.LoadRobots(g.GroupID)
 			items := make([]rank.RankScoreItem, 0, len(mongoScores)+len(robotsForGroup))
 
-			// 恢复真实玩家积分
 			for _, doc := range mongoScores {
 				items = append(items, rank.RankScoreItem{
 					MemberId:   doc.UserID,
@@ -170,7 +152,6 @@ func (s *Service) ensureLoaded() {
 				})
 			}
 
-			// 恢复机器人积分（确保排行榜完整）
 			for _, r := range robotsForGroup {
 				var ai *rank.AvatarInfo
 				for _, info := range s.config.RobotInfos {
@@ -190,10 +171,9 @@ func (s *Service) ensureLoaded() {
 
 			if len(items) > 0 {
 				if err := s.rankService.RestoreMembers(ctx, instanceID, items); err != nil {
-					zaplog.LoggerSugar.Warnf("balloon: restore rank:mb for group %d: %v", g.GroupID, err)
+					zaplog.LoggerSugar.Warnf("rank engine: restore rank:mb for group %d: %v", g.GroupID, err)
 				}
 			}
-			// rank:mb 是从 MongoDB 恢复的；若 rank:inst 也缺失，同步恢复实例元数据
 			if instExists, _ := s.store.RdbExists(rediskeys.GetRankInstKey(instanceID)); !instExists {
 				instToRestore := rank.RankInstance{
 					InstanceId:  instanceID,
@@ -207,7 +187,6 @@ func (s *Service) ensureLoaded() {
 					UpdateTime:  s.config.OpenTime,
 					MemberCount: int64(len(items)),
 				}
-				// 优先使用 MongoDB 持久化的精确实例数据覆盖重建值
 				if mongoInst, err2 := s.store.LoadGroupInst(g.GroupID); err2 == nil && mongoInst != nil {
 					instToRestore = *mongoInst
 				}
@@ -215,25 +194,20 @@ func (s *Service) ensureLoaded() {
 			}
 		}
 
-		// 结算快照双向同步 + rank:inst 恢复
 		if g.State == GroupStateSettled {
 			settledExists, _ := s.store.RdbExists(rediskeys.GetRankSettledKey(instanceID))
 			if settledExists {
-				// 方向1：rank:settled 存在，但 MongoDB 可能缺失 → backfill
 				if mongoSettled, err := s.store.LoadGroupSettled(g.GroupID); err == nil && len(mongoSettled) == 0 {
 					if snaps, snapErr := s.rankService.Snapshot(ctx, instanceID); snapErr == nil && len(snaps) > 0 {
 						if wErr := s.store.SaveSettled(g.GroupID, snaps, s.config.GameEndTime); wErr != nil {
-							zaplog.LoggerSugar.Warnf("balloon: backfill settled group=%d: %v", g.GroupID, wErr)
+							zaplog.LoggerSugar.Warnf("rank engine: backfill settled group=%d: %v", g.GroupID, wErr)
 						}
 					}
 				}
 			} else {
-				// 方向2：rank:settled 缺失 → 从 MongoDB 恢复到内存 + Redis
 				if snaps, err := s.store.LoadGroupSettled(g.GroupID); err == nil && len(snaps) > 0 {
 					s.settledGroup[g.GroupID] = snaps
-					// 写回 Redis，使 rankService.GetMemRank 正常工作
 					s.store.RestoreSettled(instanceID, snaps)
-					// 若 rank:inst 也缺失，恢复实例元数据：优先使用 MongoDB 持久化的真实数据
 					if instExists, _ := s.store.RdbExists(rediskeys.GetRankInstKey(instanceID)); !instExists {
 						instToRestore := rank.RankInstance{
 							InstanceId:  instanceID,
@@ -249,7 +223,6 @@ func (s *Service) ensureLoaded() {
 							MemberCount: int64(len(snaps)),
 							Version:     1,
 						}
-						// 优先使用 MongoDB 持久化的精确实例数据覆盖重建值
 						if mongoInst, err2 := s.store.LoadGroupInst(g.GroupID); err2 == nil && mongoInst != nil {
 							instToRestore = *mongoInst
 						}
@@ -262,29 +235,23 @@ func (s *Service) ensureLoaded() {
 }
 
 // WarmUp 主动触发 ensureLoaded，确保该服务的所有分组数据已从 Redis/MongoDB 恢复。
-// 在节点初始化完成后由 Manager 对所有服务并发调用，解决懒加载导致的冷启动数据缺失问题。
-// 可安全并发调用（内部持 s.mu）。
 func (s *Service) WarmUp(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensureLoaded()
 }
 
-// recoverGroupData 在运行期间检测到 rank:mb 被 Redis 驱逐后，
-// 从 MongoDB 重建指定分组的排行榜数据（rank:mb / rank:inst）。
-// 不持有 s.mu，MongoDB 读和 Redis 写均在锁外执行（操作幂等）。
-// 在锁外读取机器人快照前会短暂加锁，避免数据竞争。
+// recoverGroupData 在运行期间检测到 rank:mb 被 Redis 驱逐后，从 MongoDB 重建指定分组的排行榜数据。
 func (s *Service) recoverGroupData(ctx context.Context, groupID int32, instanceID string) {
 	if !s.store.available() || !s.store.hasMongo() {
 		return
 	}
 	mongoScores, err := s.store.LoadGroupScores(groupID)
 	if err != nil {
-		zaplog.LoggerSugar.Warnf("balloon: runtime recovery load scores group=%d bizId=%s: %v", groupID, s.bizId(), err)
+		zaplog.LoggerSugar.Warnf("rank engine: runtime recovery load scores group=%d bizId=%s: %v", groupID, s.bizId(), err)
 		return
 	}
 
-	// 多节点：直接从 Redis/MongoDB 加载机器人状态，避免依赖本节点内存缓存。
 	robotsCopy, _ := s.store.LoadRobots(groupID)
 	robotInfos := s.config.RobotInfos
 
@@ -319,12 +286,11 @@ func (s *Service) recoverGroupData(ctx context.Context, groupID int32, instanceI
 
 	if len(items) > 0 {
 		if restoreErr := s.rankService.RestoreMembers(ctx, instanceID, items); restoreErr != nil {
-			zaplog.LoggerSugar.Warnf("balloon: runtime recover rank:mb group=%d bizId=%s: %v", groupID, s.bizId(), restoreErr)
+			zaplog.LoggerSugar.Warnf("rank engine: runtime recover rank:mb group=%d bizId=%s: %v", groupID, s.bizId(), restoreErr)
 			return
 		}
 	}
 
-	// 若 rank:inst 也缺失，同步恢复实例元数据（优先使用 MongoDB 中持久化的精确数据）
 	if instExists, _ := s.store.RdbExists(rediskeys.GetRankInstKey(instanceID)); !instExists {
 		instToRestore := rank.RankInstance{
 			InstanceId:  instanceID,
@@ -344,11 +310,9 @@ func (s *Service) recoverGroupData(ctx context.Context, groupID int32, instanceI
 		_ = s.rankService.RestoreInstance(ctx, instToRestore)
 	}
 
-	zaplog.LoggerSugar.Infof("balloon: runtime recovered rank:mb group=%d bizId=%s members=%d", groupID, s.bizId(), len(items))
+	zaplog.LoggerSugar.Infof("rank engine: runtime recovered rank:mb group=%d bizId=%s members=%d", groupID, s.bizId(), len(items))
 }
 
-// stateAt 根据活动配置时间返回当前活动状态，无需 Redis 写操作。
-// CloseTime=0 表示未设置关闭时间，活动保持 open 直到显式关闭。
 func (s *Service) stateAt(now int64) rank.InstanceStateType {
 	if s.config.OpenTime > 0 && now < s.config.OpenTime {
 		return rank.InstanceStateInit
@@ -366,29 +330,22 @@ func (s *Service) canUpdateScore(now int64) rank.InstanceStateType {
 	if s.config.CloseTime > 0 && now >= s.config.CloseTime {
 		return rank.InstanceStateClosed
 	}
-
 	if now > s.config.GameEndTime && s.config.GameEndTime > 0 {
 		return rank.InstanceStateSettled
 	}
 	return rank.InstanceStateOpen
 }
 
-// Tick 推进活动时间轴：
-// 1. 驱动所有活跃分组内的机器人积分增长（GameEndTime 前）。
-// 2. 到达 GameEndTime（若未设置则退化为 CloseTime）后自动结算。
+// Tick 推进活动时间轴：驱动机器人积分增长，到达 GameEndTime 后自动结算。
 func (s *Service) Tick(ctx context.Context, now int64) error {
-
 	s.mu.Lock()
 	s.ensureLoaded()
 	s.mu.Unlock()
 
-	// 活动关闭前推进机器人积分；关闭后机器人停止增长，无需再 tick。
 	if s.config.hasRobots() && now < s.config.GameEndTime {
 		s.tickAllRobots(ctx, now)
 	}
 
-	// 到达玩法结束时间后自动结算（幂等，已结算的分组会被跳过）。
-	// GameEndTime 为 0 时退化为 CloseTime，保持向后兼容。
 	settleAt := s.config.GameEndTime
 	if settleAt == 0 {
 		settleAt = s.config.CloseTime
@@ -397,7 +354,6 @@ func (s *Service) Tick(ctx context.Context, now int64) error {
 		return nil
 	}
 
-	// 到达玩法结束时间：从 Redis 读取最新分组列表，将所有活跃分组推进到 closed 状态。
 	groups, err := s.store.LoadGroups()
 	if err != nil || len(groups) == 0 {
 		s.mu.Lock()
@@ -410,7 +366,7 @@ func (s *Service) Tick(ctx context.Context, now int64) error {
 			continue
 		}
 		if err := s.rankService.CloseInstance(ctx, g.InstanceID, settleAt); err != nil && err != rank.ErrInstanceNotFound {
-			zaplog.LoggerSugar.Warnf("balloon: tick close instance group=%d: %v", g.GroupID, err)
+			zaplog.LoggerSugar.Warnf("rank engine: tick close instance group=%d: %v", g.GroupID, err)
 		}
 	}
 
@@ -418,16 +374,8 @@ func (s *Service) Tick(ctx context.Context, now int64) error {
 	return err
 }
 
-// UpsertScore 写入用户得分。
-//   - 分数低于 OpenToken 门槛时忽略。
-//   - 自动分配用户到当前可用分组（或创建新分组）。
-//   - 首位真实玩家进入分组时自动生成机器人。
-//   - 活动尚未开放时返回 ErrInstanceNotOpen。
-//   - 活动已结算或已关闭时返回 ErrInstanceClosed。
+// UpsertScore 写入用户得分，自动分组，首位真实玩家进入时生成机器人。
 func (s *Service) UpsertScore(ctx context.Context, userID int64, totalScore int64, now int64, avatarInfo *rank.AvatarInfo) error {
-	// if totalScore < s.config.OpenToken {
-	// 	return nil
-	// }
 	switch s.canUpdateScore(now) {
 	case rank.InstanceStateOpen:
 		// ok
@@ -440,7 +388,6 @@ func (s *Service) UpsertScore(ctx context.Context, userID int64, totalScore int6
 	s.mu.Lock()
 	s.ensureLoaded()
 
-	// 检查 Redis（可能其他节点已经分配了该用户）
 	if _, ok := s.memberGroup[userID]; !ok {
 		if gid, found, _ := s.store.GetMember(userID); found {
 			s.memberGroup[userID] = gid
@@ -451,7 +398,6 @@ func (s *Service) UpsertScore(ctx context.Context, userID int64, totalScore int6
 	needSpawnRobots := false
 	spawnCapacity := int32(0)
 	if _, ok := s.memberGroup[userID]; !ok {
-		// 新成员：找一个有空位的分组（或创建新分组）
 		group, err := s.ensureGroupLocked()
 		if err != nil {
 			s.mu.Unlock()
@@ -459,7 +405,6 @@ func (s *Service) UpsertScore(ctx context.Context, userID int64, totalScore int6
 		}
 		isNewMember = true
 		s.memberGroup[userID] = group.GroupID
-		// 多节点：用 Redis 原子自增代替内存 read-modify-write，避免并发分配时 RealCount 偏低。
 		newCount, _ := s.store.IncrRealCount(group)
 		group.RealCount = newCount
 		_ = s.store.SetMember(userID, group.GroupID)
@@ -485,9 +430,6 @@ func (s *Service) UpsertScore(ctx context.Context, userID int64, totalScore int6
 	alreadyLoaded := s.loaded
 	s.mu.Unlock()
 
-	// 运行期间 Redis 驱逐检测：仅当服务已完成初始加载（alreadyLoaded=true）时执行。
-	// 若 rank:mb 因 Redis 内存压力被驱逐，从 MongoDB 重建排行榜数据，
-	// 防止新写入的分数与历史分数共存的 sorted set 被清空导致排行榜异常。
 	if alreadyLoaded && s.store.available() {
 		if mbExists, _ := s.store.RdbExists(rediskeys.GetRankMbKey(instanceID)); !mbExists {
 			s.recoverGroupData(ctx, groupID, instanceID)
@@ -507,24 +449,21 @@ func (s *Service) UpsertScore(ctx context.Context, userID int64, totalScore int6
 		return err
 	}
 
-	// 将积分写入 MongoDB（write-through，冷启动后可从 MongoDB 恢复 rank:mb）。
-	// enterTime 和 sequence 仅对新成员有效；老成员传 0，dao 层 $setOnInsert 会跳过。
 	enterTimeForMongo := int64(0)
 	seqForMongo := int64(0)
 	if isNewMember {
 		enterTimeForMongo = now
-		// 读取 Redis 中刚由 BatchUpsertScore 分配的 sequence，确保重启后名次顺序可恢复。
 		if snap, snapErr := s.rankService.GetMemRank(ctx, instanceID, userID); snapErr == nil && snap != nil {
 			seqForMongo = snap.Sequence
 		}
 	}
 	if err := s.store.SaveScore(groupID, userID, totalScore, enterTimeForMongo, seqForMongo, now, avatarInfo); err != nil {
-		zaplog.LoggerSugar.Warnf("balloon: save score to mongo group=%d user=%d: %v", groupID, userID, err)
+		zaplog.LoggerSugar.Warnf("rank engine: save score to mongo group=%d user=%d: %v", groupID, userID, err)
 	}
 
 	if needSpawnRobots {
 		if err := s.spawnRobotsForGroup(ctx, groupID, spawnCapacity, now); err != nil {
-			zaplog.LoggerSugar.Warnf("balloon: spawn robots for group %d failed: %v", groupID, err)
+			zaplog.LoggerSugar.Warnf("rank engine: spawn robots for group %d failed: %v", groupID, err)
 		}
 	}
 
@@ -532,7 +471,6 @@ func (s *Service) UpsertScore(ctx context.Context, userID int64, totalScore int6
 }
 
 // ListGroupRank 查询指定分组的排行榜区间（0-based 闭区间）。
-// 已结算时返回快照（优先内存，内存无则查 Redis/MongoDB），未结算时实时查询。
 func (s *Service) ListGroupRank(ctx context.Context, groupID int32, start int64, end int64) ([]rank.RankMemberSnapshot, error) {
 	s.mu.Lock()
 	s.ensureLoaded()
@@ -540,15 +478,12 @@ func (s *Service) ListGroupRank(ctx context.Context, groupID int32, start int64,
 	s.mu.Unlock()
 
 	if len(settled) == 0 {
-		// 优先查 Redis；Redis 被驱逐时回退到内存 s.groups。
 		instanceID := s.groupInstanceID(groupID)
 		if g, _ := s.store.LoadGroupByID(groupID); g != nil {
 			if g.State == GroupStateSettled {
 				settled = s.loadAndCacheSettled(groupID, g.InstanceID)
 			}
 		} else {
-			// Redis 中 group 数据被驱逐，回退到内存。
-			// 先加锁读取内存状态，再释放锁后调用 loadAndCacheSettled（该函数内部会再次加锁）。
 			needLoad := false
 			s.mu.Lock()
 			for _, mg := range s.groups {
@@ -577,7 +512,6 @@ func (s *Service) ListGroupRank(ctx context.Context, groupID int32, start int64,
 	members, err := s.rankService.Range(ctx, instanceID, start, end)
 	if err != nil {
 		if err == rank.ErrInstanceNotFound {
-			// rank:inst 被 Redis 驱逐，尝试从 MongoDB 恢复后重试一次。
 			s.recoverGroupData(ctx, groupID, instanceID)
 			members, err = s.rankService.Range(ctx, instanceID, start, end)
 		}
@@ -588,8 +522,7 @@ func (s *Service) ListGroupRank(ctx context.Context, groupID int32, start int64,
 	return members, nil
 }
 
-// GetMemberRank 查询指定用户的名次快照及所在分组。未上榜时返回 (nil, 0, nil)。
-// 已结算的分组直接从快照查询（优先内存，内存无则查 Redis/MongoDB）。
+// GetMemberRank 查询指定用户的名次快照及所在分组。
 func (s *Service) GetMemberRank(ctx context.Context, userID int64) (*rank.RankMemberSnapshot, int32, error) {
 	s.mu.Lock()
 	s.ensureLoaded()
@@ -608,7 +541,6 @@ func (s *Service) GetMemberRank(ctx context.Context, userID int64) (*rank.RankMe
 		return nil, 0, nil
 	}
 
-	// 内存无快照时，检查 Redis 中该分组是否已结算；Redis 被驱逐时回退到内存 s.groups。
 	if len(settled) == 0 {
 		instanceID := s.groupInstanceID(groupID)
 		if g, _ := s.store.LoadGroupByID(groupID); g != nil {
@@ -616,8 +548,6 @@ func (s *Service) GetMemberRank(ctx context.Context, userID int64) (*rank.RankMe
 				settled = s.loadAndCacheSettled(groupID, g.InstanceID)
 			}
 		} else {
-			// Redis 中 group 数据被驱逐，回退到内存。
-			// 先加锁读取内存状态，再释放锁后调用 loadAndCacheSettled（该函数内部会再次加锁）。
 			needLoad := false
 			s.mu.Lock()
 			for _, mg := range s.groups {
@@ -656,7 +586,6 @@ func (s *Service) GetMemberRank(ctx context.Context, userID int64) (*rank.RankMe
 	snapshot, err := s.rankService.GetMemRank(ctx, instanceID, userID)
 	if err != nil {
 		if err == rank.ErrInstanceNotFound {
-			// rank:inst 被 Redis 驱逐，尝试从 MongoDB 恢复后重试一次。
 			s.recoverGroupData(ctx, groupID, instanceID)
 			snapshot, err = s.rankService.GetMemRank(ctx, instanceID, userID)
 		}
@@ -667,11 +596,8 @@ func (s *Service) GetMemberRank(ctx context.Context, userID int64) (*rank.RankMe
 	return snapshot, groupID, nil
 }
 
-// loadAndCacheSettled 从 Redis rank:settled 或 MongoDB 加载结算快照并缓存到内存。
-// 供 ListGroupRank / GetMemberRank 在内存快照缺失时调用（其他节点已结算，本节点尚未同步）。
 func (s *Service) loadAndCacheSettled(groupID int32, instanceID string) []rank.RankMemberSnapshot {
 	ctx := context.Background()
-	// 1. 优先通过 rankService.Snapshot 读取（结算后返回 rank:settled 缓存，跨节点可用）
 	if snaps, err := s.rankService.Snapshot(ctx, instanceID); err == nil && len(snaps) > 0 {
 		s.mu.Lock()
 		if s.settledGroup[groupID] == nil {
@@ -681,7 +607,6 @@ func (s *Service) loadAndCacheSettled(groupID int32, instanceID string) []rank.R
 		s.mu.Unlock()
 		return cached
 	}
-	// 2. Redis rank:settled 不存在，从 MongoDB 恢复
 	if snaps, err := s.store.LoadGroupSettled(groupID); err == nil && len(snaps) > 0 {
 		s.mu.Lock()
 		if s.settledGroup[groupID] == nil {
@@ -689,15 +614,11 @@ func (s *Service) loadAndCacheSettled(groupID int32, instanceID string) []rank.R
 		}
 		cached := cloneSnapshots(s.settledGroup[groupID])
 		s.mu.Unlock()
-		// 同时写回 Redis，让后续查询走 Redis
 		s.store.RestoreSettled(instanceID, snaps)
 		return cached
 	}
-	// 3. rank:settled 和 MongoDB settled 均不存在（异步写尚未完成或被驱逐）：
-	//    从 MongoDB 积分数据重建 rank:mb，再通过 Snapshot 重新计算结算快照并写回 Redis。
 	s.recoverGroupData(ctx, groupID, instanceID)
 	if snaps, err := s.rankService.Snapshot(ctx, instanceID); err == nil && len(snaps) > 0 {
-		// 重建的快照补写 rank:settled，下次查询直接命中
 		s.store.RestoreSettled(instanceID, snaps)
 		s.mu.Lock()
 		if s.settledGroup[groupID] == nil {
@@ -711,15 +632,12 @@ func (s *Service) loadAndCacheSettled(groupID int32, instanceID string) []rank.R
 }
 
 // Settle 对所有未结算分组执行最终结算，返回各分组快照。幂等。
-// 结算时间固定为配置的 GameEndTime（未设置时退化为 CloseTime），不依赖调用时刻。
-// 多节点：从 Redis 读取最新分组列表，按 Redis 中的 State 过滤，避免重复结算。
 func (s *Service) Settle(ctx context.Context) (map[int32][]rank.RankMemberSnapshot, error) {
 	settleAt := s.config.GameEndTime
 	if settleAt == 0 {
 		settleAt = s.config.CloseTime
 	}
 
-	// 从 Redis 读取最新分组列表，确保看到所有节点创建/更新的分组状态。
 	groups, err := s.store.LoadGroups()
 	if err != nil || len(groups) == 0 {
 		s.mu.Lock()
@@ -740,8 +658,6 @@ func (s *Service) Settle(ctx context.Context) (map[int32][]rank.RankMemberSnapsh
 		members, err := s.rankService.SettleInstance(ctx, group.InstanceID, settleAt)
 		if err != nil {
 			if err == rank.ErrInstanceNotFound {
-				// 底层榜单实例不存在（从未有成员加入），仍需将分组标记为已结算，
-				// 避免 Tick 在 GameEndTime 后反复重试。
 				group.State = GroupStateSettled
 				_ = s.store.SaveGroup(group)
 				s.mu.Lock()
@@ -761,11 +677,9 @@ func (s *Service) Settle(ctx context.Context) (map[int32][]rank.RankMemberSnapsh
 		s.settledGroup[group.GroupID] = cloneSnapshots(members)
 		s.mu.Unlock()
 
-		// 将结算快照写入 MongoDB（write-through，冷启动后可从 MongoDB 恢复 rank:settled）。
 		if err := s.store.SaveSettled(group.GroupID, cloneSnapshots(members), settleAt); err != nil {
-			zaplog.LoggerSugar.Warnf("balloon: save settled to mongo group=%d: %v", group.GroupID, err)
+			zaplog.LoggerSugar.Warnf("rank engine: save settled to mongo group=%d: %v", group.GroupID, err)
 		}
-		// 更新 MongoDB 中的实例元数据（State → Settled，SettleTime 已填入）。
 		if inst, instErr := s.rankService.GetInstance(ctx, group.InstanceID); instErr == nil && inst != nil {
 			_ = s.store.SaveRankInst(group.GroupID, *inst)
 		}
@@ -773,8 +687,6 @@ func (s *Service) Settle(ctx context.Context) (map[int32][]rank.RankMemberSnapsh
 	return results, nil
 }
 
-// syncGroupStateLocked 将外部（Redis）读取的分组状态同步到内存 s.groups。
-// 必须在持有 s.mu 锁时调用。
 func (s *Service) syncGroupStateLocked(updated *Group) {
 	for _, g := range s.groups {
 		if g != nil && g.GroupID == updated.GroupID {
@@ -782,17 +694,14 @@ func (s *Service) syncGroupStateLocked(updated *Group) {
 			return
 		}
 	}
-	// 内存中没有该分组（其他节点创建），追加进来。
 	cp := *updated
 	s.groups = append(s.groups, &cp)
 }
 
-// GetOpenRewardUserIDs 返回所有已进入排行榜的真实玩家ID（开启奖励资格）。
-// 多节点：直接从 Redis 读取全量成员映射，避免内存缓存不完整。
+// GetOpenRewardUserIDs 返回所有已进入排行榜的真实玩家ID。
 func (s *Service) GetOpenRewardUserIDs() []int64 {
 	allMembers, err := s.store.GetAllMembers()
 	if err != nil || len(allMembers) == 0 {
-		// Redis 不可用时回退到内存缓存
 		s.mu.Lock()
 		s.ensureLoaded()
 		defer s.mu.Unlock()
@@ -827,8 +736,7 @@ func (s *Service) HasOpenReward(userID int64) bool {
 	return ok && userID > 0
 }
 
-// GetGroup 返回指定分组的当前状态副本，未找到时返回 nil。
-// 多节点：优先从 Redis 读取最新状态并同步到内存，避免其他节点的状态变更（如 Settled）不可见。
+// GetGroup 返回指定分组的当前状态副本。
 func (s *Service) GetGroup(groupID int32) *Group {
 	if g, err := s.store.LoadGroupByID(groupID); err == nil && g != nil {
 		s.mu.Lock()
@@ -851,7 +759,6 @@ func (s *Service) GetGroup(groupID int32) *Group {
 }
 
 // ListGroups 返回所有分组信息的副本列表。
-// 多节点：先从 Redis 拉取最新分组列表并同步到内存，确保其他节点创建/更新的分组可见。
 func (s *Service) ListGroups() []Group {
 	if latestGroups, err := s.store.LoadGroups(); err == nil && len(latestGroups) > 0 {
 		s.mu.Lock()
@@ -883,7 +790,6 @@ func (s *Service) ListGroups() []Group {
 }
 
 // GetGroupCreateTime 返回指定分组底层实例的创建时间（Unix毫秒）。
-// 未找到分组或实例时返回 0。
 func (s *Service) GetGroupCreateTime(ctx context.Context, groupID int32) int64 {
 	g := s.GetGroup(groupID)
 	if g == nil {
@@ -896,11 +802,8 @@ func (s *Service) GetGroupCreateTime(ctx context.Context, groupID int32) int64 {
 	return inst.CreateTime
 }
 
-// IsSettled 返回是否所有分组均已结算。无分组时返回 false。
-// 多节点场景：先从 Redis 拉取最新分组状态并同步到内存，
-// 避免其他节点已完成结算但本节点内存仍为旧状态导致误判。
+// IsSettled 返回是否所有分组均已结算。
 func (s *Service) IsSettled() bool {
-	// 从 Redis 读取最新分组列表，将其他节点写入的状态同步到本节点内存。
 	if latestGroups, err := s.store.LoadGroups(); err == nil && len(latestGroups) > 0 {
 		s.mu.Lock()
 		s.ensureLoaded()
@@ -934,7 +837,6 @@ func (s *Service) GetConfig() Config {
 }
 
 func (s *Service) GroupCount() int32 {
-	// 多节点：直接从 Redis 读取分组数量，避免其他节点新建的分组在内存中不可见。
 	if groups, err := s.store.LoadGroups(); err == nil {
 		return int32(len(groups))
 	}
@@ -988,20 +890,15 @@ func (s *Service) UpdateConfig(cfg Config) {
 }
 
 func (s *Service) Cleanup() {
-	// 直接从 Redis 读取分组列表，不调用 ensureLoaded 避免触发 backfill 写任务入队。
-	// ensureLoaded 的 backfill 逻辑会把尚未写入 MongoDB 的数据推入写队列，
-	// 这些写任务会在 DeleteAllByBizId 的查询之后执行，导致数据在删除后重新出现。
 	s.mu.Lock()
 	groups := s.groups
 	s.mu.Unlock()
 	if len(groups) == 0 {
-		// 内存中没有分组，从 Redis 读一次（只读 groups key，不触发全量 ensureLoaded）。
 		groups, _ = s.store.LoadGroups()
 	}
 
 	s.store.CleanupAll(groups)
 
-	// 删除每个分组对应的 commonRank 实例 Redis 数据。
 	ctx := context.Background()
 	for _, g := range groups {
 		if g == nil {
@@ -1009,16 +906,15 @@ func (s *Service) Cleanup() {
 		}
 		instanceID := s.groupInstanceID(g.GroupID)
 		if err := s.rankService.DeleteInstance(ctx, instanceID); err != nil {
-			zaplog.LoggerSugar.Warnf("balloon: cleanup delete rank instance %s: %v", instanceID, err)
+			zaplog.LoggerSugar.Warnf("rank engine: cleanup delete rank instance %s: %v", instanceID, err)
 		}
 	}
-	// 删除榜单定义。
 	if err := s.rankService.DeleteRankDef(ctx, s.config.RankCode); err != nil {
-		zaplog.LoggerSugar.Warnf("balloon: cleanup delete rank def %s: %v", s.config.RankCode, err)
+		zaplog.LoggerSugar.Warnf("rank engine: cleanup delete rank def %s: %v", s.config.RankCode, err)
 	}
 }
 
-// GetAllMembers 返回该活动所有成员的 userID→groupID 映射，供外部在 Cleanup 前收集用于清理成员索引。
+// GetAllMembers 返回该活动所有成员的 userID→groupID 映射。
 func (s *Service) GetAllMembers() (map[int64]int32, error) {
 	return s.store.GetAllMembers()
 }

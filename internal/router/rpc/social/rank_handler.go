@@ -10,7 +10,7 @@ import (
 	commonMsg "pbcommon/gen/common/msg"
 	pb "pbcommon/gen/ss/msg"
 	rankservice "socialserver/internal/rank"
-	"socialserver/internal/rank/balloon"
+	"socialserver/internal/rank/engine"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -33,20 +33,19 @@ func (h *ServerHandler) S2SUpsertScore(ctx context.Context, req *pb.PBS2SUpsertS
 			zaplog.LoggerSugar.Infof("[rank] S2SUpsertScore resp ok rank=%d", myRank)
 		}
 	}()
-	bsvc, err := lookupBalloonService(rankservice.BizType(req.BizType), req.ActId)
+	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return nil, err
 	}
-	if err := bsvc.Svc.UpsertScore(ctx, req.UserId, req.TotalScore, req.Timestamp, protoAvatarInfoToRank(req.AvatarInfo)); err != nil {
+	if err := svc.UpsertScore(ctx, req.UserId, req.TotalScore, req.Timestamp, protoAvatarInfoToRank(req.AvatarInfo)); err != nil {
 		if errors.Is(err, rank.ErrInstanceClosed) {
 			zaplog.LoggerSugar.Infof("[rank] S2SUpsertScore activity closed userId=%d bizType=%s", req.UserId, req.BizType)
 			return &pb.PBS2SUpsertScoreResponse{MsgCode: commonMsg.MsgCode_CODE_RANK_ACTIVITY_CLOSED}, nil
 		}
 		return nil, rankErrorToStatus(err)
 	}
-	snapshot, _, err := bsvc.Svc.GetMemberRank(ctx, req.UserId)
+	snapshot, _, err := svc.GetMemberRank(ctx, req.UserId)
 	if err != nil {
-		// 查询排名失败不影响积分更新，降级返回空排名
 		zaplog.LoggerSugar.Warnf("[rank] S2SUpsertScore GetMemberRank userId=%d err=%v", req.UserId, err)
 		return &pb.PBS2SUpsertScoreResponse{MsgCode: commonMsg.MsgCode_CODE_OK}, nil
 	}
@@ -71,17 +70,17 @@ func (h *ServerHandler) S2SGetRankList(ctx context.Context, req *pb.PBS2SGetRank
 			zaplog.LoggerSugar.Infof("[rank] S2SGetRankList resp memberCount=%d", len(resp.Members))
 		}
 	}()
-	bsvc, err := lookupBalloonService(rankservice.BizType(req.BizType), req.ActId)
+	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return nil, err
 	}
-	snapshot, groupID, err := bsvc.Svc.GetMemberRank(ctx, req.UserId)
+	snapshot, groupID, err := svc.GetMemberRank(ctx, req.UserId)
 	if err != nil {
 		return nil, rankErrorToStatus(err)
 	}
 	if groupID == 0 {
 		// 用户未参与排行榜（活动结束后仍可查看榜单）：fallback 到第1个分组。
-		groups := bsvc.Svc.ListGroups()
+		groups := svc.ListGroups()
 		if len(groups) == 0 {
 			return nil, status.Errorf(codes.NotFound, "user %d not found in any group for bizType=%s actId=%d", req.UserId, req.BizType, req.ActId)
 		}
@@ -93,7 +92,7 @@ func (h *ServerHandler) S2SGetRankList(ctx context.Context, req *pb.PBS2SGetRank
 		}
 		groupID = minGroup.GroupID
 	}
-	snapshots, err := bsvc.Svc.ListGroupRank(ctx, groupID, req.Start, req.End)
+	snapshots, err := svc.ListGroupRank(ctx, groupID, req.Start, req.End)
 	if err != nil {
 		return nil, rankErrorToStatus(err)
 	}
@@ -104,7 +103,7 @@ func (h *ServerHandler) S2SGetRankList(ctx context.Context, req *pb.PBS2SGetRank
 		MsgCode:    commonMsg.MsgCode_CODE_OK,
 		Members:    members,
 		MyRank:     myRank,
-		CreateTime: bsvc.Svc.GetGroupCreateTime(ctx, groupID),
+		CreateTime: svc.GetGroupCreateTime(ctx, groupID),
 	}
 
 	zaplog.LoggerSugar.Infof("[rank] S2SGetRankList updated score for userId=%d myRank=%s membersCount=%d", req.UserId, myRank.String(), len(members))
@@ -125,18 +124,18 @@ func (h *ServerHandler) S2SGetMemberRank(ctx context.Context, req *pb.PBS2SGetMe
 			zaplog.LoggerSugar.Infof("[rank] S2SGetMemberRank resp rank=%d", memberRank)
 		}
 	}()
-	bsvc, err := lookupBalloonService(rankservice.BizType(req.BizType), req.ActId)
+	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return nil, err
 	}
-	snapshot, groupID, err := bsvc.Svc.GetMemberRank(ctx, req.UserId)
+	snapshot, groupID, err := svc.GetMemberRank(ctx, req.UserId)
 	if err != nil {
 		return nil, rankErrorToStatus(err)
 	}
 	settleStage := int32(0)
 	if groupID > 0 {
-		g := bsvc.Svc.GetGroup(groupID)
-		if g != nil && g.State == balloon.GroupStateSettled {
+		g := svc.GetGroup(groupID)
+		if g != nil && g.State == engine.GroupStateSettled {
 			settleStage = 1
 		}
 	}
@@ -153,11 +152,11 @@ func (h *ServerHandler) S2SSettle(ctx context.Context, req *pb.PBS2SSettleReques
 			zaplog.LoggerSugar.Infof("[rank] S2SSettle resp groupCount=%d", len(resp.Groups))
 		}
 	}()
-	bsvc, err := lookupBalloonService(rankservice.BizType(req.BizType), req.ActId)
+	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return nil, err
 	}
-	results, err := bsvc.Svc.Settle(ctx)
+	results, err := svc.Settle(ctx)
 	if err != nil {
 		return nil, rankErrorToStatus(err)
 	}
@@ -177,11 +176,11 @@ func (h *ServerHandler) S2SGetRewardUsers(ctx context.Context, req *pb.PBS2SGetR
 			zaplog.LoggerSugar.Infof("[rank] S2SGetRewardUsers resp userCount=%d", len(resp.UserIds))
 		}
 	}()
-	bsvc, err := lookupBalloonService(rankservice.BizType(req.BizType), req.ActId)
+	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return nil, err
 	}
-	return &pb.PBS2SGetRewardUsersResponse{UserIds: bsvc.Svc.GetOpenRewardUserIDs()}, nil
+	return &pb.PBS2SGetRewardUsersResponse{UserIds: svc.GetOpenRewardUserIDs()}, nil
 }
 
 // --- 奖励领取接口 ---
@@ -196,11 +195,11 @@ func (h *ServerHandler) S2SClaimReward(ctx context.Context, req *pb.PBS2SClaimRe
 			zaplog.LoggerSugar.Infof("[rank] S2SClaimReward resp claimed=%v claimTime=%d", resp.Claimed, resp.ClaimTime)
 		}
 	}()
-	bsvc, err := lookupBalloonService(rankservice.BizType(req.BizType), req.ActId)
+	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return nil, err
 	}
-	claimed, claimTime, err := bsvc.Svc.ClaimReward(req.UserId, time.Now().UnixMilli())
+	claimed, claimTime, err := svc.ClaimReward(req.UserId, time.Now().UnixMilli())
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -217,11 +216,11 @@ func (h *ServerHandler) S2SGetClaimStatus(ctx context.Context, req *pb.PBS2SGetC
 			zaplog.LoggerSugar.Infof("[rank] S2SGetClaimStatus resp claimed=%v claimTime=%d", resp.Claimed, resp.ClaimTime)
 		}
 	}()
-	bsvc, err := lookupBalloonService(rankservice.BizType(req.BizType), req.ActId)
+	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return nil, err
 	}
-	claimed, claimTime, err := bsvc.Svc.GetClaimStatus(req.UserId)
+	claimed, claimTime, err := svc.GetClaimStatus(req.UserId)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -244,7 +243,7 @@ func (h *ServerHandler) S2SCreateRankConfig(ctx context.Context, req *pb.PBS2SCr
 	if manager == nil {
 		return nil, status.Error(codes.Internal, "rank manager not initialized")
 	}
-	cfg := balloon.Config{
+	cfg := engine.Config{
 		ActID:       req.ActId,
 		OpenTime:    req.OpenTime,
 		CloseTime:   req.CloseTime,
@@ -266,17 +265,17 @@ func (h *ServerHandler) S2SGetRankConfig(ctx context.Context, req *pb.PBS2SGetRa
 				resp.RankCode, resp.GroupCount, resp.MemberCount)
 		}
 	}()
-	bsvc, err := lookupBalloonService(rankservice.BizType(req.BizType), req.ActId)
+	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return nil, err
 	}
-	cfg := bsvc.Svc.GetConfig()
+	cfg := svc.GetConfig()
 	return &pb.PBS2SGetRankConfigResponse{
 		BizType: cfg.BizType, ActId: cfg.ActID, RankCode: cfg.RankCode,
 		RankPeopleNum: cfg.RankPeopleNum, OpenToken: cfg.OpenToken,
 		OpenTime: cfg.OpenTime, CloseTime: cfg.CloseTime, GameEndTime: effectiveGameEndTime(cfg.GameEndTime, cfg.CloseTime),
 		RobotTiers: cfgRobotTiersToProto(cfg.RobotTiers), RobotInfos: cfgRobotInfosToProto(cfg.RobotInfos),
-		Settled: bsvc.Svc.IsSettled(), GroupCount: bsvc.Svc.GroupCount(), MemberCount: bsvc.Svc.MemberCount(),
+		Settled: svc.IsSettled(), GroupCount: svc.GroupCount(), MemberCount: svc.MemberCount(),
 	}, nil
 }
 
@@ -294,7 +293,7 @@ func (h *ServerHandler) S2SUpdateRankConfig(ctx context.Context, req *pb.PBS2SUp
 	if manager == nil {
 		return nil, status.Error(codes.Internal, "rank manager not initialized")
 	}
-	cfg := balloon.Config{
+	cfg := engine.Config{
 		OpenTime:    req.OpenTime,
 		CloseTime:   req.CloseTime,
 		GameEndTime: req.GameEndTime,
@@ -358,23 +357,19 @@ func (h *ServerHandler) S2SListRankConfigs(ctx context.Context, req *pb.PBS2SLis
 
 // --- 辅助函数 ---
 
-func lookupBalloonService(bizType rankservice.BizType, actID int32) (*rankservice.BalloonBizService, error) {
+func lookupEngineService(bizType rankservice.BizType, actID int32) (*engine.Service, error) {
 	manager := rankservice.GetGlobalManager()
 	if manager == nil {
 		return nil, status.Error(codes.Internal, "rank manager not initialized")
 	}
-	svc := manager.GetService(bizType, actID)
+	svc := manager.GetEngineService(bizType, actID)
 	if svc == nil {
 		return nil, status.Errorf(codes.NotFound, "service not found: bizType=%s actId=%d", bizType, actID)
 	}
-	bsvc, ok := svc.(*rankservice.BalloonBizService)
-	if !ok {
-		return nil, status.Error(codes.Internal, "service type mismatch")
-	}
-	return bsvc, nil
+	return svc, nil
 }
 
-func cfgRobotTiersToProto(tiers []balloon.RobotTierCfg) []*pb.PBRobotTierCfg {
+func cfgRobotTiersToProto(tiers []engine.RobotTierCfg) []*pb.PBRobotTierCfg {
 	if len(tiers) == 0 {
 		return nil
 	}
@@ -391,7 +386,7 @@ func cfgRobotTiersToProto(tiers []balloon.RobotTierCfg) []*pb.PBRobotTierCfg {
 	return result
 }
 
-func cfgRobotInfosToProto(infos []balloon.RobotInfoEntry) []*commonMsg.PBAvatarInfo {
+func cfgRobotInfosToProto(infos []engine.RobotInfoEntry) []*commonMsg.PBAvatarInfo {
 	if len(infos) == 0 {
 		return nil
 	}
@@ -460,7 +455,6 @@ func rankErrorToStatus(err error) error {
 }
 
 // effectiveGameEndTime 返回实际生效的玩法结束时间。
-// GameEndTime==0 表示退化为 CloseTime，直接返回 CloseTime 避免 proto omitempty 将0省略导致前端显示"-"。
 func effectiveGameEndTime(gameEndTime, closeTime int64) int64 {
 	if gameEndTime == 0 {
 		return closeTime
@@ -512,11 +506,11 @@ func (h *ServerHandler) S2SGMGetGroupRankList(ctx context.Context, req *pb.PBS2S
 			zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetGroupRankList resp memberCount=%d", len(resp.Members))
 		}
 	}()
-	bsvc, err := lookupBalloonService(rankservice.BizType(req.BizType), req.ActId)
+	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return nil, err
 	}
-	snapshots, err := bsvc.Svc.ListGroupRank(ctx, req.GroupId, 0, -1)
+	snapshots, err := svc.ListGroupRank(ctx, req.GroupId, 0, -1)
 	if err != nil {
 		return nil, rankErrorToStatus(err)
 	}
@@ -540,11 +534,11 @@ func (h *ServerHandler) S2SGMGetRankInstanceList(ctx context.Context, req *pb.PB
 			zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetRankInstanceList resp groupCount=%d", len(resp.Groups))
 		}
 	}()
-	bsvc, err := lookupBalloonService(rankservice.BizType(req.BizType), req.ActId)
+	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return nil, err
 	}
-	groups := bsvc.Svc.ListGroups()
+	groups := svc.ListGroups()
 	pbGroups := make([]*pb.PBGMRankGroupInstance, 0, len(groups))
 	for _, g := range groups {
 		pbGroups = append(pbGroups, &pb.PBGMRankGroupInstance{
@@ -569,15 +563,15 @@ func (h *ServerHandler) S2SGMGetInstanceRankList(ctx context.Context, req *pb.PB
 			zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetInstanceRankList resp memberCount=%d", len(resp.Members))
 		}
 	}()
-	bsvc, err := lookupBalloonService(rankservice.BizType(req.BizType), req.ActId)
+	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return nil, err
 	}
-	g := bsvc.Svc.GetGroup(req.GroupId)
+	g := svc.GetGroup(req.GroupId)
 	if g == nil {
 		return nil, status.Errorf(codes.NotFound, "group %d not found in bizType=%s actId=%d", req.GroupId, req.BizType, req.ActId)
 	}
-	snapshots, err := bsvc.Svc.ListGroupRank(ctx, req.GroupId, 0, -1)
+	snapshots, err := svc.ListGroupRank(ctx, req.GroupId, 0, -1)
 	if err != nil {
 		return nil, rankErrorToStatus(err)
 	}

@@ -1,4 +1,4 @@
-package balloon
+package engine
 
 import (
 	"encoding/json"
@@ -12,7 +12,7 @@ import (
 	"golib/zaplog"
 )
 
-// Store 封装 balloon 业务层的缓存和持久化操作。
+// Store 封装排行榜业务层的缓存和持久化操作。
 // 写操作：先写 Redis 缓存，再写 MongoDB 持久化。
 // 读操作：先读 Redis，miss 时从 MongoDB 加载并回填 Redis。
 // 恢复策略：若 Redis 和 MongoDB 均为空，写入 mongoChecked 哨兵 key，防止重启后重复打 MongoDB。
@@ -24,7 +24,7 @@ type Store struct {
 }
 
 // nullCacheEntry 负向缓存哨兵字符串。
-// 存储在 Redis HASH field 中表示“MongoDB 已查询且未找到”，防止重复查 MongoDB。
+// 存储在 Redis HASH field 中表示"MongoDB 已查询且未找到"，防止重复查 MongoDB。
 const nullCacheEntry = "\x00"
 
 // mongoCheckedTTL 是 mongoDB 已查哨兵 key 的过期时间。
@@ -149,7 +149,6 @@ func (st *Store) IncrRealCount(group *Group) (int32, error) {
 	return group.RealCount, nil
 }
 
-
 func (st *Store) NextGroupID() (int32, error) {
 	if !st.available() {
 		return 0, fmt.Errorf("store not available")
@@ -212,7 +211,7 @@ func (st *Store) RestoreSettled(instanceID string, snaps []commonrank.RankMember
 	}
 	data, err := json.Marshal(snaps)
 	if err != nil {
-		zaplog.LoggerSugar.Warnf("balloon: marshal settled for restore instanceID=%s: %v", instanceID, err)
+		zaplog.LoggerSugar.Warnf("rank engine: marshal settled for restore instanceID=%s: %v", instanceID, err)
 		return
 	}
 	_ = st.rdb.Set(rediskeys.GetRankSettledKey(instanceID), string(data))
@@ -259,10 +258,6 @@ func (st *Store) GetMember(userID int64) (int32, bool, error) {
 			st.rdb.HSet(rediskeys.GetRankMembersKey(st.bizId), uidStr, strconv.FormatInt(int64(gid), 10))
 			return gid, true, nil
 		}
-		// 多节点：不写负向缓存。
-		// SetMember 先写 Redis 后写 MongoDB，若另一节点刚完成 SetMember 但 MongoDB 尚未落库，
-		// 写入 nullCacheEntry 会导致本节点在 TTL 内持续误判"用户未进榜"。
-		// members HASH 体积小，Redis 缺失时直接查 MongoDB 即可，无需负向缓存保护。
 	}
 	return 0, false, nil
 }
@@ -424,7 +419,7 @@ func (st *Store) CleanupAll(groups []*Group) {
 	// 与 queueDeleteAllDocIDs 组合：前者覆盖写任务后写入的数据，后者覆盖当前已有数据。
 	if st.hasMongo() {
 		if err := st.dao.DeleteAllByBizId(st.bizId); err != nil {
-			zaplog.LoggerSugar.Errorf("balloon: CleanupAll delete mongo bizId=%s: %v", st.bizId, err)
+			zaplog.LoggerSugar.Errorf("rank engine: CleanupAll delete mongo bizId=%s: %v", st.bizId, err)
 		}
 	}
 }
