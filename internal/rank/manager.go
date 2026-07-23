@@ -23,14 +23,14 @@ const (
 )
 
 type Manager struct {
-	mu              sync.RWMutex
-	rdb             *goredis.Redis
-	dao             *engine.DAO
-	rankService     commonrank.Service
-	memberIndex     *MemberIndex
-	services        map[string]RankBizService
-	engineServices  map[string]*engine.Service
-	stopCh          chan struct{}
+	mu             sync.RWMutex
+	rdb            *goredis.Redis
+	dao            *engine.DAO
+	rankService    commonrank.Service
+	memberIndex    *MemberIndex
+	services       map[string]RankBizService
+	engineServices map[string]*engine.Service
+	stopCh         chan struct{}
 }
 
 var globalManager *Manager
