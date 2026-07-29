@@ -342,13 +342,13 @@ func (s *Service) Tick(ctx context.Context, now int64) error {
 	s.ensureLoaded()
 	s.mu.Unlock()
 
-	if s.config.hasRobots() && now < s.config.GameEndTime {
-		s.tickAllRobots(ctx, now)
-	}
-
 	settleAt := s.config.GameEndTime
 	if settleAt == 0 {
 		settleAt = s.config.CloseTime
+	}
+
+	if s.config.hasRobots() && now < settleAt {
+		s.tickAllRobots(ctx, now)
 	}
 	if now < settleAt {
 		return nil
