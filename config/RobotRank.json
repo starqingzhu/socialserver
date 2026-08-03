@@ -158,5 +158,85 @@
     "num": "2",
     "overtakeInterval": "360",
     "overtakeTime": "1800"
+  },
+  {
+    "LockTokenTime": "43200",
+    "MaxToken": "30124",
+    "beiZhu": "A级",
+    "bizType": "camper_competition",
+    "defaultTokenRange": [
+      9300,
+      9500
+    ],
+    "growTokenCd": "600",
+    "growTokenRange": [
+      9000,
+      11000
+    ],
+    "id": "9",
+    "maxDifferenceToken": "1011",
+    "num": "1",
+    "overtakeInterval": "60",
+    "overtakeTime": "300"
+  },
+  {
+    "LockTokenTime": "64800",
+    "MaxToken": "21057",
+    "beiZhu": "B级",
+    "bizType": "camper_competition",
+    "defaultTokenRange": [
+      9200,
+      9300
+    ],
+    "growTokenCd": "1200",
+    "growTokenRange": [
+      9000,
+      10200
+    ],
+    "id": "10",
+    "maxDifferenceToken": "523",
+    "num": "1",
+    "overtakeInterval": "120",
+    "overtakeTime": "600"
+  },
+  {
+    "LockTokenTime": "86400",
+    "MaxToken": "15010",
+    "beiZhu": "C级",
+    "bizType": "camper_competition",
+    "defaultTokenRange": [
+      9100,
+      9200
+    ],
+    "growTokenCd": "2400",
+    "growTokenRange": [
+      7500,
+      9000
+    ],
+    "id": "11",
+    "maxDifferenceToken": "187",
+    "num": "1",
+    "overtakeInterval": "240",
+    "overtakeTime": "1200"
+  },
+  {
+    "LockTokenTime": "86400",
+    "MaxToken": "10209",
+    "beiZhu": "D级",
+    "bizType": "camper_competition",
+    "defaultTokenRange": [
+      9000,
+      9100
+    ],
+    "growTokenCd": "3600",
+    "growTokenRange": [
+      6000,
+      7500
+    ],
+    "id": "12",
+    "maxDifferenceToken": "126",
+    "num": "2",
+    "overtakeInterval": "360",
+    "overtakeTime": "1800"
   }
 ]

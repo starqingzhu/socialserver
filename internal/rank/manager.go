@@ -13,6 +13,7 @@ import (
 	goredis "golib/redis"
 	"golib/zaplog"
 	"socialserver/internal/rank/balloon"
+	"socialserver/internal/rank/campercompetition"
 	"socialserver/internal/rank/egg"
 	"socialserver/internal/rank/engine"
 )
@@ -131,6 +132,8 @@ func newBizServiceWrapper(bizType BizType, svc *engine.Service) RankBizService {
 	switch bizType {
 	case BizTypeEgg:
 		return &egg.BizService{Svc: svc}
+	case BizTypeCamperCompetition:
+		return &campercompetition.BizService{Svc: svc}
 	default:
 		return &balloon.BizService{Svc: svc}
 	}

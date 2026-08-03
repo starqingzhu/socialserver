@@ -3,7 +3,7 @@
     "balloonRankOpenToken": "9000",
     "bizType": "balloon",
     "id": "1",
-    "name": "rank_name_01",
+    "name": "activity_balloon_rank_title",
     "rankPeopleNum": "30",
     "topNameColor": "#266519"
   },
@@ -11,7 +11,15 @@
     "balloonRankOpenToken": "9000",
     "bizType": "egg",
     "id": "2",
-    "name": "rank_name_egg",
+    "name": "activity_DropEggDecoration_rank_title",
+    "rankPeopleNum": "30",
+    "topNameColor": "#266519"
+  },
+  {
+    "balloonRankOpenToken": "9000",
+    "bizType": "camper_competition",
+    "id": "3",
+    "name": "motorhome_cup_name",
     "rankPeopleNum": "30",
     "topNameColor": "#266519"
   }

@@ -155,6 +155,8 @@ func ValidateBizType(bizType BizType) error {
 		return nil
 	case BizTypeEgg:
 		return nil
+	case BizTypeCamperCompetition:
+		return nil
 	default:
 		return fmt.Errorf("unsupported biz type: %s", bizType)
 	}
