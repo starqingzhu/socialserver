@@ -1,6 +1,6 @@
 # SocialServer - 社交服务器
 
-SocialServer 是一个基于 Go 的后端微服务，主要提供排行榜系统支持。它为游戏内的各类竞技活动（如气球小狗、蛋蛋排行等）提供分布式、高性能的排行榜引擎。
+SocialServer 是一个基于 Go 的后端微服务，主要提供排行榜系统支持。它为游戏内的各类竞技活动（如气球小狗、蛋蛋排行、房车竞赛等）提供分布式、高性能的**周期排行榜**引擎。
 
 **项目语言**：Go 1.25.1  
 **部署方式**：gRPC + HTTP  
@@ -17,6 +17,7 @@ SocialServer 是一个基于 Go 的后端微服务，主要提供排行榜系统
 - **机器人系统**：当真实玩家进组后自动生成机器人，按配置增长积分，提升竞争感
 - **成员索引**：Redis SET 缓存玩家参与的所有排行榜，支持跨业务查询
 - **无状态扩展**：任意节点可服务任意玩家，内存数据定期同步到 MongoDB
+- **配置驱动**：新增排行榜类型只需配置文件，无需代码改动
 
 ---
 
@@ -32,31 +33,21 @@ socialserver/
 │   ├── rank/                    # 排行榜核心模块
 │   │   ├── manager.go           # 全局管理器：活动注册、启动恢复、后台驱动
 │   │   ├── types.go             # 公共类型：BizType、BizKey、MemberEntry
-│   │   ├── biz_service.go       # 业务接口和适配器
+│   │   ├── biz_service.go       # 业务接口定义
 │   │   ├── member_index.go      # 成员索引：查询玩家参与的所有排行榜
 │   │   ├── config_loader.go     # 配置加载器
 │   │   │
-│   │   ├── balloon/             # 气球排行榜业务实现
-│   │   │   ├── biz.go           # 业务主类
-│   │   │   ├── types.go         # 配置、分组状态等类型
-│   │   │   ├── service.go       # Service：核心业务逻辑（积分、排名、结算）
-│   │   │   ├── group.go         # 分组管理
-│   │   │   ├── store.go         # Redis 缓存层
-│   │   │   ├── dao.go           # MongoDB 持久化
-│   │   │   ├── robot.go         # 机器人算法
-│   │   │   └── service_robot.go # Service 上的机器人操作
+│   │   ├── timebounded/         # 周期排行榜通用适配器
+│   │   │   └── biz.go           # 所有周期排行榜（balloon、egg 等）的统一实现
 │   │   │
-│   │   ├── egg/                 # 蛋蛋排行榜业务实现
-│   │   │   └── biz.go           # 蛋蛋排行榜业务
-│   │   │
-│   │   └── engine/              # 通用排行榜引擎
+│   │   └── engine/              # 通用排行榜引擎（无业务特性）
 │   │       ├── types.go         # 通用排行榜数据结构
 │   │       ├── service.go       # 通用排行榜服务接口
 │   │       ├── store.go         # 缓存抽象
 │   │       ├── dao.go           # 数据访问抽象
 │   │       ├── snapshot.go      # 快照工具函数
-│   │       ├── group.go         # 分组管理基类
-│   │       ├── robot.go         # 机器人基类
+│   │       ├── group.go         # 分组管理
+│   │       ├── robot.go         # 机器人算法
 │   │       └── service_robot.go # 机器人处理
 │   │
 │   └── router/
@@ -82,7 +73,7 @@ socialserver/
 │
 ├── doc/
 │   ├── rank_module.md           # 排行榜模块完整手册
-│   ├── balloon_rank_design.md   # 气球排行榜设计文档
+│   ├── balloon_rank_design.md   # 设计文档（参考实现）
 │   └── rank_real_scenario_test_report.md  # 实战测试报告
 │
 └── go.mod / go.sum              # 依赖管理
@@ -123,37 +114,42 @@ socialserver/
 ### 核心模块说明
 
 #### 1. Manager（全局管理器）
+
 - **职责**：活动生命周期管理、服务注册、后台驱动
 - **位置**：[manager.go](internal/rank/manager.go)
 - **关键方法**：
   - `InitGlobalManager()` - 初始化，从 MongoDB 恢复已有活动
-  - `RegisterBalloon()` - 注册新气球排行榜
-  - `RegisterEgg()` - 注册新蛋蛋排行榜
+  - `Register()` - 注册新周期排行榜（支持所有类型）
   - `tickServices()` - 每秒驱动，处理定时任务
   - `syncLoop()` - 每 30 秒与 MongoDB 同步
 
 #### 2. MemberIndex（成员索引）
+
 - **职责**：维护玩家参与的所有排行榜记录
 - **位置**：[member_index.go](internal/rank/member_index.go)
 - **存储**：Redis SET，key 格式 `rank:member:{userID}`
 - **使用场景**：查询玩家参与的所有活动
 
-#### 3. balloon.Service（气球排行榜）
-- **职责**：气球排行榜核心业务逻辑
-- **位置**：[balloon/service.go](internal/rank/balloon/service.go)
+#### 3. engine.Service（通用排行榜引擎）
+
+- **职责**：周期排行榜的核心业务逻辑（适用于所有类型：balloon、egg、camper_competition 等）
+- **位置**：[engine/service.go](internal/rank/engine/service.go)
 - **关键方法**：
   - `UpsertScore()` - 更新玩家积分
   - `GetMemberRank()` - 获取玩家排名
-  - `GetRankList()` - 获取排行榜前 N 名
+  - `ListGroupRank()` - 获取排行榜前 N 名
   - `Close()` - 结算并关闭活动
   - `TickRobots()` - 机器人积分增长
-
-#### 4. engine.Service（通用排行榜引擎）
-- **职责**：提供通用的排行榜操作接口
-- **位置**：[engine/service.go](internal/rank/engine/service.go)
 - **特点**：基于 Redis Sorted Set + Lua 脚本，支持原子性操作
 
+#### 4. timebounded.BizService（周期排行榜适配器）
+
+- **职责**：统一的业务服务适配器，支持所有周期排行榜类型
+- **位置**：[timebounded/biz.go](internal/rank/timebounded/biz.go)
+- **特点**：零业务特性，完全通用；新增排行榜类型只需配置文件
+
 #### 5. Store 层（缓存+持久化）
+
 - **职责**：Redis 缓存与 MongoDB 持久化协调
 - **策略**：
   - **写**：Redis + MongoDB 双写，保证数据一致性
@@ -177,9 +173,7 @@ socialserver/
    │   ├── NewMemberIndex()          # 创建成员索引
    │   ├── NewDAO()                  # 创建 MongoDB DAO
    │   ├── dao.EnsureIndexes()       # 创建数据库索引
-   │   └── recoverFromMongo()        # 恢复未过期活动
-   │       ├── 读取 balloon_activity 集合
-   │       └── 对每个活动调用 RegisterBalloon()
+   │   └── syncFromMongo()           # 恢复未过期活动（支持所有周期排行榜类型）
    │
    └── 启动后台任务
        ├── tickLoop()                # 每秒 Tick，驱动机器人增长
@@ -194,10 +188,11 @@ socialserver/
 所有 RPC 接口在 [rank_handler.go](internal/router/rpc/social/rank_handler.go) 中实现：
 
 ### 1. S2SUpsertScore - 更新排行榜积分
+
 **请求**：
 ```protobuf
 message PBS2SUpsertScoreRequest {
-  string bizType              # 业务类型: "balloon" / "egg"
+  string bizType              # 业务类型: "balloon" / "egg" / "camper_competition" / ...（由 RankBase.json 定义）
   int32 actId                 # 活动 ID
   int32 userId                # 玩家 ID
   int64 totalScore            # 总积分
@@ -369,6 +364,53 @@ GameServer 拉取结算数据
 ### 4. 无状态服务设计
 - **优势**：支持水平扩展，任意节点可替换
 - **权衡**：状态数据必须持久化
+
+---
+
+## 添加新的周期排行榜类型
+
+新增排行榜类型**无需修改代码**，仅需配置文件：
+
+### 步骤
+
+1. **在 RankBase.json 中增加配置**
+
+```json
+{
+  "id": "4",
+  "bizType": "my_activity",
+  "rankPeopleNum": "30",
+  "balloonRankOpenToken": "9000",
+  "topNameColor": "#266519",
+  "name": "activity_my_activity_rank_title"
+}
+```
+
+1. **（可选）在 RobotRank.json 中配置机器人参数**
+
+```json
+{
+  "bizType": "my_activity",
+  "id": "4",
+  "num": 10,
+  "defaultTokenRange": "100,200",
+  "growTokenRange": "10,50",
+  "maxToken": "5000",
+  ...
+}
+```
+
+1. **通过 GM 接口或代码调用 Register**
+
+```go
+manager.Register(ctx, "my_activity", engine.Config{
+  ActID:    1001,
+  OpenTime: time.Now().UnixMilli(),
+  CloseTime: time.Now().Add(7*24*time.Hour).UnixMilli(),
+})
+```
+
+✅ 完成！新的排行榜类型现在可用，自动支持所有通用功能。
 
 ---
 
