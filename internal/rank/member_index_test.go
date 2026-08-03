@@ -4,7 +4,7 @@ import "testing"
 
 func TestMemberIndexTrackAndLookup(t *testing.T) {
 	idx := NewMemberIndex(nil)
-	entry := MemberEntry{BizType: BizTypeBalloon, ActID: 1, GroupID: 1}
+	entry := MemberEntry{BizType: "balloon", ActID: 1, GroupID: 1}
 	idx.Track(1001, entry)
 
 	entries := idx.Lookup(1001)
@@ -18,7 +18,7 @@ func TestMemberIndexTrackAndLookup(t *testing.T) {
 
 func TestMemberIndexTrackIdempotent(t *testing.T) {
 	idx := NewMemberIndex(nil)
-	entry := MemberEntry{BizType: BizTypeBalloon, ActID: 1, GroupID: 1}
+	entry := MemberEntry{BizType: "balloon", ActID: 1, GroupID: 1}
 	idx.Track(1001, entry)
 	idx.Track(1001, entry)
 	idx.Track(1001, entry)
@@ -31,8 +31,8 @@ func TestMemberIndexTrackIdempotent(t *testing.T) {
 
 func TestMemberIndexMultiEntries(t *testing.T) {
 	idx := NewMemberIndex(nil)
-	e1 := MemberEntry{BizType: BizTypeBalloon, ActID: 1, GroupID: 1}
-	e2 := MemberEntry{BizType: BizTypeBalloon, ActID: 1, GroupID: 3}
+	e1 := MemberEntry{BizType: "balloon", ActID: 1, GroupID: 1}
+	e2 := MemberEntry{BizType: "balloon", ActID: 1, GroupID: 3}
 	idx.Track(1001, e1)
 	idx.Track(1001, e2)
 
@@ -44,12 +44,12 @@ func TestMemberIndexMultiEntries(t *testing.T) {
 
 func TestMemberIndexLookupByBizType(t *testing.T) {
 	idx := NewMemberIndex(nil)
-	e1 := MemberEntry{BizType: BizTypeBalloon, ActID: 1, GroupID: 1}
+	e1 := MemberEntry{BizType: "balloon", ActID: 1, GroupID: 1}
 	e2 := MemberEntry{BizType: "charm", ActID: 2, GroupID: 1}
 	idx.Track(1001, e1)
 	idx.Track(1001, e2)
 
-	balloonEntries := idx.LookupByBizType(1001, BizTypeBalloon)
+	balloonEntries := idx.LookupByBizType(1001, "balloon")
 	if len(balloonEntries) != 1 || balloonEntries[0] != e1 {
 		t.Fatalf("expected balloon entry, got %+v", balloonEntries)
 	}
@@ -65,13 +65,13 @@ func TestMemberIndexLookupByBizType(t *testing.T) {
 
 func TestMemberIndexRemoveByKey(t *testing.T) {
 	idx := NewMemberIndex(nil)
-	e1 := MemberEntry{BizType: BizTypeBalloon, ActID: 1, GroupID: 1}
+	e1 := MemberEntry{BizType: "balloon", ActID: 1, GroupID: 1}
 	e2 := MemberEntry{BizType: "charm", ActID: 2, GroupID: 2}
 	idx.Track(1001, e1)
 	idx.Track(1001, e2)
 	idx.Track(2001, e1)
 
-	idx.RemoveByKey(NewBizKey(BizTypeBalloon, 1).String())
+	idx.RemoveByKey(NewBizKey("balloon", 1).String())
 
 	entries1001 := idx.Lookup(1001)
 	if len(entries1001) != 1 || entries1001[0].BizType != "charm" {
@@ -85,7 +85,7 @@ func TestMemberIndexRemoveByKey(t *testing.T) {
 
 func TestMemberIndexLookupReturnsCopy(t *testing.T) {
 	idx := NewMemberIndex(nil)
-	entry := MemberEntry{BizType: BizTypeBalloon, ActID: 1, GroupID: 1}
+	entry := MemberEntry{BizType: "balloon", ActID: 1, GroupID: 1}
 	idx.Track(1001, entry)
 
 	entries := idx.Lookup(1001)

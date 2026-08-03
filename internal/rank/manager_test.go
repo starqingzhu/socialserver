@@ -24,7 +24,7 @@ func TestManagerBalloonScenario(t *testing.T) {
 	manager := newTestManager()
 	defer manager.Close()
 
-	service, err := manager.registerEngine(ctx, BizTypeBalloon, engine.Config{
+	service, err := manager.registerEngine(ctx, "balloon", engine.Config{
 		BizType:       "balloon",
 		ActID:         2001,
 		RankCode:      "balloon_score",
@@ -99,7 +99,7 @@ func BenchmarkManagerBalloonScenario(b *testing.B) {
 	ctx := context.Background()
 	for i := 0; i < b.N; i++ {
 		manager := newTestManager()
-		service, err := manager.registerEngine(ctx, BizTypeBalloon, engine.Config{
+		service, err := manager.registerEngine(ctx, "balloon", engine.Config{
 			BizType:       fmt.Sprintf("balloon_bench_%d", i),
 			ActID:         int32(3000 + i),
 			RankCode:      fmt.Sprintf("balloon_bench_%d", i),
@@ -136,7 +136,7 @@ func TestManagerMemberIndex(t *testing.T) {
 	manager := newTestManager()
 	defer manager.Close()
 
-	service, err := manager.registerEngine(ctx, BizTypeBalloon, engine.Config{
+	service, err := manager.registerEngine(ctx, "balloon", engine.Config{
 		BizType:       "balloon",
 		ActID:         6001,
 		RankCode:      "balloon_idx",
@@ -160,7 +160,7 @@ func TestManagerMemberIndex(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry for user 2001, got %d", len(entries))
 	}
-	if entries[0].BizType != BizTypeBalloon || entries[0].GroupID != 1 {
+	if entries[0].BizType != "balloon" || entries[0].GroupID != 1 {
 		t.Fatalf("unexpected entry: %+v", entries[0])
 	}
 
@@ -174,7 +174,7 @@ func TestManagerGetMemberRankEntries(t *testing.T) {
 	manager := newTestManager()
 	defer manager.Close()
 
-	service, err := manager.registerEngine(ctx, BizTypeBalloon, engine.Config{
+	service, err := manager.registerEngine(ctx, "balloon", engine.Config{
 		BizType:       "balloon",
 		ActID:         7001,
 		RankCode:      "balloon_agg",
@@ -208,7 +208,7 @@ func TestManagerGetService(t *testing.T) {
 	manager := newTestManager()
 	defer manager.Close()
 
-	_, err := manager.registerEngine(ctx, BizTypeBalloon, engine.Config{
+	_, err := manager.registerEngine(ctx, "balloon", engine.Config{
 		BizType:       "balloon",
 		ActID:         8001,
 		RankCode:      "balloon_compat",
@@ -221,7 +221,7 @@ func TestManagerGetService(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 
-	got := manager.GetService(BizTypeBalloon, 8001)
+	got := manager.GetService("balloon", 8001)
 	if got == nil {
 		t.Fatalf("GetService should return registered service")
 	}

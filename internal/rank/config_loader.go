@@ -149,15 +149,11 @@ func loadRankBase(bizType BizType) (*cfgtypes.RankBaseConfig, error) {
 }
 
 // ValidateBizType 验证业务类型是否支持。
+// 通过检查 RankBase.json 配置文件中是否存在该业务类型的配置。
 func ValidateBizType(bizType BizType) error {
-	switch bizType {
-	case BizTypeBalloon:
-		return nil
-	case BizTypeEgg:
-		return nil
-	case BizTypeCamperCompetition:
-		return nil
-	default:
-		return fmt.Errorf("unsupported biz type: %s", bizType)
+	_, err := loadRankBase(bizType)
+	if err != nil {
+		return fmt.Errorf("unsupported biz type: %s - %w", bizType, err)
 	}
+	return nil
 }

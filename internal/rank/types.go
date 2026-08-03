@@ -6,14 +6,9 @@ import (
 	commonrank "common/rank"
 )
 
-// BizType 业务类型标识。
+// BizType 业务类型标识（周期排行榜类型）。
+// 支持的业务类型由 RankBase.json 配置文件动态定义，无需在代码中硬编码。
 type BizType string
-
-const (
-	BizTypeBalloon           BizType = "balloon"
-	BizTypeEgg               BizType = "egg"
-	BizTypeCamperCompetition BizType = "camper_competition"
-)
 
 // BizKey 唯一标识一个业务排行榜服务实例（业务类型 + 活动ID）。
 type BizKey struct {

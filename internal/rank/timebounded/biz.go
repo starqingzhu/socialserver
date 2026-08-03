@@ -1,4 +1,4 @@
-package egg
+package timebounded
 
 import (
 	"context"
@@ -7,14 +7,21 @@ import (
 	"socialserver/internal/rank/engine"
 )
 
-const BizTypeName = "egg"
-
-// BizService 彩蛋活动排行榜业务服务适配器，实现 rank.RankBizService 接口。
+// BizService 周期排行榜业务服务适配器，实现 rank.RankBizService 接口。
+// 支持 balloon、egg、camper_competition 等所有周期性排行榜。
 type BizService struct {
-	Svc *engine.Service
+	Svc     *engine.Service
+	bizType string
 }
 
-func (b *BizService) BizType() string { return BizTypeName }
+func NewBizService(bizType string, svc *engine.Service) *BizService {
+	return &BizService{
+		Svc:     svc,
+		bizType: bizType,
+	}
+}
+
+func (b *BizService) BizType() string { return b.bizType }
 
 func (b *BizService) GetMemberRank(ctx context.Context, userID int64) (*commonrank.RankMemberSnapshot, int32, error) {
 	return b.Svc.GetMemberRank(ctx, userID)

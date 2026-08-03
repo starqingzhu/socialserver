@@ -12,9 +12,7 @@ import (
 	rediskeys "common/redis"
 	goredis "golib/redis"
 	"golib/zaplog"
-	"socialserver/internal/rank/balloon"
-	"socialserver/internal/rank/campercompetition"
-	"socialserver/internal/rank/egg"
+	"socialserver/internal/rank/timebounded"
 	"socialserver/internal/rank/engine"
 )
 
@@ -127,16 +125,10 @@ func (m *Manager) tickServices(ctx context.Context, now int64) {
 	}
 }
 
-// newBizServiceWrapper 根据 bizType 将 engine.Service 包装为 RankBizService。
+// newBizServiceWrapper 为周期排行榜创建业务服务适配器。
+// 所有周期排行榜类型（balloon、egg、camper_competition 等）共用同一个通用实现。
 func newBizServiceWrapper(bizType BizType, svc *engine.Service) RankBizService {
-	switch bizType {
-	case BizTypeEgg:
-		return &egg.BizService{Svc: svc}
-	case BizTypeCamperCompetition:
-		return &campercompetition.BizService{Svc: svc}
-	default:
-		return &balloon.BizService{Svc: svc}
-	}
+	return timebounded.NewBizService(string(bizType), svc)
 }
 
 func (m *Manager) registerEngine(ctx context.Context, bizType BizType, cfg engine.Config) (*engine.Service, error) {
@@ -617,7 +609,7 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 
 		bizType := BizType(cfg.BizType)
 		if bizType == "" {
-			bizType = BizTypeBalloon
+			bizType = "balloon"
 			cfg.BizType = string(bizType)
 		}
 		key := NewBizKey(bizType, cfg.ActID).String()
