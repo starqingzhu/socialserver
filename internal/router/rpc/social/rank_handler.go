@@ -5,6 +5,8 @@ import (
 	"errors"
 	"time"
 
+	"common/configmgr"
+	cfgtypes "common/configmgr/types"
 	"common/rank"
 	"golib/zaplog"
 	commonMsg "pbcommon/gen/common/msg"
@@ -228,6 +230,42 @@ func (h *ServerHandler) S2SGetClaimStatus(ctx context.Context, req *pb.PBS2SGetC
 }
 
 // --- GM 管理接口 ---
+
+// S2SListRankBizTypes GM：查询支持的业务排行榜类型列表
+func (h *ServerHandler) S2SListRankBizTypes(ctx context.Context, req *pb.PBS2SListRankBizTypesRequest) (resp *pb.PBS2SListRankBizTypesResponse, retErr error) {
+	zaplog.LoggerSugar.Infof("[rank] S2SListRankBizTypes")
+	defer func() {
+		if retErr != nil {
+			zaplog.LoggerSugar.Warnf("[rank] S2SListRankBizTypes resp err=%v", retErr)
+		} else {
+			zaplog.LoggerSugar.Infof("[rank] S2SListRankBizTypes resp count=%d", len(resp.BizTypes))
+		}
+	}()
+
+	cf, err := configmgr.GetConfigByFileName("RankBase")
+	if err != nil {
+		return &pb.PBS2SListRankBizTypesResponse{MsgCode: commonMsg.MsgCode_CODE_SERVER_INNER}, nil
+	}
+
+	bizTypeMap := make(map[string]bool)
+	for _, item := range cf.GetData() {
+		cfg, ok := item.(cfgtypes.RankBaseConfig)
+		if !ok {
+			continue
+		}
+		bizTypeMap[cfg.BizType] = true
+	}
+
+	bizTypes := make([]string, 0, len(bizTypeMap))
+	for bizType := range bizTypeMap {
+		bizTypes = append(bizTypes, bizType)
+	}
+
+	return &pb.PBS2SListRankBizTypesResponse{
+		MsgCode:  commonMsg.MsgCode_CODE_OK,
+		BizTypes: bizTypes,
+	}, nil
+}
 
 func (h *ServerHandler) S2SCreateRankConfig(ctx context.Context, req *pb.PBS2SCreateRankConfigRequest) (resp *pb.PBS2SCreateRankConfigResponse, retErr error) {
 	zaplog.LoggerSugar.Infof("[rank] S2SCreateRankConfig req bizType=%s actId=%d openTime=%d closeTime=%d gameEndTime=%d",
