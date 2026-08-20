@@ -16,10 +16,10 @@
     "topNameColor": "#266519"
   },
   {
-    "balloonRankOpenToken": "9000",
+    "balloonRankOpenToken": "0",
     "bizType": "camper_competition",
     "id": "3",
-    "name": "motorhome_cup_name",
+    "name": "camper_competition_title",
     "rankPeopleNum": "30",
     "topNameColor": "#266519"
   }
