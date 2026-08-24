@@ -37,10 +37,21 @@ func (d *DAO) session() *mongodbmodule.Session {
 
 // --- 活动注册表 ---
 
+// PeriodicSavedState 周期排行榜运行时状态，与逻辑活动的 RankConfigDoc 一同持久化。
+type PeriodicSavedState struct {
+	CycleDays      int32 `bson:"cycleDays"`
+	TotalOpenTime  int64 `bson:"totalOpenTime"`
+	TotalCloseTime int64 `bson:"totalCloseTime"`
+	CurrentRound   int32 `bson:"currentRound"`
+	RoundOpenTime  int64 `bson:"roundOpenTime"`
+	RoundCloseTime int64 `bson:"roundCloseTime"`
+}
+
 // RankConfigDoc 排行榜配置文档，所有业务类型统一存储于 commonrank.CT_RANK_CONFIG 集合。
 type RankConfigDoc struct {
-	BizKey string `bson:"_id"` // "{bizType}:{actID}" 格式，跨业务唯一
-	Config Config `bson:"config"`
+	BizKey   string              `bson:"_id"`    // "{bizType}:{actID}" 格式，跨业务唯一
+	Config   Config              `bson:"config"`
+	Periodic *PeriodicSavedState `bson:"periodic,omitempty"` // 非 nil 表示周期排行榜
 }
 
 func (d *DAO) SaveRankConfig(bizKey string, cfg Config) error {
@@ -58,6 +69,43 @@ func (d *DAO) SaveRankConfig(bizKey string, cfg Config) error {
 	)
 	if err := queue.PushMongoTask(task); err != nil {
 		zaplog.LoggerSugar.Errorf("rank engine dao: save rank config bizKey=%s: %v", bizKey, err)
+	}
+	return nil
+}
+
+// SavePeriodicState 更新逻辑活动配置文档中的周期运行时状态字段。
+func (d *DAO) SavePeriodicState(bizKey string, state PeriodicSavedState) error {
+	if !d.available() {
+		return nil
+	}
+	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
+		commonrank.CT_RANK_CONFIG,
+		bizKey,
+		bson.M{"_id": bizKey},
+		bson.M{"$set": bson.M{"periodic": state}},
+	)
+	if err := queue.PushMongoTask(task); err != nil {
+		zaplog.LoggerSugar.Errorf("rank engine dao: save periodic state bizKey=%s: %v", bizKey, err)
+	}
+	return nil
+}
+
+// SaveRankConfigWithPeriodic 原子保存排行榜配置和周期状态（首次注册周期活动时使用）。
+func (d *DAO) SaveRankConfigWithPeriodic(bizKey string, cfg Config, state PeriodicSavedState) error {
+	if !d.available() {
+		return nil
+	}
+	persisted := cfg
+	persisted.RobotTiers = nil
+	persisted.RobotInfos = nil
+	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
+		commonrank.CT_RANK_CONFIG,
+		bizKey,
+		bson.M{"_id": bizKey},
+		bson.M{"$set": bson.M{"config": persisted, "periodic": state}},
+	)
+	if err := queue.PushMongoTask(task); err != nil {
+		zaplog.LoggerSugar.Errorf("rank engine dao: save rank config with periodic bizKey=%s: %v", bizKey, err)
 	}
 	return nil
 }
@@ -331,6 +379,42 @@ type ClaimDoc struct {
 
 func claimDocID(bizId string, userID int64) string {
 	return fmt.Sprintf("%s:%d", bizId, userID)
+}
+
+// SaveClaimIfNotExists atomically creates the claim record only if it doesn't already exist.
+// Uses $setOnInsert so that an existing document is never modified.
+// Returns isFirst=true when this call inserted the document (first claim).
+// Returns isFirst=false with the existing claimTime when it already existed.
+func (d *DAO) SaveClaimIfNotExists(bizId string, userID int64, claimTime int64) (isFirst bool, existingTime int64, err error) {
+	if !d.available() {
+		return true, claimTime, nil
+	}
+	docID := claimDocID(bizId, userID)
+	result, upsertErr := d.session().UpsertOne(d.dbName, commonrank.CT_RANK_CLAIM,
+		bson.M{"_id": docID},
+		bson.M{"$setOnInsert": bson.M{
+			"_id":       docID,
+			"bizId":     bizId,
+			"userId":    userID,
+			"claimTime": claimTime,
+		}},
+	)
+	if upsertErr != nil {
+		return false, 0, upsertErr
+	}
+	if result.UpsertedCount > 0 {
+		return true, claimTime, nil
+	}
+	// Document already existed — read the recorded claim time.
+	ct, found, readErr := d.GetClaim(bizId, userID)
+	if readErr != nil {
+		return false, 0, readErr
+	}
+	if !found {
+		// Unlikely but safe: treat as first claim.
+		return true, claimTime, nil
+	}
+	return false, ct, nil
 }
 
 func (d *DAO) SaveClaim(bizId string, userID int64, claimTime int64) error {

@@ -32,14 +32,19 @@ socialserver/
 │   ├── server.go                    # 服务生命周期（OnInit / OnClose）、配置加载
 │   │
 │   ├── rank/                        # 排行榜领域
-│   │   ├── types.go                 # 公共类型：BizType、BizKey、MemberEntry
+│   │   ├── types.go                 # 公共类型：BizType、BizKey、RankTypeOnce/Periodic、PeriodicState/RoundInfo 类型别名
 │   │   ├── biz_service.go           # RankBizService 接口定义
 │   │   ├── manager.go               # 全局 Manager：服务注册、后台 tick/sync/订阅
+│   │   ├── manager_periodic.go      # 周期排行榜 Manager 方法（委托 periodic.Handler）；实现 ServiceRegistrar
 │   │   ├── member_index.go          # 成员索引：Redis SET，查询玩家参与的所有排行榜
 │   │   ├── config_loader.go         # 加载 RankBase.json / RobotRank.json 到 engine.Config
 │   │   │
-│   │   ├── timebounded/
-│   │   │   └── biz.go               # 通用周期排行榜适配器（支持所有业务类型）
+│   │   ├── once/
+│   │   │   └── biz.go               # 一次性排行榜业务服务适配器（原 timebounded/）
+│   │   │
+│   │   ├── periodic/
+│   │   │   ├── state.go             # PeriodicState、RoundInfo：周期状态与轮次推进
+│   │   │   └── handler.go           # Handler 编排；ServiceRegistrar 接口（解循环依赖）
 │   │   │
 │   │   └── engine/                  # 通用排行榜引擎（无业务特性）
 │   │       ├── types.go             # GroupState、Config、Group、Option
@@ -181,13 +186,14 @@ cd socialserver
 
 | 方法 | 说明 |
 | --- | --- |
-| `S2SUpsertScore` | 更新玩家积分，返回最新排名快照 |
-| `S2SGetRankList` | 获取玩家所在组的排行榜前 N 名 |
+| `S2SUpsertScore` | 更新玩家积分，返回最新排名快照；周期排行榜校验 `round` 字段，轮次不符返回 `CODE_RANK_ROUND_CHANGED` |
+| `S2SGetRankList` | 获取玩家所在组的排行榜前 N 名（支持历史轮次） |
 | `S2SGetMemberRank` | 获取单个玩家的排名信息 |
 | `S2SSettle` | 触发活动下所有分组结算 |
 | `S2SGetRewardUsers` | 获取有奖励资格的玩家列表 |
-| `S2SClaimReward` | 标记玩家已领奖 |
+| `S2SClaimReward` | 原子幂等写入领奖记录；首次返回 `claimed=false`，重复返回 `claimed=true` |
 | `S2SGetClaimStatus` | 查询玩家领奖状态 |
+| `S2SGetRankRounds` | 查询周期排行榜所有轮次摘要（currentRound + 各轮 settled 状态） |
 
 ### GM 接口（运营后台）
 
@@ -284,16 +290,18 @@ closeTime: <unix_ms>
 | **负数 memberID 标识机器人** | 机器人 ID = `-(groupID * 10000 + index)`，查询时按符号区分 |
 | **负缓存哨兵** | Redis miss 后用 `\x00` 占位，防止雪崩打穿 MongoDB |
 | **多节点一致性** | 删除活动时广播 Redis pub/sub 事件，所有节点同步移除内存中的 Service 实例 |
-| **配置驱动扩展** | `RankBase.json` 是唯一扩展点，业务层 `timebounded.BizService` 完全通用 |
+| **配置驱动扩展** | `RankBase.json` 是唯一扩展点，`once.BizService` 和 `periodic.Handler` 完全通用 |
+| **periodic 子包隔离** | 周期排行榜逻辑封装在 `periodic/` 子包（`Handler` + `PeriodicState`），通过 `ServiceRegistrar` 接口回调 Manager，避免循环依赖 |
+| **轮次竞态保护** | `S2SUpsertScore` 校验请求 `round` 与 `PeriodicState.CurrentRound`，轮次不符直接拒绝并返回最新轮次，防止旧轮数据写入新轮 Service |
 
 ---
 
 ## 文档
 
-- [架构详细文档](doc/architecture.md) - 模块详解、存储模型、数据流、机器人系统
-- [三层分层设计方案](doc/balloon_rank_design.md) - Base/Timed/Business Rank 架构设计
+- [架构详细文档](docs/architecture.md) - 模块详解、存储模型、数据流、机器人系统
+- [排行榜完整流程](docs/rank_flow.html) - 一次性/周期排行榜流程、接口清单、多节点安全
 
 ---
 
-**最后更新**：2026-08-06  
+**最后更新**：2026-08-21  
 **维护者**：sunbin

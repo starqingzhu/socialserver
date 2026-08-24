@@ -157,3 +157,13 @@ func ValidateBizType(bizType BizType) error {
 	}
 	return nil
 }
+
+// LoadRankTypeAndCycle 从 RankBase.json 配置读取排行榜类型和周期天数。
+// rankType=1 一次性排行榜，rankType=2 周期排行榜；cycleDays 仅在 rankType=2 时有效。
+func LoadRankTypeAndCycle(bizType BizType) (rankType int32, cycleDays int32, err error) {
+	base, err := loadRankBase(bizType)
+	if err != nil {
+		return 0, 0, err
+	}
+	return base.RankType, base.CycleDays, nil
+}

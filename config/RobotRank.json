@@ -4,15 +4,9 @@
     "MaxToken": "30124",
     "beiZhu": "A级",
     "bizType": "balloon",
-    "defaultTokenRange": [
-      9300,
-      9500
-    ],
+    "defaultTokenRange": [9300, 9500],
     "growTokenCd": "600",
-    "growTokenRange": [
-      9000,
-      11000
-    ],
+    "growTokenRange": [9000, 11000],
     "id": "1",
     "maxDifferenceToken": "1011",
     "num": "1",
@@ -24,15 +18,9 @@
     "MaxToken": "21057",
     "beiZhu": "B级",
     "bizType": "balloon",
-    "defaultTokenRange": [
-      9200,
-      9300
-    ],
+    "defaultTokenRange": [9200, 9300],
     "growTokenCd": "1200",
-    "growTokenRange": [
-      9000,
-      10200
-    ],
+    "growTokenRange": [9000, 10200],
     "id": "2",
     "maxDifferenceToken": "523",
     "num": "1",
@@ -44,15 +32,9 @@
     "MaxToken": "15010",
     "beiZhu": "C级",
     "bizType": "balloon",
-    "defaultTokenRange": [
-      9100,
-      9200
-    ],
+    "defaultTokenRange": [9100, 9200],
     "growTokenCd": "2400",
-    "growTokenRange": [
-      7500,
-      9000
-    ],
+    "growTokenRange": [7500, 9000],
     "id": "3",
     "maxDifferenceToken": "187",
     "num": "1",
@@ -64,15 +46,9 @@
     "MaxToken": "10209",
     "beiZhu": "D级",
     "bizType": "balloon",
-    "defaultTokenRange": [
-      9000,
-      9100
-    ],
+    "defaultTokenRange": [9000, 9100],
     "growTokenCd": "3600",
-    "growTokenRange": [
-      6000,
-      7500
-    ],
+    "growTokenRange": [6000, 7500],
     "id": "4",
     "maxDifferenceToken": "126",
     "num": "2",
@@ -84,15 +60,9 @@
     "MaxToken": "30124",
     "beiZhu": "A级",
     "bizType": "egg",
-    "defaultTokenRange": [
-      9300,
-      9500
-    ],
+    "defaultTokenRange": [9300, 9500],
     "growTokenCd": "600",
-    "growTokenRange": [
-      9000,
-      11000
-    ],
+    "growTokenRange": [9000, 11000],
     "id": "5",
     "maxDifferenceToken": "1011",
     "num": "1",
@@ -104,15 +74,9 @@
     "MaxToken": "21057",
     "beiZhu": "B级",
     "bizType": "egg",
-    "defaultTokenRange": [
-      9200,
-      9300
-    ],
+    "defaultTokenRange": [9200, 9300],
     "growTokenCd": "1200",
-    "growTokenRange": [
-      9000,
-      10200
-    ],
+    "growTokenRange": [9000, 10200],
     "id": "6",
     "maxDifferenceToken": "523",
     "num": "1",
@@ -124,15 +88,9 @@
     "MaxToken": "15010",
     "beiZhu": "C级",
     "bizType": "egg",
-    "defaultTokenRange": [
-      9100,
-      9200
-    ],
+    "defaultTokenRange": [9100, 9200],
     "growTokenCd": "2400",
-    "growTokenRange": [
-      7500,
-      9000
-    ],
+    "growTokenRange": [7500, 9000],
     "id": "7",
     "maxDifferenceToken": "187",
     "num": "1",
@@ -144,15 +102,9 @@
     "MaxToken": "10209",
     "beiZhu": "D级",
     "bizType": "egg",
-    "defaultTokenRange": [
-      9000,
-      9100
-    ],
+    "defaultTokenRange": [9000, 9100],
     "growTokenCd": "3600",
-    "growTokenRange": [
-      6000,
-      7500
-    ],
+    "growTokenRange": [6000, 7500],
     "id": "8",
     "maxDifferenceToken": "126",
     "num": "2",
@@ -164,15 +116,9 @@
     "MaxToken": "6124",
     "beiZhu": "A级",
     "bizType": "camper_competition",
-    "defaultTokenRange": [
-      800,
-      1200
-    ],
+    "defaultTokenRange": [800, 1200],
     "growTokenCd": "600",
-    "growTokenRange": [
-      9000,
-      11000
-    ],
+    "growTokenRange": [9000, 11000],
     "id": "9",
     "maxDifferenceToken": "243",
     "num": "1",
@@ -184,15 +130,9 @@
     "MaxToken": "4539",
     "beiZhu": "B级",
     "bizType": "camper_competition",
-    "defaultTokenRange": [
-      500,
-      800
-    ],
+    "defaultTokenRange": [500, 800],
     "growTokenCd": "1200",
-    "growTokenRange": [
-      9000,
-      10200
-    ],
+    "growTokenRange": [9000, 10200],
     "id": "10",
     "maxDifferenceToken": "124",
     "num": "1",
@@ -204,15 +144,9 @@
     "MaxToken": "2688",
     "beiZhu": "C级",
     "bizType": "camper_competition",
-    "defaultTokenRange": [
-      300,
-      500
-    ],
+    "defaultTokenRange": [300, 500],
     "growTokenCd": "2400",
-    "growTokenRange": [
-      7500,
-      9000
-    ],
+    "growTokenRange": [7500, 9000],
     "id": "11",
     "maxDifferenceToken": "58",
     "num": "1",
@@ -224,16 +158,66 @@
     "MaxToken": "1576",
     "beiZhu": "D级",
     "bizType": "camper_competition",
-    "defaultTokenRange": [
-      0,
-      300
-    ],
+    "defaultTokenRange": [10, 300],
     "growTokenCd": "3600",
-    "growTokenRange": [
-      6000,
-      7500
-    ],
+    "growTokenRange": [6000, 7500],
     "id": "12",
+    "maxDifferenceToken": "32",
+    "num": "2",
+    "overtakeInterval": "360",
+    "overtakeTime": "1800"
+  },
+  {
+    "LockTokenTime": "43200",
+    "MaxToken": "6124",
+    "beiZhu": "A级",
+    "bizType": "test_rank",
+    "defaultTokenRange": [800, 1200],
+    "growTokenCd": "600",
+    "growTokenRange": [9000, 11000],
+    "id": "13",
+    "maxDifferenceToken": "243",
+    "num": "1",
+    "overtakeInterval": "60",
+    "overtakeTime": "300"
+  },
+  {
+    "LockTokenTime": "43200",
+    "MaxToken": "4539",
+    "beiZhu": "B级",
+    "bizType": "test_rank",
+    "defaultTokenRange": [500, 800],
+    "growTokenCd": "1200",
+    "growTokenRange": [9000, 10200],
+    "id": "14",
+    "maxDifferenceToken": "124",
+    "num": "1",
+    "overtakeInterval": "120",
+    "overtakeTime": "600"
+  },
+  {
+    "LockTokenTime": "43200",
+    "MaxToken": "2688",
+    "beiZhu": "C级",
+    "bizType": "test_rank",
+    "defaultTokenRange": [300, 500],
+    "growTokenCd": "2400",
+    "growTokenRange": [7500, 9000],
+    "id": "15",
+    "maxDifferenceToken": "58",
+    "num": "1",
+    "overtakeInterval": "240",
+    "overtakeTime": "1200"
+  },
+  {
+    "LockTokenTime": "43200",
+    "MaxToken": "1576",
+    "beiZhu": "D级",
+    "bizType": "test_rank",
+    "defaultTokenRange": [10, 300],
+    "growTokenCd": "3600",
+    "growTokenRange": [6000, 7500],
+    "id": "16",
     "maxDifferenceToken": "32",
     "num": "2",
     "overtakeInterval": "360",

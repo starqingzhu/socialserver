@@ -65,11 +65,15 @@ socialserver/
     server.go                    # 服务生命周期
     rank/
       manager.go                 # 全局管理器
+      manager_periodic.go        # 周期排行榜 Manager 方法（委托 periodic.Handler）；实现 ServiceRegistrar
       biz_service.go             # 业务服务接口
-      types.go                   # 公共类型
+      types.go                   # 公共类型；PeriodicState/RoundInfo 类型别名
       member_index.go            # 成员索引
       config_loader.go           # JSON 配置加载
-      timebounded/biz.go         # 通用周期排行榜适配器
+      once/biz.go                # 一次性排行榜业务服务适配器（原 timebounded/）
+      periodic/
+        state.go                 # PeriodicState、RoundInfo：周期状态与轮次推进
+        handler.go               # Handler 编排；ServiceRegistrar 接口（解循环依赖）
       engine/
         service.go               # 核心排行榜引擎
         store.go                 # 双层存储
@@ -114,12 +118,13 @@ socialserver/
 
 **文件**：[internal/rank/manager.go](../internal/rank/manager.go)
 
-Manager 是排行榜系统的单例门面，持有两张内存注册表：
+Manager 是排行榜系统的单例门面，持有两张内存注册表，以及周期排行榜处理器：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `services` | `map[string]RankBizService` | `bizKey → 业务服务` |
 | `engineServices` | `map[string]*engine.Service` | `bizKey → 引擎实例` |
+| `periodicHandler` | `*periodic.Handler` | 周期排行榜编排（状态管理、轮次推进、历史查询） |
 
 **bizKey** 格式：`{bizType}:{actID}`，例如 `balloon:1001`。
 
@@ -151,10 +156,19 @@ InitGlobalManager()
 
 ```go
 // 注册新活动（GM 接口调用）
+// rankType=RankTypeOnce → 调用 registerSubService 直接创建 engine.Service
+// rankType=RankTypePeriodic → 委托 periodicHandler.Register，由 Handler 管理轮次生命周期
 func (m *Manager) Register(ctx context.Context, bizType string, cfg engine.Config) error
 
 // 删除活动（同时广播 Redis 事件通知其他节点）
 func (m *Manager) Delete(ctx context.Context, bizKey string) error
+```
+
+Manager 同时实现 `periodic.ServiceRegistrar` 接口，供 `periodic.Handler` 回调注册新轮次：
+
+```go
+func (m *Manager) RegisterRoundService(ctx context.Context, bizType, logicalKey string, cfg engine.Config) (*engine.Service, error)
+func (m *Manager) GetEngineServiceByKey(logicalKey string) *engine.Service
 ```
 
 ---
@@ -203,11 +217,11 @@ Service 在首次业务调用时通过 `ensureLoaded()` 从 Redis 恢复完整�
 
 ---
 
-### 2.4 timebounded.BizService — 周期排行榜适配器
+### 2.4 once.BizService — 一次性排行榜适配器
 
-**文件**：[internal/rank/timebounded/biz.go](../internal/rank/timebounded/biz.go)
+**文件**：[internal/rank/once/biz.go](../internal/rank/once/biz.go)
 
-`BizService` 实现 `RankBizService` 接口，是 `engine.Service` 的薄包装。它将所有业务类型（`balloon`、`egg`、`camper_competition` 及未来新增类型）统一适配，内部不含任何业务特性。
+`BizService` 实现 `RankBizService` 接口，是 `engine.Service` 的薄包装。它将所有一次性业务类型（`balloon`、`egg`、`camper_competition` 及未来新增类型）统一适配，内部不含任何业务特性。
 
 ```go
 type BizService struct {
@@ -225,7 +239,43 @@ func (b *BizService) IsSettled() bool     { return b.svc.IsSettled() }
 
 ---
 
-### 2.5 MemberIndex — 成员索引
+### 2.5 periodic.Handler — 周期排行榜编排
+
+**文件**：[internal/rank/periodic/handler.go](../internal/rank/periodic/handler.go)
+
+`Handler` 管理所有周期排行榜活动的状态和轮次生命周期，从 `Manager` struct 中解耦出来，避免周期逻辑与核心注册逻辑混合。
+
+```go
+// ServiceRegistrar 由 Manager 实现，注入给 Handler，打破循环依赖
+type ServiceRegistrar interface {
+    RegisterRoundService(ctx context.Context, bizType, logicalKey string, cfg engine.Config) (*engine.Service, error)
+    GetEngineServiceByKey(logicalKey string) *engine.Service
+}
+
+type Handler struct {
+    mu       sync.RWMutex
+    states   map[string]*PeriodicState  // logicalKey → 状态
+    rdb      *goredis.Redis
+    dao      *engine.DAO
+    registry ServiceRegistrar           // 回调 Manager 注册新轮次 Service
+}
+```
+
+**锁顺序保证（防死锁）**：`m.mu`（Manager）→ `h.mu`（Handler）。`advanceRound` 在持有 `h.mu` 期间不直接调用 Manager；需要回调时先释放 `h.mu`，再通过 `registry.RegisterRoundService` 获取 `m.mu`。
+
+**主要方法：**
+
+| 方法 | 说明 |
+| --- | --- |
+| `Register(ctx, bizType, logicalKey, cfg, cycleDays)` | 注册或恢复周期活动，创建第 1 轮 Service |
+| `TickAll(ctx, now)` | 遍历所有状态，检查轮次是否到期并推进 |
+| `GetState(logicalKey)` | 读取当前 PeriodicState |
+| `GetRoundInfos(bizType, actID)` | 返回所有历史轮次摘要 |
+| `GetHistoricalRoundList / GetHistoricalRewardUsers / ClaimHistoricalReward` | 历史轮次数据查询与领奖 |
+
+---
+
+### 2.6 MemberIndex — 成员索引
 
 **文件**：[internal/rank/member_index.go](../internal/rank/member_index.go)
 
@@ -301,11 +351,16 @@ MongoDB 写入通过 `engine.DAO` 的内部 `mongoTask` 队列异步处理，业
 
 ```text
 GameServer
-  └─ S2SUpsertScore(bizType, actID, userID, totalScore, avatarInfo)
+  └─ S2SUpsertScore(bizType, actID, userID, totalScore, avatarInfo, round)
        │
        ▼
   rank_handler.S2SUpsertScore()
   ├── lookupEngineService(bizType, actID)  ← 从 Manager 取 engine.Service
+  │
+  ├── [周期排行榜] 轮次校验
+  │   ├── 获取 PeriodicState.CurrentRound
+  │   └── 若 req.Round > 0 且 req.Round != CurrentRound
+  │       └── 返回 CODE_RANK_ROUND_CHANGED { CurrentRound }
   │
   ├── engine.Service.UpsertScore()
   │   ├── ensureLoaded()                   ← 首次调用时从 Redis 恢复状态
@@ -317,7 +372,7 @@ GameServer
   │   ├── store.SaveMember()               ← Redis Hash + MongoDB async
   │   └── 若首个真实玩家 → spawnRobotsForGroup()
   │
-  └── 返回 PBMemberRankInfo（排名、积分、组信息）
+  └── 返回 PBMemberRankInfo（排名、积分、组信息）+ currentRound
 ```
 
 ### 4.2 活动结算流程
@@ -346,9 +401,16 @@ GM 调用 S2SCreateRankConfig(bizType, actID, openTime, closeTime)
 Manager.Register()
   ├── config_loader.LoadEngineConfig(bizType)  ← 读取 RankBase.json + RobotRank.json
   ├── engine.NewService(config, rdb, dao)
-  ├── timebounded.NewBizService(bizType, engineSvc)
+  ├── once.NewBizService(bizType, engineSvc)     ← 一次性类型
   ├── manager.services[bizKey] = bizService
   └── manager.engineServices[bizKey] = engineSvc
+
+── 周期排行榜注册 ──
+Manager.Register() with rankType=Periodic
+  └── periodicHandler.Register(ctx, bizType, logicalKey, cfg, cycleDays)
+        ├── 创建初始 PeriodicState（CurrentRound=1，计算第 1 轮窗口）
+        ├── registry.RegisterRoundService(bizType, roundBizId, cfg) ← 回调 Manager
+        └── 保存 PeriodicState 到 MongoDB
 
 ── 节点重启后 ──
 Manager.syncFromMongo()
@@ -514,4 +576,4 @@ SocialServer 注册两个 gRPC 服务：
 
 ---
 
-**最后更新**：2026-08-06
+**最后更新**：2026-08-21

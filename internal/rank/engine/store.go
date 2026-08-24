@@ -384,6 +384,34 @@ func (st *Store) LoadUsedInfoIDs(groupID int32) (map[int64]struct{}, error) {
 	return result, nil
 }
 
+// liveDataCleanupTTL 热数据清理的 TTL：由 Redis 异步回收，避免大 key 阻塞。
+const liveDataCleanupTTL = 1 * time.Second
+
+// CleanupLiveData 清理该轮次的 Redis 热数据（分组/成员/机器人），保留结算快照和 MongoDB 数据。
+// 用于周期排行榜历史轮次的延迟清理（清理窗口 = 1 个周期）。
+// 不删除 rank:settled（有 TTL 自行过期）和 MongoDB（永久保留）。
+func (st *Store) CleanupLiveData(groups []*Group) {
+	if !st.available() {
+		return
+	}
+	if len(groups) == 0 {
+		if loaded, err := st.LoadGroups(); err == nil {
+			groups = loaded
+		}
+	}
+	st.rdb.Expire(rediskeys.GetRankMetaKey(st.bizId), liveDataCleanupTTL)
+	st.rdb.Expire(rediskeys.GetRankGroupsKey(st.bizId), liveDataCleanupTTL)
+	st.rdb.Expire(rediskeys.GetRankMembersKey(st.bizId), liveDataCleanupTTL)
+	st.rdb.Expire(rediskeys.GetRankMongoCheckedKey(st.bizId), liveDataCleanupTTL)
+	for _, g := range groups {
+		if g == nil {
+			continue
+		}
+		st.rdb.Expire(rediskeys.GetRankRobotsKey(st.bizId, g.GroupID), liveDataCleanupTTL)
+		st.rdb.Expire(rediskeys.GetRankRobotInfosKey(st.bizId, g.GroupID), liveDataCleanupTTL)
+	}
+}
+
 func (st *Store) CleanupAll(groups []*Group) {
 	if !st.available() {
 		return
@@ -484,6 +512,120 @@ func (st *Store) queueDeleteAllDocIDs(groups []*Group) {
 }
 
 // --- 奖励领取记录 ---
+
+// atomicClaimScript atomically claims a reward for a user.
+// It handles the null cache sentinel ("\x00") transparently:
+//
+//	KEYS[1]: rank:claims hash key
+//	ARGV[1]: userID field name
+//	ARGV[2]: current timestamp (string)
+//	ARGV[3]: null sentinel value
+//
+// Returns {0, now} on first claim, {1, existing_timestamp} if already claimed.
+const atomicClaimScript = `
+local cur = redis.call('HGET', KEYS[1], ARGV[1])
+if cur and cur ~= ARGV[3] then
+    return {1, cur}
+end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+return {0, ARGV[2]}
+`
+
+// AtomicClaim atomically marks a user's reward as claimed.
+// Returns claimed=false on first claim (caller should distribute reward),
+// or claimed=true with the recorded timestamp if already claimed.
+// Uses a Lua script for Redis atomicity and falls back to MongoDB to handle Redis eviction.
+func (st *Store) AtomicClaim(userID int64, now int64) (claimed bool, claimTime int64, err error) {
+	uidStr := strconv.FormatInt(userID, 10)
+	nowStr := strconv.FormatInt(now, 10)
+
+	if !st.available() {
+		if st.hasMongo() {
+			ct, found, e := st.dao.GetClaim(st.bizId, userID)
+			if e != nil {
+				return false, 0, e
+			}
+			if found {
+				return true, ct, nil
+			}
+			if e = st.dao.SaveClaim(st.bizId, userID, now); e != nil {
+				return false, 0, e
+			}
+		}
+		return false, now, nil
+	}
+
+	claimsKey := rediskeys.GetRankClaimsKey(st.bizId)
+
+	// Atomic Redis check-and-set; handles null sentinel and concurrent claims.
+	result, evalErr := st.rdb.Eval("", atomicClaimScript, []string{claimsKey}, uidStr, nowStr, nullCacheEntry)
+	if evalErr != nil {
+		return false, 0, evalErr
+	}
+
+	ret, ok := result.([]interface{})
+	if !ok || len(ret) < 2 {
+		return false, 0, fmt.Errorf("AtomicClaim: unexpected result type %T", result)
+	}
+	claimedInt, _ := ret[0].(int64)
+	ctStr, _ := ret[1].(string)
+	ct, _ := strconv.ParseInt(ctStr, 10, 64)
+
+	if claimedInt == 1 {
+		return true, ct, nil
+	}
+
+	// Lua said first claim — verify against MongoDB to handle the Redis eviction case
+	// (Redis was flushed after a previous successful claim).
+	if st.hasMongo() {
+		mongoTime, found, mongoErr := st.dao.GetClaim(st.bizId, userID)
+		if mongoErr != nil {
+			return false, 0, mongoErr
+		}
+		if found {
+			// Prior claim exists in MongoDB; Redis was evicted. Restore the cache entry.
+			st.rdb.HSet(claimsKey, uidStr, strconv.FormatInt(mongoTime, 10))
+			return true, mongoTime, nil
+		}
+		// Genuinely first claim — persist synchronously so Redis eviction can't cause a duplicate.
+		if e := st.dao.SaveClaim(st.bizId, userID, now); e != nil {
+			return false, 0, e
+		}
+	}
+	return false, now, nil
+}
+
+// TryLockSettle tries to atomically acquire a per-group settle lock.
+// Returns true if this node won the race to settle the group.
+// TTL of 10 minutes handles the case where the winning node crashes before completing.
+func (st *Store) TryLockSettle(groupID int32) bool {
+	if !st.available() {
+		return true
+	}
+	lockKey := fmt.Sprintf("rank:settle:{%s}:%d", st.bizId, groupID)
+	locked, err := st.rdb.SetNX(lockKey, "1", 10*time.Minute)
+	if err != nil {
+		zaplog.LoggerSugar.Warnf("rank engine: TryLockSettle bizId=%s group=%d: %v", st.bizId, groupID, err)
+		return true // treat as locked on error so settle still runs
+	}
+	return locked
+}
+
+// TryLockRobotTick tries to acquire the per-second robot tick lock for this service.
+// Returns true if this node should run the robot tick for this second.
+// Using nowMs/1000 as the tick key means each wall-clock second has a distinct lock.
+func (st *Store) TryLockRobotTick(nowMs int64) bool {
+	if !st.available() {
+		return true
+	}
+	tickSec := nowMs / 1000
+	lockKey := fmt.Sprintf("rank:robot_tick:{%s}:%d", st.bizId, tickSec)
+	locked, err := st.rdb.SetNX(lockKey, "1", 3*time.Second)
+	if err != nil {
+		return true // treat as unlocked on error so robots still progress
+	}
+	return locked
+}
 
 func (st *Store) SetClaim(userID int64, claimTime int64) error {
 	if !st.available() {

@@ -4,7 +4,17 @@ import (
 	"fmt"
 
 	commonrank "common/rank"
+	"socialserver/internal/rank/periodic"
 )
+
+const (
+	RankTypeOnce     int32 = 1
+	RankTypePeriodic int32 = 2
+)
+
+// PeriodicState 和 RoundInfo 为类型别名，外部代码无需直接导入 periodic 子包。
+type PeriodicState = periodic.PeriodicState
+type RoundInfo = periodic.RoundInfo
 
 // BizType 业务类型标识（周期排行榜类型）。
 // 支持的业务类型由 RankBase.json 配置文件动态定义，无需在代码中硬编码。

@@ -1,0 +1,1217 @@
+
+<title>排行榜系统</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --bg:         #F1F5FB;
+  --surface:    #FFFFFF;
+  --surface-2:  #E8EEF8;
+  --border:     #C6D3E8;
+  --text:       #0E1A2B;
+  --muted:      #556B8A;
+  --accent:     #2C7AF0;
+  --accent-dim: #D6E5FF;
+  --ok:         #16A34A;
+  --ok-bg:      #DCFCE7;
+  --warn:       #D97706;
+  --warn-bg:    #FEF3C7;
+  --err:        #DC2626;
+  --err-bg:     #FEE2E2;
+  --code-bg:    #EEF2FA;
+  --shadow:     0 1px 4px rgba(14,26,43,.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:         #0B1422;
+    --surface:    #112035;
+    --surface-2:  #162A44;
+    --border:     #1D3556;
+    --text:       #DDE6F4;
+    --muted:      #6A88B0;
+    --accent:     #4A9BFF;
+    --accent-dim: #0D2550;
+    --ok:         #4ADE80;
+    --ok-bg:      #052C14;
+    --warn:       #FBB040;
+    --warn-bg:    #2C1A00;
+    --err:        #F87171;
+    --err-bg:     #2C0A0A;
+    --code-bg:    #0D1C30;
+    --shadow:     0 1px 6px rgba(0,0,0,.4);
+  }
+}
+:root[data-theme="dark"] {
+  --bg:         #0B1422;
+  --surface:    #112035;
+  --surface-2:  #162A44;
+  --border:     #1D3556;
+  --text:       #DDE6F4;
+  --muted:      #6A88B0;
+  --accent:     #4A9BFF;
+  --accent-dim: #0D2550;
+  --ok:         #4ADE80;
+  --ok-bg:      #052C14;
+  --warn:       #FBB040;
+  --warn-bg:    #2C1A00;
+  --err:        #F87171;
+  --err-bg:     #2C0A0A;
+  --code-bg:    #0D1C30;
+  --shadow:     0 1px 6px rgba(0,0,0,.4);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.7;
+  min-height: 100vh;
+}
+
+/* ── Layout ── */
+.layout {
+  display: grid;
+  grid-template-columns: 224px 1fr;
+  grid-template-areas: "nav main";
+  max-width: 1100px;
+  margin: 0 auto;
+  gap: 0 40px;
+  padding: 0 24px 80px;
+}
+
+@media (max-width: 760px) {
+  .layout { grid-template-columns: 1fr; grid-template-areas: "main"; padding: 0 16px 60px; }
+  .toc { display: none; }
+}
+
+/* ── TOC ── */
+.toc {
+  grid-area: nav;
+  position: sticky;
+  top: 32px;
+  align-self: start;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  padding: 28px 0;
+  font-size: 13px;
+}
+
+.toc-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 14px;
+  padding-left: 4px;
+}
+
+.toc a {
+  display: block;
+  color: var(--muted);
+  text-decoration: none;
+  padding: 4px 8px;
+  border-radius: 5px;
+  transition: color .15s, background .15s;
+  line-height: 1.45;
+}
+.toc a:hover { color: var(--text); background: var(--surface-2); }
+.toc a.sub { padding-left: 18px; font-size: 12.5px; }
+
+/* ── Main ── */
+.main { grid-area: main; padding-top: 32px; }
+
+/* ── Header ── */
+.doc-header { margin-bottom: 48px; padding-bottom: 28px; border-bottom: 1px solid var(--border); }
+
+.doc-eyebrow {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 10px;
+}
+
+.doc-title {
+  font-family: 'Sora', sans-serif;
+  font-size: clamp(26px, 4vw, 36px);
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.2;
+  text-wrap: balance;
+  margin-bottom: 12px;
+}
+
+.doc-meta {
+  display: flex;
+  gap: 20px;
+  font-size: 13px;
+  color: var(--muted);
+  flex-wrap: wrap;
+}
+
+/* ── Sections ── */
+.section { margin-bottom: 52px; }
+
+h2 {
+  font-family: 'Sora', sans-serif;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 16px;
+  padding-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+h2 .section-num {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border-radius: 4px;
+  padding: 2px 7px;
+  flex-shrink: 0;
+}
+
+h3 {
+  font-family: 'Sora', sans-serif;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 24px 0 10px;
+}
+
+p { margin-bottom: 12px; color: var(--text); max-width: 68ch; }
+p:last-child { margin-bottom: 0; }
+
+/* ── Arch diagram ── */
+.arch {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  align-items: center;
+  margin: 24px 0;
+}
+
+.arch-layer {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 28px;
+  width: 100%;
+  max-width: 520px;
+  text-align: center;
+  box-shadow: var(--shadow);
+}
+
+.arch-layer .layer-title {
+  font-family: 'Sora', sans-serif;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.arch-layer .layer-sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 3px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.arch-arrow {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.arch-arrow svg { color: var(--accent); }
+
+.arch-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: .04em;
+  color: var(--accent);
+  background: var(--accent-dim);
+  padding: 2px 8px;
+  border-radius: 3px;
+}
+
+/* ── Flow diagram ── */
+.flow {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px 24px;
+  margin: 16px 0;
+  box-shadow: var(--shadow);
+  overflow-x: auto;
+}
+
+.flow-title {
+  font-family: 'Sora', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 16px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+
+.flow-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  position: relative;
+  padding-left: 24px;
+}
+
+.flow-steps::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  top: 10px;
+  bottom: 10px;
+  width: 2px;
+  background: var(--border);
+}
+
+.flow-step {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  position: relative;
+  padding: 6px 0;
+}
+
+.flow-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--accent);
+  flex-shrink: 0;
+  margin-top: 5px;
+  position: absolute;
+  left: -20px;
+}
+
+.flow-dot.done { background: var(--ok); border-color: var(--ok); }
+.flow-dot.warn { background: var(--warn); border-color: var(--warn); }
+
+.flow-step-content { flex: 1; }
+.flow-step-title { font-size: 14px; font-weight: 500; color: var(--text); }
+.flow-step-desc { font-size: 12.5px; color: var(--muted); margin-top: 2px; font-family: 'JetBrains Mono', monospace; }
+
+/* ── Sequence diagram ── */
+.seq {
+  overflow-x: auto;
+  margin: 16px 0;
+}
+
+.seq-inner {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  min-width: 580px;
+  box-shadow: var(--shadow);
+}
+
+.seq-actors {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.seq-actor {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px 10px;
+  text-align: center;
+  font-family: 'Sora', sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.seq-rows { display: flex; flex-direction: column; gap: 10px; }
+
+.seq-row {
+  display: grid;
+  grid-template-columns: 1fr 24px 1fr 24px 1fr;
+  align-items: center;
+  gap: 0;
+  font-size: 12.5px;
+  min-height: 32px;
+}
+
+.seq-cell { padding: 0 6px; }
+.seq-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  font-size: 16px;
+  line-height: 1;
+}
+.seq-arrow.back { color: var(--muted); }
+
+.seq-msg {
+  background: var(--accent-dim);
+  border-radius: 5px;
+  padding: 5px 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  color: var(--accent);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.seq-msg.resp {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.seq-msg.warn { background: var(--warn-bg); color: var(--warn); }
+.seq-msg.ok   { background: var(--ok-bg); color: var(--ok); }
+
+.seq-divider {
+  grid-column: 1 / -1;
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+  opacity: .5;
+}
+
+.seq-note {
+  grid-column: 1 / -1;
+  background: var(--surface-2);
+  border-left: 3px solid var(--warn);
+  border-radius: 0 5px 5px 0;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* ── Tables ── */
+.table-wrap { overflow-x: auto; margin: 16px 0; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+thead th {
+  background: var(--surface-2);
+  color: var(--muted);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+tbody td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover td { background: var(--surface-2); }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: var(--shadow);
+}
+
+/* ── Chips / badges ── */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.chip-ok   { background: var(--ok-bg);   color: var(--ok);   }
+.chip-warn { background: var(--warn-bg); color: var(--warn); }
+.chip-err  { background: var(--err-bg);  color: var(--err);  }
+.chip-info { background: var(--accent-dim); color: var(--accent); }
+
+/* ── Code ── */
+code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12.5px;
+  background: var(--code-bg);
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--accent);
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 18px;
+  overflow-x: auto;
+  margin: 12px 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text);
+}
+
+pre .kw  { color: var(--accent); }
+pre .cm  { color: var(--muted); font-style: italic; }
+pre .str { color: var(--ok); }
+pre .num { color: var(--warn); }
+
+/* ── Callout ── */
+.callout {
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 14px 0;
+  font-size: 13.5px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.callout-icon { flex-shrink: 0; font-size: 16px; line-height: 1.6; }
+.callout.ok   { background: var(--ok-bg);   border-left: 3px solid var(--ok); }
+.callout.warn { background: var(--warn-bg); border-left: 3px solid var(--warn); }
+.callout.err  { background: var(--err-bg);  border-left: 3px solid var(--err); }
+.callout.info { background: var(--accent-dim); border-left: 3px solid var(--accent); }
+
+/* ── Gap list ── */
+.gap-list { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
+
+.gap-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: start;
+  box-shadow: var(--shadow);
+}
+
+.gap-num {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--muted);
+  padding-top: 2px;
+}
+
+.gap-title { font-size: 13.5px; font-weight: 500; }
+.gap-desc  { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
+
+/* ── Storage table ── */
+.store-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 16px 0;
+}
+
+@media (max-width: 600px) { .store-grid { grid-template-columns: 1fr; } }
+
+.store-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  box-shadow: var(--shadow);
+}
+
+.store-card h4 {
+  font-family: 'Sora', sans-serif;
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.store-card ul {
+  padding-left: 16px;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.8;
+}
+
+.divider { height: 1px; background: var(--border); margin: 32px 0; }
+</style>
+
+<div class="layout">
+
+<!-- ── TOC ── -->
+<nav class="toc">
+  <div class="toc-label">目录</div>
+  <a href="#overview">1. 系统架构</a>
+  <a href="#types">2. 排行榜类型</a>
+  <a href="#interfaces">3. 接口清单</a>
+  <a href="#interfaces" class="sub">C-S 接口（客户端）</a>
+  <a href="#ss-interfaces" class="sub">S-S 接口（内部）</a>
+  <a href="#flow-once">4. 一次性排行榜流程</a>
+  <a href="#flow-periodic">5. 周期排行榜流程</a>
+  <a href="#claim-closure">6. 奖励领取闭环</a>
+  <a href="#gaps">7. 变更记录</a>
+  <a href="#multinode">8. 多节点安全</a>
+  <a href="#storage">9. 数据存储策略</a>
+</nav>
+
+<!-- ── Main ── -->
+<main class="main">
+
+  <header class="doc-header">
+    <div class="doc-eyebrow">SocialServer · 技术规范</div>
+    <h1 class="doc-title">排行榜系统完整流程</h1>
+    <div class="doc-meta">
+      <span>版本 1.1 · 2026-08-21</span>
+      <span>覆盖一次性排行榜 + 周期排行榜</span>
+    </div>
+  </header>
+
+  <!-- ── 1. 架构 ── -->
+  <section class="section" id="overview">
+    <h2><span class="section-num">01</span> 系统架构</h2>
+
+    <p>排行榜系统分三层：客户端通过 HTTP+Proto2 与 GameServer 通信；GameServer 将请求转换为 gRPC 调用 SocialServer；SocialServer 持有排行榜核心逻辑，数据存于 Redis（热）和 MongoDB（冷）。</p>
+
+    <div class="arch">
+      <div class="arch-layer">
+        <div class="layer-title">客户端</div>
+        <div class="layer-sub">iOS / Android / PC</div>
+      </div>
+      <div class="arch-arrow">
+        <svg width="2" height="18" viewBox="0 0 2 18"><line x1="1" y1="0" x2="1" y2="18" stroke="currentColor" stroke-width="2"/></svg>
+        <div class="arch-label">HTTP · Proto2 C-S消息</div>
+        <svg width="2" height="18" viewBox="0 0 2 18"><line x1="1" y1="0" x2="1" y2="18" stroke="currentColor" stroke-width="2"/></svg>
+      </div>
+      <div class="arch-layer">
+        <div class="layer-title">GameServer</div>
+        <div class="layer-sub">gameserver/internal/router/http/internal/rank/</div>
+      </div>
+      <div class="arch-arrow">
+        <svg width="2" height="18" viewBox="0 0 2 18"><line x1="1" y1="0" x2="1" y2="18" stroke="currentColor" stroke-width="2"/></svg>
+        <div class="arch-label">gRPC · Proto3 S-S消息 · actId 一致性哈希</div>
+        <svg width="2" height="18" viewBox="0 0 2 18"><line x1="1" y1="0" x2="1" y2="18" stroke="currentColor" stroke-width="2"/></svg>
+      </div>
+      <div class="arch-layer">
+        <div class="layer-title">SocialServer</div>
+        <div class="layer-sub">internal/rank/engine · Manager · DAO</div>
+      </div>
+      <div class="arch-arrow">
+        <svg width="2" height="18" viewBox="0 0 2 18"><line x1="1" y1="0" x2="1" y2="18" stroke="currentColor" stroke-width="2"/></svg>
+        <div class="arch-label">Redis (热数据) + MongoDB (持久化)</div>
+        <svg width="2" height="18" viewBox="0 0 2 18"><line x1="1" y1="0" x2="1" y2="18" stroke="currentColor" stroke-width="2"/></svg>
+      </div>
+      <div class="arch-layer" style="border-color: var(--border); background: var(--surface-2);">
+        <div class="layer-title" style="color:var(--muted)">Redis + MongoDB</div>
+        <div class="layer-sub">rank:meta · rank:groups · rank:settled · rank_config · rank_settled</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 2. 类型 ── -->
+  <section class="section" id="types">
+    <h2><span class="section-num">02</span> 排行榜类型</h2>
+
+    <div class="store-grid">
+      <div class="store-card">
+        <h4><span class="chip chip-info">RANK_TYPE_ONCE = 1</span></h4>
+        <p style="font-size:13px; margin-bottom:8px;">一次性排行榜：活动有效期内单轮结算。现有业务（balloon / egg / camper_competition）均为此类型。</p>
+        <ul>
+          <li>BizId 格式：<code>{bizType}_{actID}</code></li>
+          <li>到期后自动结算，或 GM 手动触发</li>
+          <li>结算后数据永久保留在 MongoDB</li>
+        </ul>
+      </div>
+      <div class="store-card">
+        <h4><span class="chip chip-warn">RANK_TYPE_PERIODIC = 2</span></h4>
+        <p style="font-size:13px; margin-bottom:8px;">周期排行榜：有效期内按 <code>cycleDays</code> 天数滚动开启多轮，每轮结束自动推进下一轮。</p>
+        <ul>
+          <li>BizId 格式：<code>{bizType}_{actID}_r{N}</code></li>
+          <li>logicalKey（路由键）：<code>{bizType}:{actID}</code> 始终指向当前轮</li>
+          <li>Redis 热数据保留 1 个周期；结算快照保留 2 个周期</li>
+          <li>MongoDB 数据永久保留</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 3. 接口清单 ── -->
+  <section class="section" id="interfaces">
+    <h2><span class="section-num">03</span> 接口清单</h2>
+
+    <h3>C-S 接口（客户端 → GameServer）</h3>
+    <p>定义在 <code>Proto_MergeHope/Protobuf/c_s/msg_rank.proto</code>，由 GameServer 的 <code>rank/rank.go</code> 处理后转 S-S 调用。</p>
+
+    <div class="card table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>消息 ID</th>
+            <th>Request 字段</th>
+            <th>Response 字段</th>
+            <th>状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>CS_RANK_UPSERT_SCORE</code></td>
+            <td>bizType, actId, userId, totalScore, avatarInfo</td>
+            <td>msgCode, myRank</td>
+            <td><span class="chip chip-ok">✓ 完整</span></td>
+          </tr>
+          <tr>
+            <td><code>CS_RANK_LIST</code></td>
+            <td>bizType, actId, start, end, userId, <strong>round</strong></td>
+            <td>msgCode, members[], myRank, <strong>current_round</strong></td>
+            <td><span class="chip chip-ok">✓ 完整</span></td>
+          </tr>
+          <tr>
+            <td><code>CS_RANK_MYRANK</code></td>
+            <td>bizType, actId, userId, <strong>round</strong></td>
+            <td>msgCode, data, settleStage</td>
+            <td><span class="chip chip-ok">✓ 完整</span></td>
+          </tr>
+          <tr>
+            <td><code>CS_RANK_CLAIM_REWARD</code></td>
+            <td>bizType, actId, userId, <strong>round</strong></td>
+            <td>msgCode, claimed, claimTime<br><span style="color:var(--ok);font-size:12px">claimed: false=首次发奖，true=重复跳过</span></td>
+            <td><span class="chip chip-ok">✓ 完整</span></td>
+          </tr>
+          <tr>
+            <td><code>CS_RANK_CLAIM_STATUS</code></td>
+            <td>bizType, actId, userId, <strong>round</strong></td>
+            <td>msgCode, claimed, claimTime</td>
+            <td><span class="chip chip-ok">✓ 完整</span></td>
+          </tr>
+          <tr>
+            <td><code>CS_RANK_ROUNDS</code></td>
+            <td>bizType, actId, userId</td>
+            <td>msgCode, currentRound, rounds[]</td>
+            <td><span class="chip chip-ok">✓ 完整</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 id="ss-interfaces">S-S 接口（GameServer → SocialServer，gRPC）</h3>
+    <p>定义在 <code>msg_socail_s2s.proto</code>，由 <code>socialserver/internal/router/rpc/social/rank_handler.go</code> 处理。</p>
+
+    <div class="card table-wrap">
+      <table>
+        <thead>
+          <tr><th>RPC</th><th>说明</th><th>round 支持</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>S2SUpsertScore</code></td><td>更新用户积分，返回当前排名及 <code>currentRound</code>；周期榜校验 <code>round</code>，轮次不符返回 <code>CODE_RANK_ROUND_CHANGED</code></td><td><span class="chip chip-ok">✓</span></td></tr>
+          <tr><td><code>S2SGetRankList</code></td><td>查询分组榜单（当前轮或历史轮）</td><td><span class="chip chip-ok">✓</span></td></tr>
+          <tr><td><code>S2SGetMemberRank</code></td><td>查询用户排名快照</td><td><span class="chip chip-ok">✓</span></td></tr>
+          <tr><td><code>S2SSettle</code></td><td>GM 手动触发结算</td><td>—</td></tr>
+          <tr><td><code>S2SGetRewardUsers</code></td><td>获取可领奖用户 ID 列表</td><td><span class="chip chip-ok">✓</span></td></tr>
+          <tr><td><code>S2SClaimReward</code></td><td>原子记录领取，防重复发奖</td><td><span class="chip chip-ok">✓</span></td></tr>
+          <tr><td><code>S2SGetClaimStatus</code></td><td>查询领取状态</td><td><span class="chip chip-ok">✓</span></td></tr>
+          <tr><td><code>S2SGetRankRounds</code></td><td>查询活动所有轮次摘要</td><td>专用</td></tr>
+          <tr><td><code>S2SCreateRankConfig</code></td><td>GM 创建活动配置（含 rankType/cycleDays）</td><td>—</td></tr>
+          <tr><td><code>S2SGetRankConfig</code></td><td>查询配置（含当前轮次）</td><td>—</td></tr>
+          <tr><td><code>S2SListRankConfigs</code></td><td>列举所有活动配置</td><td>—</td></tr>
+          <tr><td><code>S2SUpdateRankConfig</code> / <code>S2SDeleteRankConfig</code></td><td>GM 修改 / 删除活动</td><td>—</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── 4. 一次性流程 ── -->
+  <section class="section" id="flow-once">
+    <h2><span class="section-num">04</span> 一次性排行榜流程</h2>
+
+    <div class="seq">
+      <div class="seq-inner">
+        <div class="seq-actors">
+          <div class="seq-actor">客户端</div>
+          <div class="seq-actor">GameServer</div>
+          <div class="seq-actor">SocialServer</div>
+        </div>
+        <div class="seq-rows">
+
+          <div class="seq-row">
+            <div class="seq-cell" style="color:var(--muted);font-size:12px">GM 创建活动</div>
+            <div class="seq-arrow">→</div>
+            <div></div>
+            <div class="seq-arrow">→</div>
+            <div class="seq-msg">S2SCreateRankConfig<br>rankType=ONCE</div>
+          </div>
+
+          <div class="seq-row"><div class="seq-divider"></div></div>
+          <div class="seq-row">
+            <div class="seq-note">活动开启期间（openTime → closeTime）</div>
+          </div>
+
+          <div class="seq-row">
+            <div class="seq-msg">UpsertScore</div>
+            <div class="seq-arrow">→</div>
+            <div></div>
+            <div class="seq-arrow">→</div>
+            <div class="seq-msg">S2SUpsertScore</div>
+          </div>
+          <div class="seq-row">
+            <div class="seq-msg resp">myRank{rank,score}</div>
+            <div class="seq-arrow back">←</div>
+            <div></div>
+            <div class="seq-arrow back">←</div>
+            <div class="seq-msg resp">snapshot</div>
+          </div>
+
+          <div class="seq-row">
+            <div class="seq-msg">GetRankList</div>
+            <div class="seq-arrow">→</div>
+            <div></div>
+            <div class="seq-arrow">→</div>
+            <div class="seq-msg">S2SGetRankList (round=0)</div>
+          </div>
+
+          <div class="seq-row"><div class="seq-divider"></div></div>
+          <div class="seq-row">
+            <div class="seq-note">closeTime 到达 → SocialServer 自动结算（tickServices → Settle）</div>
+          </div>
+
+          <div class="seq-row">
+            <div class="seq-msg">GetMyRank</div>
+            <div class="seq-arrow">→</div>
+            <div></div>
+            <div class="seq-arrow">→</div>
+            <div class="seq-msg">S2SGetMemberRank</div>
+          </div>
+          <div class="seq-row">
+            <div class="seq-msg resp">settleStage=1</div>
+            <div class="seq-arrow back">←</div>
+            <div></div>
+            <div class="seq-arrow back">←</div>
+            <div class="seq-msg resp">settleStage=1</div>
+          </div>
+
+          <div class="seq-row">
+            <div class="seq-note" style="border-color:var(--ok)">客户端展示"领取奖励"按钮（settleStage=1 且用户在奖励名单内）</div>
+          </div>
+
+          <div class="seq-row">
+            <div class="seq-msg">ClaimReward(round)</div>
+            <div class="seq-arrow">→</div>
+            <div></div>
+            <div class="seq-arrow">→</div>
+            <div class="seq-msg">S2SClaimReward</div>
+          </div>
+          <div class="seq-row">
+            <div class="seq-msg resp">claimed=false → 发奖</div>
+            <div class="seq-arrow back">←</div>
+            <div></div>
+            <div class="seq-arrow back">←</div>
+            <div class="seq-msg resp">claimed=false (首次)</div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 5. 周期流程 ── -->
+  <section class="section" id="flow-periodic">
+    <h2><span class="section-num">05</span> 周期排行榜流程</h2>
+
+    <p>以 3 轮活动为例，用户在第 1 轮参与、第 2 轮离线、第 3 轮回归。</p>
+
+    <div class="seq">
+      <div class="seq-inner">
+        <div class="seq-actors">
+          <div class="seq-actor">客户端</div>
+          <div class="seq-actor">GameServer</div>
+          <div class="seq-actor">SocialServer</div>
+        </div>
+        <div class="seq-rows">
+
+          <div class="seq-row">
+            <div style="color:var(--muted);font-size:12px">GM 创建活动</div>
+            <div class="seq-arrow">→</div>
+            <div></div>
+            <div class="seq-arrow">→</div>
+            <div class="seq-msg">S2SCreateRankConfig<br>rankType=PERIODIC, cycleDays=7</div>
+          </div>
+
+          <div class="seq-row">
+            <div class="seq-note">Server: 注册第 1 轮 BizId=balloon_101_r1，保存 PeriodicState 到 MongoDB</div>
+          </div>
+
+          <div class="seq-row"><div class="seq-divider"></div></div>
+          <div class="seq-row"><div class="seq-note">— 第 1 轮（用户在线）—</div></div>
+
+          <div class="seq-row">
+            <div class="seq-msg">UpsertScore / GetRankList</div>
+            <div class="seq-arrow">→</div>
+            <div></div>
+            <div class="seq-arrow">→</div>
+            <div class="seq-msg">round=currentRound (当前轮=r1)</div>
+          </div>
+
+          <div class="seq-row">
+            <div></div>
+            <div class="seq-arrow"></div>
+            <div class="seq-note" style="grid-column:3/6">若 round 与 CurrentRound 不符 → <code>CODE_RANK_ROUND_CHANGED</code> + currentRound 返回，GameServer 重同步后重试</div>
+          </div>
+
+          <div class="seq-row">
+            <div class="seq-note">第 1 轮到期：Server 自动结算 r1，推进到 r2，Redis settled TTL = 2×cycleDays，热数据 1×cycleDays 后清理</div>
+          </div>
+
+          <div class="seq-row"><div class="seq-divider"></div></div>
+          <div class="seq-row"><div class="seq-note">— 第 2 轮（用户离线）—</div></div>
+
+          <div class="seq-row">
+            <div class="seq-note">第 2 轮到期：Server 自动结算 r2，推进到 r3</div>
+          </div>
+
+          <div class="seq-row"><div class="seq-divider"></div></div>
+          <div class="seq-row"><div class="seq-note">— 第 3 轮（用户回归）—</div></div>
+
+          <div class="seq-row">
+            <div class="seq-msg">GetRankRounds</div>
+            <div class="seq-arrow">→</div>
+            <div></div>
+            <div class="seq-arrow">→</div>
+            <div class="seq-msg">S2SGetRankRounds</div>
+          </div>
+          <div class="seq-row">
+            <div class="seq-msg resp">rounds:[r1(settled),r2(settled),r3(current)]</div>
+            <div class="seq-arrow back">←</div>
+            <div></div>
+            <div class="seq-arrow back">←</div>
+            <div class="seq-msg resp">currentRound=3, rounds[]</div>
+          </div>
+
+          <div class="seq-row">
+            <div class="seq-msg">GetClaimStatus(round=1)</div>
+            <div class="seq-arrow">→</div>
+            <div></div>
+            <div class="seq-arrow">→</div>
+            <div class="seq-msg">S2SGetClaimStatus round=1</div>
+          </div>
+          <div class="seq-row">
+            <div class="seq-msg resp">claimed=false → 显示"领取第1轮奖励"</div>
+            <div class="seq-arrow back">←</div>
+            <div></div>
+            <div class="seq-arrow back">←</div>
+            <div class="seq-msg resp">claimed=false</div>
+          </div>
+
+          <div class="seq-row">
+            <div class="seq-msg">ClaimReward(round=1)</div>
+            <div class="seq-arrow">→</div>
+            <div></div>
+            <div class="seq-arrow">→</div>
+            <div class="seq-msg">S2SClaimReward round=1</div>
+          </div>
+          <div class="seq-row">
+            <div class="seq-msg ok">claimed=false → 客户端发第1轮奖励</div>
+            <div class="seq-arrow back">←</div>
+            <div></div>
+            <div class="seq-arrow back">←</div>
+            <div class="seq-msg resp">首次记录</div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 6. 领取闭环 ── -->
+  <section class="section" id="claim-closure">
+    <h2><span class="section-num">06</span> 奖励领取闭环设计</h2>
+
+    <div class="callout warn">
+      <div class="callout-icon">⚠</div>
+      <div><strong>核心问题：</strong>客户端负责发奖，但目前没有调用 <code>ClaimReward</code> 将领取状态写回服务端。<code>rank_claim</code> 表始终为空，导致任何"是否已领"查询均不可信。</div>
+    </div>
+
+    <h3>正确的领取语义</h3>
+    <p>将 <code>S2SClaimReward</code>（及对应 C-S 消息）设计为<strong>原子幂等锁</strong>：服务端先写，客户端后发。<code>claimed</code> 的含义改为"调用本次前是否已有记录"：</p>
+
+    <pre><span class="kw">// claimed = false</span> → 首次领取，服务端刚写入记录 → 客户端<span class="str">必须</span>执行发奖
+<span class="kw">// claimed = true</span>  → 之前已有记录（重复调用） → 客户端<span class="str">跳过</span>发奖，避免重复</pre>
+
+    <h3>完整的客户端领取流程</h3>
+    <div class="flow">
+      <div class="flow-title">进入排行榜活动入口时</div>
+      <div class="flow-steps">
+        <div class="flow-step">
+          <div class="flow-dot done"></div>
+          <div class="flow-step-content">
+            <div class="flow-step-title">调用 GetRankRounds</div>
+            <div class="flow-step-desc">获取全部轮次列表及 settled / current 标志</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-dot done"></div>
+          <div class="flow-step-content">
+            <div class="flow-step-title">对每个已结算轮次，调用 GetClaimStatus(round=N)</div>
+            <div class="flow-step-desc">批量查询哪些轮次尚未领取</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-dot"></div>
+          <div class="flow-step-content">
+            <div class="flow-step-title">展示待领取奖励列表</div>
+            <div class="flow-step-desc">只展示 claimed=false 且用户在奖励名单内的轮次</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-dot"></div>
+          <div class="flow-step-content">
+            <div class="flow-step-title">用户点击领取 → 调用 ClaimReward(round=N)</div>
+            <div class="flow-step-desc">服务端原子写入；响应 claimed=false 才发奖；claimed=true 说明已领，跳过</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout ok">
+      <div class="callout-icon">✓</div>
+      <div>服务端 <code>S2SClaimReward</code> 已实现原子写（MongoDB upsert $setOnInsert），多次调用安全幂等。客户端只需保证先调此接口，再执行实际发奖逻辑即可闭环。</div>
+    </div>
+  </section>
+
+  <!-- ── 7. 变更记录 ── -->
+  <section class="section" id="gaps">
+    <h2><span class="section-num">07</span> 变更记录</h2>
+
+    <div class="gap-list">
+
+      <div class="gap-item">
+        <div class="gap-num">#1</div>
+        <div>
+          <div class="gap-title">PBClaimRewardRequest 新增 round 字段</div>
+          <div class="gap-desc">已在 msg_rank.proto 加 <code>optional int32 round = 4;</code>，GameServer ClaimReward handler 透传 Round</div>
+        </div>
+        <span class="chip chip-ok">✓ 已修复</span>
+      </div>
+
+      <div class="gap-item">
+        <div class="gap-num">#2</div>
+        <div>
+          <div class="gap-title">PBClaimRewardResponse.claimed 语义已修正</div>
+          <div class="gap-desc">service.ClaimReward 和 ClaimHistoricalReward 统一：首次 → <code>false</code>（客户端发奖），已领 → <code>true</code>（跳过）</div>
+        </div>
+        <span class="chip chip-ok">✓ 已修复</span>
+      </div>
+
+      <div class="gap-item">
+        <div class="gap-num">#3</div>
+        <div>
+          <div class="gap-title">PBGetRankListRequest / PBGetMyRankRequest 新增 round 字段</div>
+          <div class="gap-desc">两条 proto 消息均已加 round 字段，GameServer handler 透传</div>
+        </div>
+        <span class="chip chip-ok">✓ 已修复</span>
+      </div>
+
+      <div class="gap-item">
+        <div class="gap-num">#4</div>
+        <div>
+          <div class="gap-title">GetClaimStatus GameServer handler 已透传 round</div>
+          <div class="gap-desc">rank.go 构造 S-S 请求时填充 Round 字段，历史轮次查询正常路由</div>
+        </div>
+        <span class="chip chip-ok">✓ 已修复</span>
+      </div>
+
+      <div class="gap-item">
+        <div class="gap-num">#5</div>
+        <div>
+          <div class="gap-title">新增 GetRankRounds C-S 接口</div>
+          <div class="gap-desc">msg_rank.proto 新增 PBGetRankRoundsRequest/Response（ID 10000505/11000505），GameServer 新增 handler + pool + client.go + /rounds 路由</div>
+        </div>
+        <span class="chip chip-ok">✓ 已修复</span>
+      </div>
+
+      <div class="gap-item">
+        <div class="gap-num">#6</div>
+        <div>
+          <div class="gap-title">GetRankList 响应新增 current_round</div>
+          <div class="gap-desc">S-S <code>PBS2SGetRankListResponse</code> 加 <code>current_round = 5</code>，SocialServer handler 从 PeriodicState 读取并填充（一次性榜固定为 1）；C-S <code>PBGetRankListResponse</code> 加 <code>current_round = 4</code>，GameServer handler 透传</div>
+        </div>
+        <span class="chip chip-ok">✓ 已修复</span>
+      </div>
+
+      <div class="gap-item">
+        <div class="gap-num">#7</div>
+        <div>
+          <div class="gap-title">积分上报协议新增 round / currentRound 字段</div>
+          <div class="gap-desc">
+            <code>PBS2SUpsertScoreRequest</code> 新增 <code>int32 round = 7</code>；<code>PBS2SUpsertScoreResponse</code> 新增 <code>int32 currentRound = 3</code>。
+            C-S 侧 <code>PBUpsertScoreRequest</code> 新增 <code>optional int32 round = 6</code>；<code>PBUpsertScoreResponse</code> 新增 <code>optional int32 currentRound = 3</code>。
+          </div>
+        </div>
+        <span class="chip chip-ok">✓ 已修复</span>
+      </div>
+
+      <div class="gap-item">
+        <div class="gap-num">#8</div>
+        <div>
+          <div class="gap-title">周期排行榜轮次边界竞态（CODE_RANK_ROUND_CHANGED = 105）</div>
+          <div class="gap-desc">
+            轮次切换边界时，GameServer 仍可能用旧 round 发送积分，若不校验会写入新轮 Service。<br>
+            修复：<code>S2SUpsertScore</code> 在 engine 调用前校验 <code>req.Round</code>，若与 <code>PeriodicState.CurrentRound</code> 不符则直接返回 <code>CODE_RANK_ROUND_CHANGED</code>，
+            响应中携带 <code>CurrentRound</code> 供 GameServer 重新同步本地缓存后重试。
+            <code>round = 0</code> 时跳过校验（向后兼容旧客户端）。
+          </div>
+        </div>
+        <span class="chip chip-ok">✓ 已修复</span>
+      </div>
+
+      <div class="gap-item">
+        <div class="gap-num">#9</div>
+        <div>
+          <div class="gap-title">周期排行榜逻辑提取至 periodic/ 子包</div>
+          <div class="gap-desc">
+            原 <code>periodic_types.go</code> + <code>manager_periodic.go</code> 中的业务逻辑提取到 <code>internal/rank/periodic/</code>（<code>state.go</code> + <code>handler.go</code>）。
+            <code>timebounded/</code> 重命名为 <code>once/</code>，对应 <code>RankTypeOnce</code>。
+            <code>Manager</code> 通过 <code>periodic.ServiceRegistrar</code> 接口向 <code>Handler</code> 注入回调，打破循环依赖；
+            <code>PeriodicState</code>/<code>RoundInfo</code> 在 <code>types.go</code> 保留类型别名，外部代码零改动。
+          </div>
+        </div>
+        <span class="chip chip-warn">重构</span>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ── 8. 多节点安全修复 ── -->
+  <section class="section" id="multinode">
+    <h2><span class="section-num">08</span> 多节点安全修复</h2>
+    <p style="color:var(--muted);margin-bottom:1rem">以下 4 项 race condition 已修复，SocialServer 可安全部署多节点（无状态横向扩容）。</p>
+
+    <div class="gap-list">
+
+      <div class="gap-item">
+        <div class="gap-body">
+          <div class="gap-title">领取奖励并发重复（Critical）</div>
+          <div class="gap-desc">
+            原逻辑 <code>GetClaim + SetClaim</code> 非原子——两节点均读到"未领取"后各自写入，导致重复发奖。<br>
+            修复：<code>store.AtomicClaim</code> 使用 Lua 脚本将 HGET+HSET 合并为 Redis 原子操作，同时处理 null 哨兵；
+            Lua 返回"首次"后再同步查询 MongoDB，应对 Redis 被清空的极端场景，确保全链路幂等。
+          </div>
+        </div>
+        <span class="chip chip-ok">✓ 已修复</span>
+      </div>
+
+      <div class="gap-item">
+        <div class="gap-body">
+          <div class="gap-title">历史轮领取并发重复（Critical）</div>
+          <div class="gap-desc">
+            <code>ClaimHistoricalReward</code> 原逻辑直接 MongoDB <code>GetClaim + SaveClaim</code>，两节点同时读到"未找到"后各自写入。<br>
+            修复：改用 <code>dao.SaveClaimIfNotExists</code>（<code>$setOnInsert + upsert=true</code>），MongoDB 层原子保证只有一次插入成功。
+          </div>
+        </div>
+        <span class="chip chip-ok">✓ 已修复</span>
+      </div>
+
+      <div class="gap-item">
+        <div class="gap-body">
+          <div class="gap-title">并发分组结算（Critical）</div>
+          <div class="gap-desc">
+            <code>Settle</code> 循环仅以内存 Group.State 为守卫，两节点同时读到 GroupStateOpen 会各自调用 <code>SettleInstance</code>。<br>
+            修复：在调用 <code>SettleInstance</code> 前通过 <code>store.TryLockSettle(groupID)</code>（Redis SETNX，TTL 10 min）抢占每组结算锁，未抢到的节点直接跳过。
+          </div>
+        </div>
+        <span class="chip chip-ok">✓ 已修复</span>
+      </div>
+
+      <div class="gap-item">
+        <div class="gap-body">
+          <div class="gap-title">PeriodicState 跨节点陈旧（Critical）</div>
+          <div class="gap-desc">
+            <code>syncFromMongo</code> 仅在内存无状态时从 MongoDB 恢复，导致非推进节点的 <code>CurrentRound</code> 永久停留在初始轮次。<br>
+            修复：改为"若 MongoDB 的 CurrentRound 更大则强制覆盖内存状态"，每次 30 s 同步循环自动追齐最新轮次。
+          </div>
+        </div>
+        <span class="chip chip-ok">✓ 已修复</span>
+      </div>
+
+      <div class="gap-item">
+        <div class="gap-body">
+          <div class="gap-title">机器人 tick N× 倍速增长（High）</div>
+          <div class="gap-desc">
+            所有节点每秒均对同一组机器人执行 tick，积分增长速度等比于节点数。<br>
+            修复：<code>store.TryLockRobotTick(nowMs)</code>（Redis SETNX，key 含秒级时间戳，TTL 3 s）选出每秒执行节点；
+            其余节点该秒跳过 <code>tickAllRobots</code>。
+          </div>
+        </div>
+        <span class="chip chip-ok">✓ 已修复</span>
+      </div>
+
+    </div>
+  </section>
+  <section class="section" id="storage">
+    <h2><span class="section-num">09</span> 数据存储策略</h2>
+
+    <div class="store-grid">
+      <div class="store-card">
+        <h4>Redis（热数据）</h4>
+        <ul>
+          <li><code>rank:meta:{bizId}</code> — 活动基础信息</li>
+          <li><code>rank:groups:{bizId}</code> — 分组列表</li>
+          <li><code>rank:members:{bizId}</code> — 用户→分组映射</li>
+          <li><code>rank:settled:{instanceId}</code> — 结算快照缓存<br><em>周期：TTL = 2×cycleDays；到期自动失效</em></li>
+          <li><code>rank:claims:{bizId}</code> — 领取记录缓存</li>
+          <li style="color:var(--warn)">周期排行榜历史轮热数据在结算后 1×cycleDays 延迟清理（不删 settled / claims）</li>
+        </ul>
+      </div>
+      <div class="store-card">
+        <h4>MongoDB（持久化）</h4>
+        <ul>
+          <li><code>rank_config</code> — 活动配置 + PeriodicState（不删）</li>
+          <li><code>rank_group</code> — 分组数据（不删）</li>
+          <li><code>rank_member</code> — 用户→分组（不删）</li>
+          <li><code>rank_score</code> — 积分记录（不删）</li>
+          <li><code>rank_settled</code> — 结算快照（<strong>永久保留</strong>）</li>
+          <li><code>rank_claim</code> — 领取记录（<strong>永久保留，幂等依据</strong>）</li>
+          <li><code>rank_inst</code> — 榜单实例元数据（不删）</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout info">
+      <div class="callout-icon">ℹ</div>
+      <div>历史玩家回归时，若 Redis 结算缓存已过期，SocialServer 会自动从 MongoDB <code>rank_settled</code> 回填，无需客户端感知。<code>rank_claim</code> 永久保留确保发奖幂等性。</div>
+    </div>
+  </section>
+
+</main>
+</div>

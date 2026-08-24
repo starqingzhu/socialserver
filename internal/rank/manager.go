@@ -12,8 +12,9 @@ import (
 	rediskeys "common/redis"
 	goredis "golib/redis"
 	"golib/zaplog"
-	"socialserver/internal/rank/timebounded"
 	"socialserver/internal/rank/engine"
+	"socialserver/internal/rank/once"
+	"socialserver/internal/rank/periodic"
 )
 
 const (
@@ -29,6 +30,7 @@ type Manager struct {
 	memberIndex    *MemberIndex
 	services       map[string]RankBizService
 	engineServices map[string]*engine.Service
+	periodicHandler *periodic.Handler
 	stopCh         chan struct{}
 }
 
@@ -48,6 +50,7 @@ func InitGlobalManager(rdb *goredis.Redis, dbName string) error {
 		engineServices: make(map[string]*engine.Service),
 		stopCh:         make(chan struct{}),
 	}
+	manager.periodicHandler = periodic.NewHandler(rdb, dao, manager)
 	if dao != nil {
 		dao.EnsureIndexes()
 		manager.syncFromMongo(context.Background())
@@ -69,6 +72,7 @@ func (m *Manager) Close() {
 		return
 	}
 	close(m.stopCh)
+	m.periodicHandler.Clear()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.services = make(map[string]RankBizService)
@@ -123,12 +127,13 @@ func (m *Manager) tickServices(ctx context.Context, now int64) {
 			zaplog.LoggerSugar.Warnf("rank: tick service error: %v", err)
 		}
 	}
+	m.tickPeriodicActivities(ctx, now)
 }
 
 // newBizServiceWrapper 为周期排行榜创建业务服务适配器。
 // 所有周期排行榜类型（balloon、egg、camper_competition 等）共用同一个通用实现。
 func newBizServiceWrapper(bizType BizType, svc *engine.Service) RankBizService {
-	return timebounded.NewBizService(string(bizType), svc)
+	return once.NewBizService(string(bizType), svc)
 }
 
 func (m *Manager) registerEngine(ctx context.Context, bizType BizType, cfg engine.Config) (*engine.Service, error) {
@@ -211,7 +216,17 @@ func (m *Manager) Register(ctx context.Context, bizType BizType, cfg engine.Conf
 		return err
 	}
 
-	_, err := m.registerEngine(ctx, bizType, cfg)
+	rankType, cycleDays, err := LoadRankTypeAndCycle(bizType)
+	if err != nil {
+		return err
+	}
+
+	if rankType == RankTypePeriodic {
+		key := NewBizKey(bizType, cfg.ActID).String()
+		return m.periodicHandler.Register(ctx, string(bizType), key, cfg, cycleDays)
+	}
+
+	_, err = m.registerEngine(ctx, bizType, cfg)
 	return err
 }
 
@@ -254,6 +269,8 @@ func (m *Manager) RemoveService(bizType BizType, actID int32) error {
 		m.memberIndex.RemoveByKey(key)
 	}
 	m.mu.Unlock()
+
+	m.periodicHandler.RemoveState(key)
 
 	if ok {
 		if members, err := svc.GetAllMembers(); err == nil && len(members) > 0 {
@@ -426,6 +443,11 @@ func (m *Manager) syncFromRedis(ctx context.Context) {
 		bizType := BizType(bizId[:sep])
 		actID := int32(actIDInt)
 
+		// 跳过周期排行榜的子轮次 BizId（格式 "{bizType}_{actID}_r{N}"），由 syncFromMongo 恢复
+		if periodic.IsRoundBizId(bizId) {
+			continue
+		}
+
 		bizKey := NewBizKey(bizType, actID).String()
 		m.mu.RLock()
 		_, exists := m.engineServices[bizKey]
@@ -568,6 +590,8 @@ func (m *Manager) subscribeDeleteEvents() {
 			}
 			m.mu.Unlock()
 
+			m.periodicHandler.RemoveState(bizKey)
+
 			if ok {
 				zaplog.LoggerSugar.Infof("rank: subscribeDeleteEvents received delete bizKey=%s, cleaning up", bizKey)
 				if members, err := svc.GetAllMembers(); err == nil && len(members) > 0 {
@@ -615,6 +639,18 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 		key := NewBizKey(bizType, cfg.ActID).String()
 		mongoKeys[key] = struct{}{}
 
+		// 若文档含周期状态，恢复 PeriodicState。
+		// 当本节点的内存状态落后于 MongoDB（另一节点已推进了轮次）时，强制刷新。
+		if doc.Periodic != nil {
+			existing := m.periodicHandler.GetState(key)
+			if existing == nil || existing.CurrentRound < doc.Periodic.CurrentRound {
+				ps := periodic.StateFromSaved(string(bizType), cfg.ActID, *doc.Periodic)
+				m.periodicHandler.SetState(key, ps)
+				// 清理历史轮次残留的 Redis 热数据（重启后 in-memory timer 已丢失）。
+				m.periodicHandler.CleanupHistoricalRounds(ps)
+			}
+		}
+
 		m.mu.RLock()
 		_, exists := m.engineServices[key]
 		m.mu.RUnlock()
@@ -627,6 +663,14 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 		}
 		if err := FillConfigFromFiles(bizType, &cfg); err != nil {
 			zaplog.LoggerSugar.Warnf("rank: syncFromMongo fill config %s: %v", key, err)
+		}
+
+		// 周期排行榜：用当前轮的时间窗口替换整体活动时间
+		if doc.Periodic != nil {
+			cfg.OpenTime = doc.Periodic.RoundOpenTime
+			cfg.CloseTime = doc.Periodic.RoundCloseTime
+			cfg.GameEndTime = doc.Periodic.RoundCloseTime
+			cfg.RoundIndex = doc.Periodic.CurrentRound
 		}
 
 		if err := m.rankService.RegisterRank(ctx, commonrank.Rank{

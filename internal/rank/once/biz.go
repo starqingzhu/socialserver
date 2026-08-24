@@ -1,4 +1,4 @@
-package timebounded
+package once
 
 import (
 	"context"
@@ -7,8 +7,7 @@ import (
 	"socialserver/internal/rank/engine"
 )
 
-// BizService 周期排行榜业务服务适配器，实现 rank.RankBizService 接口。
-// 支持 balloon、egg、camper_competition 等所有周期性排行榜。
+// BizService 一次性排行榜业务服务适配器，实现 rank.RankBizService 接口。
 type BizService struct {
 	Svc     *engine.Service
 	bizType string

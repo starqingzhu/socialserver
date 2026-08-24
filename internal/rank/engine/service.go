@@ -348,7 +348,10 @@ func (s *Service) Tick(ctx context.Context, now int64) error {
 	}
 
 	if s.config.hasRobots() && now < settleAt {
-		s.tickAllRobots(ctx, now)
+		// Multi-node guard: only one node ticks robots per second per service.
+		if s.store.TryLockRobotTick(now) {
+			s.tickAllRobots(ctx, now)
+		}
 	}
 	if now < settleAt {
 		return nil
@@ -652,6 +655,10 @@ func (s *Service) Settle(ctx context.Context) (map[int32][]rank.RankMemberSnapsh
 		if group == nil || group.State == GroupStateSettled {
 			continue
 		}
+		// Multi-node guard: only one node settles each group.
+		if !s.store.TryLockSettle(group.GroupID) {
+			continue
+		}
 		if err := s.rankService.CloseInstance(ctx, group.InstanceID, settleAt); err != nil && err != rank.ErrInstanceNotFound {
 			return nil, err
 		}
@@ -914,23 +921,36 @@ func (s *Service) Cleanup() {
 	}
 }
 
+// CleanupLiveData 清理该轮次的 Redis 热数据，保留结算快照和 MongoDB 数据。
+// 用于周期排行榜历史轮次的延迟清理（延迟 = 1 个周期）。
+func (s *Service) CleanupLiveData() {
+	s.mu.Lock()
+	groups := s.groups
+	s.mu.Unlock()
+	if len(groups) == 0 {
+		groups, _ = s.store.LoadGroups()
+	}
+	s.store.CleanupLiveData(groups)
+
+	ctx := context.Background()
+	for _, g := range groups {
+		if g == nil {
+			continue
+		}
+		instanceID := s.groupInstanceID(g.GroupID)
+		if err := s.rankService.ExpireInstance(ctx, instanceID, liveDataCleanupTTL); err != nil {
+			zaplog.LoggerSugar.Warnf("rank engine: CleanupLiveData expire instance %s: %v", instanceID, err)
+		}
+	}
+}
+
 // GetAllMembers 返回该活动所有成员的 userID→groupID 映射。
 func (s *Service) GetAllMembers() (map[int64]int32, error) {
 	return s.store.GetAllMembers()
 }
 
 func (s *Service) ClaimReward(userID int64, now int64) (bool, int64, error) {
-	claimTime, found, err := s.store.GetClaim(userID)
-	if err != nil {
-		return false, 0, err
-	}
-	if found {
-		return false, claimTime, nil
-	}
-	if err := s.store.SetClaim(userID, now); err != nil {
-		return false, 0, err
-	}
-	return true, now, nil
+	return s.store.AtomicClaim(userID, now)
 }
 
 func (s *Service) GetClaimStatus(userID int64) (bool, int64, error) {

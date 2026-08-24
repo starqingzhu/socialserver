@@ -124,6 +124,9 @@ func (s *Server) OnInit() {
 	if err := configmgr.LoadConfigs(config.Default.ConfigDir); err != nil {
 		zaplog.LoggerSugar.Fatalf("OnInit: load configs failed: %v", err)
 	}
+	if err := configmgr.StartWatch(); err != nil {
+		zaplog.LoggerSugar.Warnf("OnInit: start config watch failed: %v", err)
+	}
 
 	if err := queue.InitQueues(); err != nil {
 		zaplog.LoggerSugar.Fatalf("OnInit: init queues failed: %v", err)
@@ -143,6 +146,7 @@ func (s *Server) OnInit() {
 }
 
 func (s *Server) OnClose() {
+	configmgr.StopWatch()
 	if manager := rankservice.GetGlobalManager(); manager != nil {
 		manager.Close()
 	}

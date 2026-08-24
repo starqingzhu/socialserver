@@ -22,8 +22,8 @@ import (
 
 // S2SUpsertScore 服务器间接口：更新用户积分并返回最新排名信息。
 func (h *ServerHandler) S2SUpsertScore(ctx context.Context, req *pb.PBS2SUpsertScoreRequest) (resp *pb.PBS2SUpsertScoreResponse, retErr error) {
-	zaplog.LoggerSugar.Infof("[rank] S2SUpsertScore req bizType=%s actId=%d userId=%d totalScore=%d ts=%d",
-		req.BizType, req.ActId, req.UserId, req.TotalScore, req.Timestamp)
+	zaplog.LoggerSugar.Infof("[rank] S2SUpsertScore req bizType=%s actId=%d userId=%d totalScore=%d ts=%d round=%d",
+		req.BizType, req.ActId, req.UserId, req.TotalScore, req.Timestamp, req.Round)
 	defer func() {
 		if retErr != nil {
 			zaplog.LoggerSugar.Warnf("[rank] S2SUpsertScore resp err=%v", retErr)
@@ -35,7 +35,24 @@ func (h *ServerHandler) S2SUpsertScore(ctx context.Context, req *pb.PBS2SUpsertS
 			zaplog.LoggerSugar.Infof("[rank] S2SUpsertScore resp ok rank=%d", myRank)
 		}
 	}()
-	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
+
+	// 周期排行榜轮次校验：若 round>0 且与当前活跃轮次不符，拒绝写入并返回最新轮次
+	bizType := rankservice.BizType(req.BizType)
+	currentRound := int32(1)
+	manager := rankservice.GetGlobalManager()
+	if manager != nil {
+		if ps := manager.GetPeriodicState(bizType, req.ActId); ps != nil {
+			currentRound = ps.CurrentRound
+			if req.Round > 0 && req.Round != ps.CurrentRound {
+				return &pb.PBS2SUpsertScoreResponse{
+					MsgCode:      commonMsg.MsgCode_CODE_RANK_ROUND_CHANGED,
+					CurrentRound: ps.CurrentRound,
+				}, nil
+			}
+		}
+	}
+
+	svc, err := lookupEngineService(bizType, req.ActId)
 	if err != nil {
 		return nil, err
 	}
@@ -49,13 +66,14 @@ func (h *ServerHandler) S2SUpsertScore(ctx context.Context, req *pb.PBS2SUpsertS
 	snapshot, _, err := svc.GetMemberRank(ctx, req.UserId)
 	if err != nil {
 		zaplog.LoggerSugar.Warnf("[rank] S2SUpsertScore GetMemberRank userId=%d err=%v", req.UserId, err)
-		return &pb.PBS2SUpsertScoreResponse{MsgCode: commonMsg.MsgCode_CODE_OK}, nil
+		return &pb.PBS2SUpsertScoreResponse{MsgCode: commonMsg.MsgCode_CODE_OK, CurrentRound: currentRound}, nil
 	}
 
 	myRank := snapshotToProto(snapshot)
 	ret := &pb.PBS2SUpsertScoreResponse{
-		MsgCode: commonMsg.MsgCode_CODE_OK,
-		MyRank:  myRank,
+		MsgCode:      commonMsg.MsgCode_CODE_OK,
+		MyRank:       myRank,
+		CurrentRound: currentRound,
 	}
 	zaplog.LoggerSugar.Infof("[rank] S2SUpsertScore updated score for userId=%d resp:%s", req.UserId, ret.String())
 	return ret, nil
@@ -63,8 +81,8 @@ func (h *ServerHandler) S2SUpsertScore(ctx context.Context, req *pb.PBS2SUpsertS
 
 // 获取排行榜列表
 func (h *ServerHandler) S2SGetRankList(ctx context.Context, req *pb.PBS2SGetRankListRequest) (resp *pb.PBS2SGetRankListResponse, retErr error) {
-	zaplog.LoggerSugar.Infof("[rank] S2SGetRankList req bizType=%s actId=%d userId=%d start=%d end=%d",
-		req.BizType, req.ActId, req.UserId, req.Start, req.End)
+	zaplog.LoggerSugar.Infof("[rank] S2SGetRankList req bizType=%s actId=%d userId=%d start=%d end=%d round=%d",
+		req.BizType, req.ActId, req.UserId, req.Start, req.End, req.Round)
 	defer func() {
 		if retErr != nil {
 			zaplog.LoggerSugar.Warnf("[rank] S2SGetRankList resp err=%v", retErr)
@@ -72,16 +90,43 @@ func (h *ServerHandler) S2SGetRankList(ctx context.Context, req *pb.PBS2SGetRank
 			zaplog.LoggerSugar.Infof("[rank] S2SGetRankList resp memberCount=%d", len(resp.Members))
 		}
 	}()
-	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
-	if err != nil {
-		return nil, err
+	manager := rankservice.GetGlobalManager()
+	if manager == nil {
+		return nil, status.Error(codes.Internal, "rank manager not initialized")
+	}
+	bizType := rankservice.BizType(req.BizType)
+
+	svc, isHistorical := manager.ResolveEngineService(bizType, req.ActId, req.Round)
+
+	// 确定当前轮次（一次性排行榜固定为 1）
+	currentRound := int32(1)
+	if ps := manager.GetPeriodicState(bizType, req.ActId); ps != nil {
+		currentRound = ps.CurrentRound
+	}
+
+	if isHistorical {
+		// 历史轮次：从 MongoDB 读取已结算数据
+		round := req.Round
+		snapshots, mySnap, err := manager.GetHistoricalRoundList(ctx, bizType, req.ActId, round, req.UserId, req.Start, req.End)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		return &pb.PBS2SGetRankListResponse{
+			MsgCode:      commonMsg.MsgCode_CODE_OK,
+			Members:      snapshotsToProto(snapshots),
+			MyRank:       snapshotToProto(mySnap),
+			CurrentRound: currentRound,
+		}, nil
+	}
+
+	if svc == nil {
+		return nil, status.Errorf(codes.NotFound, "service not found: bizType=%s actId=%d", req.BizType, req.ActId)
 	}
 	snapshot, groupID, err := svc.GetMemberRank(ctx, req.UserId)
 	if err != nil {
 		return nil, rankErrorToStatus(err)
 	}
 	if groupID == 0 {
-		// 用户未参与排行榜（活动结束后仍可查看榜单）：fallback 到第1个分组。
 		groups := svc.ListGroups()
 		if len(groups) == 0 {
 			return nil, status.Errorf(codes.NotFound, "user %d not found in any group for bizType=%s actId=%d", req.UserId, req.BizType, req.ActId)
@@ -102,10 +147,11 @@ func (h *ServerHandler) S2SGetRankList(ctx context.Context, req *pb.PBS2SGetRank
 	myRank := snapshotToProto(snapshot)
 	members := snapshotsToProto(snapshots)
 	ret := &pb.PBS2SGetRankListResponse{
-		MsgCode:    commonMsg.MsgCode_CODE_OK,
-		Members:    members,
-		MyRank:     myRank,
-		CreateTime: svc.GetGroupCreateTime(ctx, groupID),
+		MsgCode:      commonMsg.MsgCode_CODE_OK,
+		Members:      members,
+		MyRank:       myRank,
+		CreateTime:   svc.GetGroupCreateTime(ctx, groupID),
+		CurrentRound: currentRound,
 	}
 
 	zaplog.LoggerSugar.Infof("[rank] S2SGetRankList updated score for userId=%d myRank=%s membersCount=%d", req.UserId, myRank.String(), len(members))
@@ -113,8 +159,8 @@ func (h *ServerHandler) S2SGetRankList(ctx context.Context, req *pb.PBS2SGetRank
 }
 
 func (h *ServerHandler) S2SGetMemberRank(ctx context.Context, req *pb.PBS2SGetMemberRankRequest) (resp *pb.PBS2SGetMemberRankResponse, retErr error) {
-	zaplog.LoggerSugar.Infof("[rank] S2SGetMemberRank req bizType=%s actId=%d userId=%d",
-		req.BizType, req.ActId, req.UserId)
+	zaplog.LoggerSugar.Infof("[rank] S2SGetMemberRank req bizType=%s actId=%d userId=%d round=%d",
+		req.BizType, req.ActId, req.UserId, req.Round)
 	defer func() {
 		if retErr != nil {
 			zaplog.LoggerSugar.Warnf("[rank] S2SGetMemberRank resp err=%v", retErr)
@@ -126,9 +172,23 @@ func (h *ServerHandler) S2SGetMemberRank(ctx context.Context, req *pb.PBS2SGetMe
 			zaplog.LoggerSugar.Infof("[rank] S2SGetMemberRank resp rank=%d", memberRank)
 		}
 	}()
-	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
-	if err != nil {
-		return nil, err
+	manager := rankservice.GetGlobalManager()
+	if manager == nil {
+		return nil, status.Error(codes.Internal, "rank manager not initialized")
+	}
+	bizType := rankservice.BizType(req.BizType)
+	svc, isHistorical := manager.ResolveEngineService(bizType, req.ActId, req.Round)
+	if isHistorical {
+		round := req.Round
+		snapshots, mySnap, err := manager.GetHistoricalRoundList(ctx, bizType, req.ActId, round, req.UserId, 0, -1)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		_ = snapshots
+		return &pb.PBS2SGetMemberRankResponse{Snapshot: snapshotToProto(mySnap)}, nil
+	}
+	if svc == nil {
+		return nil, status.Errorf(codes.NotFound, "service not found: bizType=%s actId=%d", req.BizType, req.ActId)
 	}
 	snapshot, groupID, err := svc.GetMemberRank(ctx, req.UserId)
 	if err != nil {
@@ -170,7 +230,7 @@ func (h *ServerHandler) S2SSettle(ctx context.Context, req *pb.PBS2SSettleReques
 }
 
 func (h *ServerHandler) S2SGetRewardUsers(ctx context.Context, req *pb.PBS2SGetRewardUsersRequest) (resp *pb.PBS2SGetRewardUsersResponse, retErr error) {
-	zaplog.LoggerSugar.Infof("[rank] S2SGetRewardUsers req bizType=%s actId=%d", req.BizType, req.ActId)
+	zaplog.LoggerSugar.Infof("[rank] S2SGetRewardUsers req bizType=%s actId=%d round=%d", req.BizType, req.ActId, req.Round)
 	defer func() {
 		if retErr != nil {
 			zaplog.LoggerSugar.Warnf("[rank] S2SGetRewardUsers resp err=%v", retErr)
@@ -178,9 +238,21 @@ func (h *ServerHandler) S2SGetRewardUsers(ctx context.Context, req *pb.PBS2SGetR
 			zaplog.LoggerSugar.Infof("[rank] S2SGetRewardUsers resp userCount=%d", len(resp.UserIds))
 		}
 	}()
-	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
-	if err != nil {
-		return nil, err
+	manager := rankservice.GetGlobalManager()
+	if manager == nil {
+		return nil, status.Error(codes.Internal, "rank manager not initialized")
+	}
+	bizType := rankservice.BizType(req.BizType)
+	svc, isHistorical := manager.ResolveEngineService(bizType, req.ActId, req.Round)
+	if isHistorical {
+		userIDs, err := manager.GetHistoricalRewardUsers(ctx, bizType, req.ActId, req.Round)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		return &pb.PBS2SGetRewardUsersResponse{UserIds: userIDs}, nil
+	}
+	if svc == nil {
+		return nil, status.Errorf(codes.NotFound, "service not found: bizType=%s actId=%d", req.BizType, req.ActId)
 	}
 	return &pb.PBS2SGetRewardUsersResponse{UserIds: svc.GetOpenRewardUserIDs()}, nil
 }
@@ -188,8 +260,8 @@ func (h *ServerHandler) S2SGetRewardUsers(ctx context.Context, req *pb.PBS2SGetR
 // --- 奖励领取接口 ---
 
 func (h *ServerHandler) S2SClaimReward(ctx context.Context, req *pb.PBS2SClaimRewardRequest) (resp *pb.PBS2SClaimRewardResponse, retErr error) {
-	zaplog.LoggerSugar.Infof("[rank] S2SClaimReward req bizType=%s actId=%d userId=%d",
-		req.BizType, req.ActId, req.UserId)
+	zaplog.LoggerSugar.Infof("[rank] S2SClaimReward req bizType=%s actId=%d userId=%d round=%d",
+		req.BizType, req.ActId, req.UserId, req.Round)
 	defer func() {
 		if retErr != nil {
 			zaplog.LoggerSugar.Warnf("[rank] S2SClaimReward resp err=%v", retErr)
@@ -197,9 +269,21 @@ func (h *ServerHandler) S2SClaimReward(ctx context.Context, req *pb.PBS2SClaimRe
 			zaplog.LoggerSugar.Infof("[rank] S2SClaimReward resp claimed=%v claimTime=%d", resp.Claimed, resp.ClaimTime)
 		}
 	}()
-	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
-	if err != nil {
-		return nil, err
+	manager := rankservice.GetGlobalManager()
+	if manager == nil {
+		return nil, status.Error(codes.Internal, "rank manager not initialized")
+	}
+	bizType := rankservice.BizType(req.BizType)
+	svc, isHistorical := manager.ResolveEngineService(bizType, req.ActId, req.Round)
+	if isHistorical {
+		claimed, claimTime, err := manager.ClaimHistoricalReward(bizType, req.ActId, req.Round, req.UserId)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		return &pb.PBS2SClaimRewardResponse{Claimed: claimed, ClaimTime: claimTime}, nil
+	}
+	if svc == nil {
+		return nil, status.Errorf(codes.NotFound, "service not found: bizType=%s actId=%d", req.BizType, req.ActId)
 	}
 	claimed, claimTime, err := svc.ClaimReward(req.UserId, time.Now().UnixMilli())
 	if err != nil {
@@ -209,8 +293,8 @@ func (h *ServerHandler) S2SClaimReward(ctx context.Context, req *pb.PBS2SClaimRe
 }
 
 func (h *ServerHandler) S2SGetClaimStatus(ctx context.Context, req *pb.PBS2SGetClaimStatusRequest) (resp *pb.PBS2SGetClaimStatusResponse, retErr error) {
-	zaplog.LoggerSugar.Infof("[rank] S2SGetClaimStatus req bizType=%s actId=%d userId=%d",
-		req.BizType, req.ActId, req.UserId)
+	zaplog.LoggerSugar.Infof("[rank] S2SGetClaimStatus req bizType=%s actId=%d userId=%d round=%d",
+		req.BizType, req.ActId, req.UserId, req.Round)
 	defer func() {
 		if retErr != nil {
 			zaplog.LoggerSugar.Warnf("[rank] S2SGetClaimStatus resp err=%v", retErr)
@@ -218,9 +302,21 @@ func (h *ServerHandler) S2SGetClaimStatus(ctx context.Context, req *pb.PBS2SGetC
 			zaplog.LoggerSugar.Infof("[rank] S2SGetClaimStatus resp claimed=%v claimTime=%d", resp.Claimed, resp.ClaimTime)
 		}
 	}()
-	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
-	if err != nil {
-		return nil, err
+	manager := rankservice.GetGlobalManager()
+	if manager == nil {
+		return nil, status.Error(codes.Internal, "rank manager not initialized")
+	}
+	bizType := rankservice.BizType(req.BizType)
+	svc, isHistorical := manager.ResolveEngineService(bizType, req.ActId, req.Round)
+	if isHistorical {
+		claimed, claimTime, err := manager.GetHistoricalClaimStatus(bizType, req.ActId, req.Round, req.UserId)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		return &pb.PBS2SGetClaimStatusResponse{Claimed: claimed, ClaimTime: claimTime}, nil
+	}
+	if svc == nil {
+		return nil, status.Errorf(codes.NotFound, "service not found: bizType=%s actId=%d", req.BizType, req.ActId)
 	}
 	claimed, claimTime, err := svc.GetClaimStatus(req.UserId)
 	if err != nil {
@@ -308,12 +404,26 @@ func (h *ServerHandler) S2SGetRankConfig(ctx context.Context, req *pb.PBS2SGetRa
 		return nil, err
 	}
 	cfg := svc.GetConfig()
+
+	manager := rankservice.GetGlobalManager()
+	var rankType pb.RankType = pb.RankType_RANK_TYPE_ONCE
+	var cycleDays int32
+	var currentRound int32
+	if manager != nil {
+		if state := manager.GetPeriodicState(rankservice.BizType(req.BizType), req.ActId); state != nil {
+			rankType = pb.RankType_RANK_TYPE_PERIODIC
+			cycleDays = state.CycleDays
+			currentRound = state.CurrentRound
+		}
+	}
+
 	return &pb.PBS2SGetRankConfigResponse{
 		BizType: cfg.BizType, ActId: cfg.ActID, RankCode: cfg.RankCode,
 		RankPeopleNum: cfg.RankPeopleNum, OpenToken: cfg.OpenToken,
 		OpenTime: cfg.OpenTime, CloseTime: cfg.CloseTime, GameEndTime: effectiveGameEndTime(cfg.GameEndTime, cfg.CloseTime),
 		RobotTiers: cfgRobotTiersToProto(cfg.RobotTiers), RobotInfos: cfgRobotInfosToProto(cfg.RobotInfos),
 		Settled: svc.IsSettled(), GroupCount: svc.GroupCount(), MemberCount: svc.MemberCount(),
+		RankType: rankType, CycleDays: cycleDays, CurrentRound: currentRound,
 	}, nil
 }
 
@@ -377,20 +487,65 @@ func (h *ServerHandler) S2SListRankConfigs(ctx context.Context, req *pb.PBS2SLis
 	infos := manager.ListServices(rankservice.BizType(req.BizType))
 	ranks := make([]*pb.PBRankConfigSummary, len(infos))
 	for i, info := range infos {
+		var rankType pb.RankType = pb.RankType_RANK_TYPE_ONCE
+		var cycleDays, currentRound int32
+		if state := manager.GetPeriodicState(info.BizType, info.ActID); state != nil {
+			rankType = pb.RankType_RANK_TYPE_PERIODIC
+			cycleDays = state.CycleDays
+			currentRound = state.CurrentRound
+		}
 		ranks[i] = &pb.PBRankConfigSummary{
-			BizType:     string(info.BizType),
-			ActId:       info.ActID,
-			RankCode:    info.Config.RankCode,
-			OpenTime:    info.Config.OpenTime,
-			CloseTime:   info.Config.CloseTime,
-			GameEndTime: effectiveGameEndTime(info.Config.GameEndTime, info.Config.CloseTime),
-			Settled:     info.Settled,
-			GroupCount:  info.GroupCount,
-			MemberCount: info.MemberCount,
-			CreateTime:  info.CreateTime,
+			BizType:      string(info.BizType),
+			ActId:        info.ActID,
+			RankCode:     info.Config.RankCode,
+			OpenTime:     info.Config.OpenTime,
+			CloseTime:    info.Config.CloseTime,
+			GameEndTime:  effectiveGameEndTime(info.Config.GameEndTime, info.Config.CloseTime),
+			Settled:      info.Settled,
+			GroupCount:   info.GroupCount,
+			MemberCount:  info.MemberCount,
+			CreateTime:   info.CreateTime,
+			RankType:     rankType,
+			CycleDays:    cycleDays,
+			CurrentRound: currentRound,
 		}
 	}
 	return &pb.PBS2SListRankConfigsResponse{Ranks: ranks}, nil
+}
+
+// S2SGetRankRounds 查询排行榜活动的轮次列表（周期排行榜）。
+func (h *ServerHandler) S2SGetRankRounds(ctx context.Context, req *pb.PBS2SGetRankRoundsRequest) (resp *pb.PBS2SGetRankRoundsResponse, retErr error) {
+	zaplog.LoggerSugar.Infof("[rank] S2SGetRankRounds req bizType=%s actId=%d", req.BizType, req.ActId)
+	defer func() {
+		if retErr != nil {
+			zaplog.LoggerSugar.Warnf("[rank] S2SGetRankRounds resp err=%v", retErr)
+		} else {
+			zaplog.LoggerSugar.Infof("[rank] S2SGetRankRounds resp currentRound=%d roundCount=%d", resp.CurrentRound, len(resp.Rounds))
+		}
+	}()
+	manager := rankservice.GetGlobalManager()
+	if manager == nil {
+		return nil, status.Error(codes.Internal, "rank manager not initialized")
+	}
+	currentRound, roundInfos, err := manager.GetRoundInfos(rankservice.BizType(req.BizType), req.ActId)
+	if err != nil {
+		return nil, status.Error(codes.NotFound, err.Error())
+	}
+	pbRounds := make([]*pb.PBRoundInfo, len(roundInfos))
+	for i, r := range roundInfos {
+		pbRounds[i] = &pb.PBRoundInfo{
+			Round:     r.Round,
+			OpenTime:  r.OpenTime,
+			CloseTime: r.CloseTime,
+			Settled:   r.Settled,
+			Current:   r.Current,
+		}
+	}
+	return &pb.PBS2SGetRankRoundsResponse{
+		MsgCode:      commonMsg.MsgCode_CODE_OK,
+		CurrentRound: currentRound,
+		Rounds:       pbRounds,
+	}, nil
 }
 
 // --- 辅助函数 ---
