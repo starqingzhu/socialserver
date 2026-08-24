@@ -2,6 +2,7 @@ package rankservice
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -84,6 +85,7 @@ func (m *Manager) startBackground() {
 	go m.tickLoop()
 	go m.syncLoop()
 	go m.subscribeDeleteEvents()
+	go m.subscribeCreateEvents()
 }
 
 func (m *Manager) tickLoop() {
@@ -221,13 +223,27 @@ func (m *Manager) Register(ctx context.Context, bizType BizType, cfg engine.Conf
 		return err
 	}
 
+	key := NewBizKey(bizType, cfg.ActID).String()
+
 	if rankType == RankTypePeriodic {
-		key := NewBizKey(bizType, cfg.ActID).String()
-		return m.periodicHandler.Register(ctx, string(bizType), key, cfg, cycleDays)
+		if err := m.periodicHandler.Register(ctx, string(bizType), key, cfg, cycleDays); err != nil {
+			return err
+		}
+		var ps *engine.PeriodicSavedState
+		if state := m.periodicHandler.GetState(key); state != nil {
+			saved := state.ToSavedState()
+			ps = &saved
+		}
+		m.publishRankCreate(key, cfg, ps)
+		return nil
 	}
 
 	_, err = m.registerEngine(ctx, bizType, cfg)
-	return err
+	if err != nil {
+		return err
+	}
+	m.publishRankCreate(key, cfg, nil)
+	return nil
 }
 
 // UpdateService 按业务类型更新排行榜配置。
@@ -749,5 +765,141 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 	if added > 0 || len(removed) > 0 {
 		zaplog.LoggerSugar.Infof("rank: sync from mongo completed, added=%d removed=%d total=%d",
 			added, len(removed), len(mongoKeys))
+	}
+}
+
+// publishRankCreate 广播排行榜创建事件，通知其他节点立即同步。
+// 消息为 JSON 编码的 engine.RankConfigDoc（robot 配置由接收节点从配置文件重新加载）。
+func (m *Manager) publishRankCreate(bizKey string, cfg engine.Config, ps *engine.PeriodicSavedState) {
+	if m.rdb == nil {
+		return
+	}
+	cfg.RobotTiers = nil
+	cfg.RobotInfos = nil
+	doc := engine.RankConfigDoc{
+		BizKey:   bizKey,
+		Config:   cfg,
+		Periodic: ps,
+	}
+	data, err := json.Marshal(doc)
+	if err != nil {
+		zaplog.LoggerSugar.Warnf("rank: publishRankCreate marshal bizKey=%s: %v", bizKey, err)
+		return
+	}
+	if _, err := m.rdb.Publish(rediskeys.RankCreateChannel, string(data)); err != nil {
+		zaplog.LoggerSugar.Warnf("rank: publishRankCreate bizKey=%s: %v", bizKey, err)
+	}
+}
+
+// applyRankConfigDoc 从配置文档在本节点注册引擎服务（如已存在则跳过）。
+// 供 subscribeCreateEvents 收到广播后调用，逻辑与 syncFromMongo 的单文档处理一致。
+func (m *Manager) applyRankConfigDoc(ctx context.Context, doc engine.RankConfigDoc) bool {
+	cfg := doc.Config
+	bizType := BizType(cfg.BizType)
+	if bizType == "" {
+		bizType = "balloon"
+		cfg.BizType = string(bizType)
+	}
+	key := NewBizKey(bizType, cfg.ActID).String()
+
+	if doc.Periodic != nil {
+		existing := m.periodicHandler.GetState(key)
+		if existing == nil || existing.CurrentRound < doc.Periodic.CurrentRound {
+			ps := periodic.StateFromSaved(string(bizType), cfg.ActID, *doc.Periodic)
+			m.periodicHandler.SetState(key, ps)
+			m.periodicHandler.CleanupHistoricalRounds(ps)
+		}
+	}
+
+	m.mu.RLock()
+	_, exists := m.engineServices[key]
+	m.mu.RUnlock()
+	if exists {
+		return false
+	}
+
+	if cfg.RankCode == "" {
+		cfg.RankCode = fmt.Sprintf("%s_score_%d", bizType, cfg.ActID)
+	}
+	if err := FillConfigFromFiles(bizType, &cfg); err != nil {
+		zaplog.LoggerSugar.Warnf("rank: applyRankConfigDoc fill config %s: %v", key, err)
+	}
+
+	if doc.Periodic != nil {
+		cfg.OpenTime = doc.Periodic.RoundOpenTime
+		cfg.CloseTime = doc.Periodic.RoundCloseTime
+		cfg.GameEndTime = doc.Periodic.RoundCloseTime
+		cfg.RoundIndex = doc.Periodic.CurrentRound
+	}
+
+	if err := m.rankService.RegisterRank(ctx, commonrank.Rank{
+		RankCode:       cfg.RankCode,
+		RankName:       fmt.Sprintf("%s_rank_%d", bizType, cfg.ActID),
+		ScoreOrder:     commonrank.ScoreOrderDesc,
+		TieBreakPolicy: commonrank.TieBreakPolicyFirstEnter,
+		CreateTime:     cfg.OpenTime,
+		UpdateTime:     cfg.OpenTime,
+	}); err != nil {
+		zaplog.LoggerSugar.Warnf("rank: applyRankConfigDoc register rank def %s: %v", cfg.RankCode, err)
+		return false
+	}
+
+	localBizType := bizType
+	localActID := cfg.ActID
+	onMemberJoin := func(userID int64, groupID int32) {
+		m.memberIndex.Track(userID, MemberEntry{
+			BizType: localBizType,
+			ActID:   localActID,
+			GroupID: groupID,
+		})
+	}
+
+	service, err := engine.NewService(m.rankService, cfg, m.rdb, m.dao, engine.WithOnMemberJoin(onMemberJoin))
+	if err != nil {
+		zaplog.LoggerSugar.Warnf("rank: applyRankConfigDoc create service %s: %v", key, err)
+		return false
+	}
+
+	m.mu.Lock()
+	_, dup := m.engineServices[key]
+	if !dup {
+		m.services[key] = newBizServiceWrapper(localBizType, service)
+		m.engineServices[key] = service
+	}
+	m.mu.Unlock()
+	return !dup
+}
+
+// subscribeCreateEvents 订阅排行榜创建广播，收到消息后立即在本节点注册对应 Service。
+func (m *Manager) subscribeCreateEvents() {
+	if m.rdb == nil {
+		return
+	}
+	ps, err := m.rdb.Subscribe(rediskeys.RankCreateChannel)
+	if err != nil {
+		zaplog.LoggerSugar.Errorf("rank: subscribe create channel: %v", err)
+		return
+	}
+	defer ps.Close()
+
+	ch := ps.Channel()
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			var doc engine.RankConfigDoc
+			if err := json.Unmarshal([]byte(msg.Payload), &doc); err != nil {
+				zaplog.LoggerSugar.Warnf("rank: subscribeCreateEvents unmarshal: %v", err)
+				continue
+			}
+			added := m.applyRankConfigDoc(context.Background(), doc)
+			if added {
+				zaplog.LoggerSugar.Infof("rank: subscribeCreateEvents applied bizKey=%s", doc.BizKey)
+			}
+		}
 	}
 }
