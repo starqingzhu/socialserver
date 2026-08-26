@@ -124,8 +124,8 @@ func (s *Server) OnInit() {
 	if err := configmgr.LoadConfigs(config.Default.ConfigDir); err != nil {
 		zaplog.LoggerSugar.Fatalf("OnInit: load configs failed: %v", err)
 	}
-	if err := configmgr.StartWatch(); err != nil {
-		zaplog.LoggerSugar.Warnf("OnInit: start config watch failed: %v", err)
+	if err := configmgr.Global.StartWatch(); err != nil {
+		zaplog.LoggerSugar.Warnf("OnInit: start config watcher failed: %v", err)
 	}
 
 	if err := queue.InitQueues(); err != nil {

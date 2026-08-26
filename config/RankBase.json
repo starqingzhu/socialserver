@@ -30,13 +30,13 @@
     "topNameColor": "#266519"
   },
   {
-    "balloonRankOpenToken": "0",
-    "bizType": "test_rank",
-    "cycleDays": "1",
-    "id": "3",
-    "name": "test_rank_title",
+    "balloonRankOpenToken": "100",
+    "bizType": "monopoly",
+    "cycleDays": "0",
+    "id": "4",
+    "name": "activity_DropEggDecoration_rank_title",
     "rankPeopleNum": "30",
-    "rankType": "2",
+    "rankType": "1",
     "topNameColor": "#266519"
   }
 ]
