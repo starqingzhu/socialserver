@@ -2,25 +2,41 @@
   {
     "balloonRankOpenToken": "9000",
     "bizType": "balloon",
+    "cycleDays": "0",
     "id": "1",
     "name": "activity_balloon_rank_title",
     "rankPeopleNum": "30",
+    "rankType": "1",
     "topNameColor": "#266519"
   },
   {
     "balloonRankOpenToken": "9000",
     "bizType": "egg",
+    "cycleDays": "0",
     "id": "2",
     "name": "activity_DropEggDecoration_rank_title",
     "rankPeopleNum": "30",
+    "rankType": "1",
     "topNameColor": "#266519"
   },
   {
     "balloonRankOpenToken": "0",
     "bizType": "camper_competition",
+    "cycleDays": "0",
     "id": "3",
     "name": "camper_competition_title",
     "rankPeopleNum": "30",
+    "rankType": "1",
+    "topNameColor": "#266519"
+  },
+  {
+    "balloonRankOpenToken": "100",
+    "bizType": "monopoly",
+    "cycleDays": "0",
+    "id": "4",
+    "name": "activity_DropEggDecoration_rank_title",
+    "rankPeopleNum": "30",
+    "rankType": "1",
     "topNameColor": "#266519"
   }
 ]
