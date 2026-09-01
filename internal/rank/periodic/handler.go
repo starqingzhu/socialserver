@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -70,17 +71,27 @@ func (h *Handler) Clear() {
 }
 
 // Register 注册周期排行榜活动：创建第一轮子服务并持久化状态。
+// 使用 Redis 分布式锁防止多节点并发注册同一活动。
 func (h *Handler) Register(ctx context.Context, bizType, logicalKey string, cfg engine.Config, cycleMinutes int32) error {
 	// BUG4: 在入口处校验，防止 CycleMinutes=0 导致无限循环推进轮次
 	if cycleMinutes <= 0 {
 		return fmt.Errorf("register periodic: cycleMinutes must be > 0, got %d", cycleMinutes)
 	}
 
-	// BUG5: 快速路径检查（RLock）
+	// 快速路径（内存检查）
 	h.mu.RLock()
 	_, alreadyExists := h.states[logicalKey]
 	h.mu.RUnlock()
 	if alreadyExists {
+		return nil
+	}
+
+	// 多节点分布式锁：防止两个节点同时注册同一活动
+	registerLock := fmt.Sprintf("rank:periodic_register:{%s}", logicalKey)
+	locked, lockErr := h.rdb.SetNX(registerLock, "1", 30*time.Second)
+	if lockErr != nil || !locked {
+		// 其他节点正在注册，syncFromMongo 会在 30s 内同步状态到本节点
+		zaplog.LoggerSugar.Infof("rank periodic: register lock not acquired logicalKey=%s, will sync via mongo", logicalKey)
 		return nil
 	}
 
@@ -99,7 +110,7 @@ func (h *Handler) Register(ctx context.Context, bizType, logicalKey string, cfg 
 		return fmt.Errorf("register periodic round1: %w", err)
 	}
 
-	// BUG5: 写锁下二次检查，防止并发注册覆盖
+	// 写锁下二次检查，防止并发写覆盖（BUG5）
 	h.mu.Lock()
 	if _, alreadyExists := h.states[logicalKey]; alreadyExists {
 		h.mu.Unlock()
@@ -107,6 +118,9 @@ func (h *Handler) Register(ctx context.Context, bizType, logicalKey string, cfg 
 	}
 	h.states[logicalKey] = state
 	h.mu.Unlock()
+
+	// 初始 currentRound 写入 Redis，供其他节点快速同步
+	h.setCurRoundInRedis(logicalKey, state.GetCurrentRound())
 
 	if h.dao != nil {
 		overallCfg := cfg
@@ -215,6 +229,9 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 	}
 
 	state.advanceToNextRound()
+
+	// 将新 currentRound 写入 Redis，使其他节点无需等待 syncFromMongo 即可读到最新轮次
+	h.setCurRoundInRedis(logicalKey, nextRound)
 
 	if newSvc := h.registry.GetEngineServiceByKey(logicalKey); newSvc != nil {
 		h.warmupSem <- struct{}{}
@@ -366,26 +383,18 @@ func (h *Handler) ClaimHistoricalReward(bizType string, actID int32, round int32
 }
 
 // GetRoundInfos 返回周期排行榜的轮次摘要列表（按轮次升序）。
-// 仅处理周期排行榜；一次性排行榜由 Manager 直接处理。
+// 仅返回已开始的轮次（1..currentRound），不预先枚举未来轮次。
 func (h *Handler) GetRoundInfos(state *PeriodicState) (currentRound int32, rounds []RoundInfo, err error) {
 	// BUG3: 原子读取一次，整个函数使用同一快照，避免并发 advance 导致前后不一致
 	currentRound = state.GetCurrentRound()
 
-	totalRounds := int32(1)
-	if state.CycleMinutes > 0 && state.TotalCloseTime > state.TotalOpenTime {
-		dur := state.TotalCloseTime - state.TotalOpenTime
-		totalRounds = int32((dur + cycleDurationMs(state.CycleMinutes) - 1) / cycleDurationMs(state.CycleMinutes))
-	}
-
 	nowMs := time.Now().UnixMilli()
-	rounds = make([]RoundInfo, 0, totalRounds)
-	for r := int32(1); r <= totalRounds; r++ {
+	rounds = make([]RoundInfo, 0, currentRound)
+	for r := int32(1); r <= currentRound; r++ {
 		open, close := state.computeRoundWindow(r)
 		if open >= state.TotalCloseTime {
 			break
 		}
-		// OBS7: 当前轮窗口已关闭（活动已结束）时标记为 Settled，
-		// 避免最后一轮因 CurrentRound 不再递增而永远显示 Settled=false。
 		settled := r < currentRound || (r == currentRound && close <= nowMs)
 		rounds = append(rounds, RoundInfo{
 			Round:     r,
@@ -398,6 +407,27 @@ func (h *Handler) GetRoundInfos(state *PeriodicState) (currentRound int32, round
 	return currentRound, rounds, nil
 }
 
+// GetCurrentRoundInfo 直接返回当前轮次信息，不枚举所有轮次。
+// 优先从 Redis 读取 currentRound 以保证多节点一致性；Redis 不可用时降级到本地原子值。
+func (h *Handler) GetCurrentRoundInfo(state *PeriodicState) (RoundInfo, error) {
+	logicalKey := state.StateLogicalKey()
+
+	curRound := h.readCurRoundFromRedis(logicalKey)
+	if local := state.GetCurrentRound(); local > curRound {
+		curRound = local // 本地值更新时以本地为准（Redis 写入可能短暂滞后）
+	}
+
+	open, close := state.computeRoundWindow(curRound)
+	nowMs := time.Now().UnixMilli()
+	return RoundInfo{
+		Round:     curRound,
+		OpenTime:  open,
+		CloseTime: close,
+		Settled:   close <= nowMs,
+		Current:   true,
+	}, nil
+}
+
 // cycleDurationMs 将分钟数转换为毫秒。
 func cycleDurationMs(minutes int32) int64 {
 	return int64(minutes) * 60 * 1000
@@ -406,6 +436,38 @@ func cycleDurationMs(minutes int32) int64 {
 // roundSettledTTL 历史轮次 Redis 结算快照的保留时长（2 个周期）。
 func roundSettledTTL(cycleMinutes int32) time.Duration {
 	return time.Duration(cycleMinutes) * 2 * time.Minute
+}
+
+// curRoundRedisKey 返回存储周期活动当前轮号的 Redis 键。
+// 使用 hash tag {logicalKey} 保证在 Redis Cluster 下与其他该活动的键落在同一 slot。
+func curRoundRedisKey(logicalKey string) string {
+	return fmt.Sprintf("rank:periodic_cur_round:{%s}", logicalKey)
+}
+
+// setCurRoundInRedis 将当前轮号写入 Redis，供多节点同步读取。
+func (h *Handler) setCurRoundInRedis(logicalKey string, round int32) {
+	if h.rdb == nil {
+		return
+	}
+	if err := h.rdb.Set(curRoundRedisKey(logicalKey), strconv.FormatInt(int64(round), 10)); err != nil {
+		zaplog.LoggerSugar.Warnf("rank periodic: set cur_round redis key logicalKey=%s: %v", logicalKey, err)
+	}
+}
+
+// readCurRoundFromRedis 从 Redis 读取当前轮号；失败或不存在时返回 0。
+func (h *Handler) readCurRoundFromRedis(logicalKey string) int32 {
+	if h.rdb == nil {
+		return 0
+	}
+	val, err := h.rdb.Get(curRoundRedisKey(logicalKey))
+	if err != nil || val == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(val, 10, 32)
+	if err != nil {
+		return 0
+	}
+	return int32(n)
 }
 
 // CleanupHistoricalRounds 在启动恢复时清理所有已结算轮次（< CurrentRound）的 Redis 热数据。

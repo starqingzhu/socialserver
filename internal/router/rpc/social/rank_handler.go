@@ -535,32 +535,19 @@ func (h *ServerHandler) S2SGetRankCurRound(ctx context.Context, req *pb.PBS2SGet
 	if manager == nil {
 		return nil, status.Error(codes.Internal, "rank manager not initialized")
 	}
-	// 复用 GetRoundInfos 统一处理周期/一次性排行榜：轮次时间窗口由不可变的总窗口计算，
-	// 避免直接读取运行中可能被 advanceRound 并发修改的 RoundOpenTime/RoundCloseTime。
-	currentRound, roundInfos, err := manager.GetRoundInfos(rankservice.BizType(req.BizType), req.ActId)
+	info, err := manager.GetCurrentRoundInfo(rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return nil, status.Error(codes.NotFound, err.Error())
 	}
-	var pbCurrentRound *pb.PBRoundInfo
-	for i := range roundInfos {
-		if roundInfos[i].Round != currentRound {
-			continue
-		}
-		pbCurrentRound = &pb.PBRoundInfo{
-			Round:     roundInfos[i].Round,
-			OpenTime:  roundInfos[i].OpenTime,
-			CloseTime: roundInfos[i].CloseTime,
-			Settled:   roundInfos[i].Settled,
-			Current:   roundInfos[i].Current,
-		}
-		break
-	}
-	if pbCurrentRound == nil {
-		return nil, status.Errorf(codes.NotFound, "service not found: bizType=%s actId=%d", req.BizType, req.ActId)
-	}
 	return &pb.PBS2SGetRankCurRoundResponse{
-		MsgCode:      commonMsg.MsgCode_CODE_OK,
-		CurrentRound: pbCurrentRound,
+		MsgCode: commonMsg.MsgCode_CODE_OK,
+		CurrentRound: &pb.PBRoundInfo{
+			Round:     info.Round,
+			OpenTime:  info.OpenTime,
+			CloseTime: info.CloseTime,
+			Settled:   info.Settled,
+			Current:   info.Current,
+		},
 	}, nil
 }
 

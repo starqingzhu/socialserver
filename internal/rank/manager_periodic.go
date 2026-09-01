@@ -112,7 +112,7 @@ func (m *Manager) ClaimHistoricalReward(bizType BizType, actID int32, round int3
 
 // GetRoundInfos 返回活动的轮次摘要列表（按轮次升序）。
 // 一次性排行榜返回虚拟单轮；周期排行榜委托给 periodicHandler。
-func (m *Manager) GetRoundInfos(bizType BizType, actID int32) (currentRound int32, rounds []RoundInfo, err error) {
+func (m *Manager) GetRoundInfos(bizType BizType, actID int32) (currentRound int32, rounds []periodic.RoundInfo, err error) {
 	key := NewBizKey(bizType, actID).String()
 	state := m.periodicHandler.GetState(key)
 	if state == nil {
@@ -121,7 +121,7 @@ func (m *Manager) GetRoundInfos(bizType BizType, actID int32) (currentRound int3
 			return 0, nil, fmt.Errorf("service not found: bizType=%s actID=%d", bizType, actID)
 		}
 		cfg := svc.GetConfig()
-		return 1, []RoundInfo{{
+		return 1, []periodic.RoundInfo{{
 			Round:     1,
 			OpenTime:  cfg.OpenTime,
 			CloseTime: cfg.CloseTime,
@@ -130,6 +130,28 @@ func (m *Manager) GetRoundInfos(bizType BizType, actID int32) (currentRound int3
 		}}, nil
 	}
 	return m.periodicHandler.GetRoundInfos(state)
+}
+
+// GetCurrentRoundInfo 直接返回活动当前轮次信息，不枚举所有轮次。
+// 一次性排行榜返回虚拟单轮；周期排行榜从 Redis 读取权威轮号后计算时间窗口。
+func (m *Manager) GetCurrentRoundInfo(bizType BizType, actID int32) (periodic.RoundInfo, error) {
+	key := NewBizKey(bizType, actID).String()
+	state := m.periodicHandler.GetState(key)
+	if state == nil {
+		svc := m.GetEngineService(bizType, actID)
+		if svc == nil {
+			return periodic.RoundInfo{}, fmt.Errorf("service not found: bizType=%s actID=%d", bizType, actID)
+		}
+		cfg := svc.GetConfig()
+		return periodic.RoundInfo{
+			Round:     1,
+			OpenTime:  cfg.OpenTime,
+			CloseTime: cfg.CloseTime,
+			Settled:   svc.IsSettled(),
+			Current:   true,
+		}, nil
+	}
+	return m.periodicHandler.GetCurrentRoundInfo(state)
 }
 
 // ResolveEngineService 根据 bizType/actID/round 返回对应的引擎服务和是否为历史查询。
