@@ -407,12 +407,12 @@ func (h *ServerHandler) S2SGetRankConfig(ctx context.Context, req *pb.PBS2SGetRa
 
 	manager := rankservice.GetGlobalManager()
 	var rankType pb.RankType = pb.RankType_RANK_TYPE_ONCE
-	var cycleDays int32
+	var cycleMinutes int32
 	var currentRound int32
 	if manager != nil {
 		if state := manager.GetPeriodicState(rankservice.BizType(req.BizType), req.ActId); state != nil {
 			rankType = pb.RankType_RANK_TYPE_PERIODIC
-			cycleDays = state.CycleDays
+			cycleMinutes = state.CycleMinutes
 			currentRound = state.CurrentRound
 		}
 	}
@@ -423,7 +423,7 @@ func (h *ServerHandler) S2SGetRankConfig(ctx context.Context, req *pb.PBS2SGetRa
 		OpenTime: cfg.OpenTime, CloseTime: cfg.CloseTime, GameEndTime: effectiveGameEndTime(cfg.GameEndTime, cfg.CloseTime),
 		RobotTiers: cfgRobotTiersToProto(cfg.RobotTiers), RobotInfos: cfgRobotInfosToProto(cfg.RobotInfos),
 		Settled: svc.IsSettled(), GroupCount: svc.GroupCount(), MemberCount: svc.MemberCount(),
-		RankType: rankType, CycleDays: cycleDays, CurrentRound: currentRound,
+		RankType: rankType, CycleMinutes: cycleMinutes, CurrentRound: currentRound,
 	}, nil
 }
 
@@ -488,10 +488,10 @@ func (h *ServerHandler) S2SListRankConfigs(ctx context.Context, req *pb.PBS2SLis
 	ranks := make([]*pb.PBRankConfigSummary, len(infos))
 	for i, info := range infos {
 		var rankType pb.RankType = pb.RankType_RANK_TYPE_ONCE
-		var cycleDays, currentRound int32
+		var cycleMinutes, currentRound int32
 		if state := manager.GetPeriodicState(info.BizType, info.ActID); state != nil {
 			rankType = pb.RankType_RANK_TYPE_PERIODIC
-			cycleDays = state.CycleDays
+			cycleMinutes = state.CycleMinutes
 			currentRound = state.CurrentRound
 		}
 		ranks[i] = &pb.PBRankConfigSummary{
@@ -506,7 +506,7 @@ func (h *ServerHandler) S2SListRankConfigs(ctx context.Context, req *pb.PBS2SLis
 			MemberCount:  info.MemberCount,
 			CreateTime:   info.CreateTime,
 			RankType:     rankType,
-			CycleDays:    cycleDays,
+			CycleMinutes: cycleMinutes,
 			CurrentRound: currentRound,
 		}
 	}

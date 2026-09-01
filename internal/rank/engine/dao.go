@@ -39,7 +39,7 @@ func (d *DAO) session() *mongodbmodule.Session {
 
 // PeriodicSavedState 周期排行榜运行时状态，与逻辑活动的 RankConfigDoc 一同持久化。
 type PeriodicSavedState struct {
-	CycleDays      int32 `bson:"cycleDays"`
+	CycleMinutes   int32 `bson:"cycleMinutes"`
 	TotalOpenTime  int64 `bson:"totalOpenTime"`
 	TotalCloseTime int64 `bson:"totalCloseTime"`
 	CurrentRound   int32 `bson:"currentRound"`

@@ -12,7 +12,7 @@ import (
 type PeriodicState struct {
 	BizType        string
 	ActID          int32
-	CycleDays      int32
+	CycleMinutes   int32
 	TotalOpenTime  int64
 	TotalCloseTime int64
 	CurrentRound   int32
@@ -69,10 +69,10 @@ func (p *PeriodicState) currentBizId() string {
 	return p.roundBizId(p.CurrentRound)
 }
 
-// computeRoundWindow 根据总开始时间和周期天数计算第 round 轮的时间窗口。
+// computeRoundWindow 根据总开始时间和周期分钟数计算第 round 轮的时间窗口。
 // 最后一轮的结束时间截断至 TotalCloseTime。
 func (p *PeriodicState) computeRoundWindow(round int32) (openTime, closeTime int64) {
-	cycleDur := int64(p.CycleDays) * 24 * 60 * 60 * 1000
+	cycleDur := int64(p.CycleMinutes) * 60 * 1000
 	openTime = p.TotalOpenTime + int64(round-1)*cycleDur
 	closeTime = openTime + cycleDur
 	if closeTime > p.TotalCloseTime {
@@ -108,7 +108,7 @@ func (p *PeriodicState) advanceToNextRound() bool {
 // ToSavedState 转换为用于持久化的 DAO 结构。
 func (p *PeriodicState) ToSavedState() engine.PeriodicSavedState {
 	return engine.PeriodicSavedState{
-		CycleDays:      p.CycleDays,
+		CycleMinutes:   p.CycleMinutes,
 		TotalOpenTime:  p.TotalOpenTime,
 		TotalCloseTime: p.TotalCloseTime,
 		CurrentRound:   p.CurrentRound,
@@ -122,7 +122,7 @@ func StateFromSaved(bizType string, actID int32, s engine.PeriodicSavedState) *P
 	return &PeriodicState{
 		BizType:        bizType,
 		ActID:          actID,
-		CycleDays:      s.CycleDays,
+		CycleMinutes:   s.CycleMinutes,
 		TotalOpenTime:  s.TotalOpenTime,
 		TotalCloseTime: s.TotalCloseTime,
 		CurrentRound:   s.CurrentRound,
@@ -132,11 +132,11 @@ func StateFromSaved(bizType string, actID int32, s engine.PeriodicSavedState) *P
 }
 
 // NewPeriodicState 创建新的 PeriodicState（首次注册时使用）。
-func NewPeriodicState(bizType string, actID int32, cycleDays int32, totalOpenTime, totalCloseTime int64) *PeriodicState {
+func NewPeriodicState(bizType string, actID int32, cycleMinutes int32, totalOpenTime, totalCloseTime int64) *PeriodicState {
 	p := &PeriodicState{
 		BizType:        bizType,
 		ActID:          actID,
-		CycleDays:      cycleDays,
+		CycleMinutes:   cycleMinutes,
 		TotalOpenTime:  totalOpenTime,
 		TotalCloseTime: totalCloseTime,
 		CurrentRound:   1,

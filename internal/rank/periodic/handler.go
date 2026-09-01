@@ -70,7 +70,7 @@ func (h *Handler) Clear() {
 }
 
 // Register 注册周期排行榜活动：创建第一轮子服务并持久化状态。
-func (h *Handler) Register(ctx context.Context, bizType, logicalKey string, cfg engine.Config, cycleDays int32) error {
+func (h *Handler) Register(ctx context.Context, bizType, logicalKey string, cfg engine.Config, cycleMinutes int32) error {
 	h.mu.RLock()
 	_, alreadyExists := h.states[logicalKey]
 	h.mu.RUnlock()
@@ -78,7 +78,7 @@ func (h *Handler) Register(ctx context.Context, bizType, logicalKey string, cfg 
 		return nil
 	}
 
-	state := NewPeriodicState(bizType, cfg.ActID, cycleDays, cfg.OpenTime, cfg.CloseTime)
+	state := NewPeriodicState(bizType, cfg.ActID, cycleMinutes, cfg.OpenTime, cfg.CloseTime)
 
 	roundCfg := cfg
 	roundCfg.OpenTime = state.RoundOpenTime
@@ -101,8 +101,8 @@ func (h *Handler) Register(ctx context.Context, bizType, logicalKey string, cfg 
 			zaplog.LoggerSugar.Errorf("rank periodic: save config+state logicalKey=%s: %v", logicalKey, err)
 		}
 	}
-	zaplog.LoggerSugar.Infof("rank periodic: registered bizType=%s actID=%d cycleDays=%d round=1 [%d, %d)",
-		bizType, cfg.ActID, cycleDays, state.RoundOpenTime, state.RoundCloseTime)
+	zaplog.LoggerSugar.Infof("rank periodic: registered bizType=%s actID=%d cycleMinutes=%d round=1 [%d, %d)",
+		bizType, cfg.ActID, cycleMinutes, state.RoundOpenTime, state.RoundCloseTime)
 	return nil
 }
 
@@ -147,7 +147,7 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 	}
 
 	settledRound := state.CurrentRound
-	cleanDelay := time.Duration(cycleDurationMs(state.CycleDays)) * time.Millisecond
+	cleanDelay := time.Duration(cycleDurationMs(state.CycleMinutes)) * time.Millisecond
 	if svc != nil {
 		svcToClean := svc
 		time.AfterFunc(cleanDelay, func() {
@@ -207,7 +207,7 @@ func (h *Handler) setSettledTTLForRound(svc *engine.Service, state *PeriodicStat
 	if h.rdb == nil {
 		return
 	}
-	ttl := roundSettledTTL(state.CycleDays)
+	ttl := roundSettledTTL(state.CycleMinutes)
 	groups := svc.ListGroups()
 	rankCode := fmt.Sprintf("%s_score_%d", state.BizType, state.ActID)
 	bizId := state.roundBizId(state.CurrentRound)
@@ -337,9 +337,9 @@ func (h *Handler) ClaimHistoricalReward(bizType string, actID int32, round int32
 func (h *Handler) GetRoundInfos(state *PeriodicState) (currentRound int32, rounds []RoundInfo, err error) {
 	currentRound = state.CurrentRound
 	totalRounds := int32(1)
-	if state.CycleDays > 0 && state.TotalCloseTime > state.TotalOpenTime {
+	if state.CycleMinutes > 0 && state.TotalCloseTime > state.TotalOpenTime {
 		dur := state.TotalCloseTime - state.TotalOpenTime
-		totalRounds = int32((dur + cycleDurationMs(state.CycleDays) - 1) / cycleDurationMs(state.CycleDays))
+		totalRounds = int32((dur + cycleDurationMs(state.CycleMinutes) - 1) / cycleDurationMs(state.CycleMinutes))
 	}
 
 	rounds = make([]RoundInfo, 0, totalRounds)
@@ -359,14 +359,14 @@ func (h *Handler) GetRoundInfos(state *PeriodicState) (currentRound int32, round
 	return currentRound, rounds, nil
 }
 
-// cycleDurationMs 将天数转换为毫秒。
-func cycleDurationMs(days int32) int64 {
-	return int64(days) * 24 * 60 * 60 * 1000
+// cycleDurationMs 将分钟数转换为毫秒。
+func cycleDurationMs(minutes int32) int64 {
+	return int64(minutes) * 60 * 1000
 }
 
 // roundSettledTTL 历史轮次 Redis 结算快照的保留时长（2 个周期）。
-func roundSettledTTL(cycleDays int32) time.Duration {
-	return time.Duration(cycleDays) * 2 * 24 * time.Hour
+func roundSettledTTL(cycleMinutes int32) time.Duration {
+	return time.Duration(cycleMinutes) * 2 * time.Minute
 }
 
 // CleanupHistoricalRounds 在启动恢复时清理所有已结算轮次（< CurrentRound）的 Redis 热数据。

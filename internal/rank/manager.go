@@ -218,7 +218,7 @@ func (m *Manager) Register(ctx context.Context, bizType BizType, cfg engine.Conf
 		return err
 	}
 
-	rankType, cycleDays, err := LoadRankTypeAndCycle(bizType)
+	rankType, cycleMinutes, err := LoadRankTypeAndCycle(bizType)
 	if err != nil {
 		return err
 	}
@@ -226,7 +226,7 @@ func (m *Manager) Register(ctx context.Context, bizType BizType, cfg engine.Conf
 	key := NewBizKey(bizType, cfg.ActID).String()
 
 	if rankType == RankTypePeriodic {
-		if err := m.periodicHandler.Register(ctx, string(bizType), key, cfg, cycleDays); err != nil {
+		if err := m.periodicHandler.Register(ctx, string(bizType), key, cfg, cycleMinutes); err != nil {
 			return err
 		}
 		var ps *engine.PeriodicSavedState
