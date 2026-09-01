@@ -659,7 +659,7 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 		// 当本节点的内存状态落后于 MongoDB（另一节点已推进了轮次）时，强制刷新。
 		if doc.Periodic != nil {
 			existing := m.periodicHandler.GetState(key)
-			if existing == nil || existing.CurrentRound < doc.Periodic.CurrentRound {
+			if existing == nil || existing.GetCurrentRound() < doc.Periodic.CurrentRound {
 				ps := periodic.StateFromSaved(string(bizType), cfg.ActID, *doc.Periodic)
 				m.periodicHandler.SetState(key, ps)
 				// 清理历史轮次残留的 Redis 热数据（重启后 in-memory timer 已丢失）。
@@ -804,7 +804,7 @@ func (m *Manager) applyRankConfigDoc(ctx context.Context, doc engine.RankConfigD
 
 	if doc.Periodic != nil {
 		existing := m.periodicHandler.GetState(key)
-		if existing == nil || existing.CurrentRound < doc.Periodic.CurrentRound {
+		if existing == nil || existing.GetCurrentRound() < doc.Periodic.CurrentRound {
 			ps := periodic.StateFromSaved(string(bizType), cfg.ActID, *doc.Periodic)
 			m.periodicHandler.SetState(key, ps)
 			m.periodicHandler.CleanupHistoricalRounds(ps)

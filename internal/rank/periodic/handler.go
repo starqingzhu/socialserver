@@ -71,6 +71,12 @@ func (h *Handler) Clear() {
 
 // Register 注册周期排行榜活动：创建第一轮子服务并持久化状态。
 func (h *Handler) Register(ctx context.Context, bizType, logicalKey string, cfg engine.Config, cycleMinutes int32) error {
+	// BUG4: 在入口处校验，防止 CycleMinutes=0 导致无限循环推进轮次
+	if cycleMinutes <= 0 {
+		return fmt.Errorf("register periodic: cycleMinutes must be > 0, got %d", cycleMinutes)
+	}
+
+	// BUG5: 快速路径检查（RLock）
 	h.mu.RLock()
 	_, alreadyExists := h.states[logicalKey]
 	h.mu.RUnlock()
@@ -78,19 +84,27 @@ func (h *Handler) Register(ctx context.Context, bizType, logicalKey string, cfg 
 		return nil
 	}
 
-	state := NewPeriodicState(bizType, cfg.ActID, cycleMinutes, cfg.OpenTime, cfg.CloseTime)
+	state, err := NewPeriodicState(bizType, cfg.ActID, cycleMinutes, cfg.OpenTime, cfg.CloseTime)
+	if err != nil {
+		return fmt.Errorf("register periodic: %w", err)
+	}
 
 	roundCfg := cfg
 	roundCfg.OpenTime = state.RoundOpenTime
 	roundCfg.CloseTime = state.RoundCloseTime
 	roundCfg.GameEndTime = state.RoundCloseTime
-	roundCfg.RoundIndex = state.CurrentRound
+	roundCfg.RoundIndex = state.GetCurrentRound()
 
 	if _, err := h.registry.RegisterRoundService(ctx, bizType, logicalKey, roundCfg); err != nil {
 		return fmt.Errorf("register periodic round1: %w", err)
 	}
 
+	// BUG5: 写锁下二次检查，防止并发注册覆盖
 	h.mu.Lock()
+	if _, alreadyExists := h.states[logicalKey]; alreadyExists {
+		h.mu.Unlock()
+		return nil
+	}
 	h.states[logicalKey] = state
 	h.mu.Unlock()
 
@@ -125,33 +139,49 @@ func (h *Handler) TickAll(ctx context.Context, now int64) {
 
 // advanceRound 结算当前轮，若活动未结束则注册下一轮。
 // 使用 Redis SETNX 保证多节点只有一个节点执行推进。
+//
+// 修复说明：
+//   - BUG6: svc==nil 时提前 abort，避免用零值 Config 注册下一轮。
+//   - BUG2: Settle 失败时不调度 CleanupLiveData，保留热数据供下次重试。
+//   - BUG1: 先 RegisterRoundService 成功后再调用 advanceToNextRound()，
+//     注册失败时 state 保持不变，无脏状态。
 func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now int64) {
 	logicalKey := state.StateLogicalKey()
-	advanceLock := fmt.Sprintf("rank:periodic_advance:{%s}:r%d", logicalKey, state.CurrentRound)
+	currentRound := state.GetCurrentRound()
 
+	advanceLock := fmt.Sprintf("rank:periodic_advance:{%s}:r%d", logicalKey, currentRound)
 	locked, err := h.rdb.SetNX(advanceLock, "1", time.Minute)
 	if err != nil || !locked {
 		return
 	}
 
 	svc := h.registry.GetEngineServiceByKey(logicalKey)
-	if svc != nil && !svc.IsSettled() {
+	// BUG6: svc==nil 无法结算也无法获取配置，提前退出，不修改 state
+	if svc == nil {
+		zaplog.LoggerSugar.Errorf("rank periodic: advanceRound svc=nil logicalKey=%s round=%d, skipping",
+			logicalKey, currentRound)
+		return
+	}
+
+	// 结算当前轮
+	settleOK := svc.IsSettled()
+	if !settleOK {
 		if _, err := svc.Settle(ctx); err != nil {
 			zaplog.LoggerSugar.Warnf("rank periodic: settle round=%d logicalKey=%s err=%v",
-				state.CurrentRound, logicalKey, err)
+				currentRound, logicalKey, err)
+			// BUG2: settle 失败 → 不设 TTL、不删热数据，保留数据供后续重试
+		} else {
+			settleOK = true
 		}
 	}
 
-	if svc != nil {
-		h.setSettledTTLForRound(svc, state)
-	}
-
-	settledRound := state.CurrentRound
-	cleanDelay := time.Duration(cycleDurationMs(state.CycleMinutes)) * time.Millisecond
-	if svc != nil {
+	// BUG2: 只有结算成功才安排清理
+	if settleOK {
+		h.setSettledTTLForRound(svc, state, currentRound)
+		cleanDelay := time.Duration(cycleDurationMs(state.CycleMinutes)) * time.Millisecond
 		svcToClean := svc
 		time.AfterFunc(cleanDelay, func() {
-			zaplog.LoggerSugar.Infof("rank periodic: cleanup live data logicalKey=%s round=%d", logicalKey, settledRound)
+			zaplog.LoggerSugar.Infof("rank periodic: cleanup live data logicalKey=%s round=%d", logicalKey, currentRound)
 			svcToClean.CleanupLiveData()
 		})
 	}
@@ -161,28 +191,30 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 		return
 	}
 
-	if !state.advanceToNextRound() {
+	// BUG1: 先计算下一轮窗口，不修改 state
+	nextRound := currentRound + 1
+	nextOpen, nextClose := state.computeRoundWindow(nextRound)
+	if nextOpen >= state.TotalCloseTime {
 		zaplog.LoggerSugar.Infof("rank periodic: no more rounds logicalKey=%s", logicalKey)
 		return
 	}
 
-	existCfg := engine.Config{}
-	if svc != nil {
-		existCfg = svc.GetConfig()
-	}
-
+	existCfg := svc.GetConfig()
 	nextCfg := existCfg
-	nextCfg.OpenTime = state.RoundOpenTime
-	nextCfg.CloseTime = state.RoundCloseTime
-	nextCfg.GameEndTime = state.RoundCloseTime
-	nextCfg.RoundIndex = state.CurrentRound
+	nextCfg.OpenTime = nextOpen
+	nextCfg.CloseTime = nextClose
+	nextCfg.GameEndTime = nextClose
+	nextCfg.RoundIndex = nextRound
 	nextCfg.CreateTime = 0
 
+	// BUG1: 注册成功后才推进 state，失败时 state 保持在 currentRound
 	if _, err := h.registry.RegisterRoundService(ctx, state.BizType, logicalKey, nextCfg); err != nil {
 		zaplog.LoggerSugar.Errorf("rank periodic: register next round=%d logicalKey=%s err=%v",
-			state.CurrentRound, logicalKey, err)
+			nextRound, logicalKey, err)
 		return
 	}
+
+	state.advanceToNextRound()
 
 	if newSvc := h.registry.GetEngineServiceByKey(logicalKey); newSvc != nil {
 		h.warmupSem <- struct{}{}
@@ -199,18 +231,19 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 	}
 
 	zaplog.LoggerSugar.Infof("rank periodic: advanced to round=%d logicalKey=%s [%d, %d)",
-		state.CurrentRound, logicalKey, state.RoundOpenTime, state.RoundCloseTime)
+		nextRound, logicalKey, nextOpen, nextClose)
 }
 
 // setSettledTTLForRound 对历史轮次的 Redis 结算快照键设置 TTL（2 个周期）。
-func (h *Handler) setSettledTTLForRound(svc *engine.Service, state *PeriodicState) {
+// round 参数为刚刚结算完成的轮次号，由调用方在 advanceToNextRound 前传入。
+func (h *Handler) setSettledTTLForRound(svc *engine.Service, state *PeriodicState, round int32) {
 	if h.rdb == nil {
 		return
 	}
 	ttl := roundSettledTTL(state.CycleMinutes)
 	groups := svc.ListGroups()
 	rankCode := fmt.Sprintf("%s_score_%d", state.BizType, state.ActID)
-	bizId := state.roundBizId(state.CurrentRound)
+	bizId := state.roundBizId(round)
 	for _, g := range groups {
 		instanceID := commonrank.NewInstanceID(rankCode, bizId, fmt.Sprintf("group_%d", g.GroupID))
 		settledKey := fmt.Sprintf("rank:settled:{%s}", instanceID)
@@ -335,25 +368,31 @@ func (h *Handler) ClaimHistoricalReward(bizType string, actID int32, round int32
 // GetRoundInfos 返回周期排行榜的轮次摘要列表（按轮次升序）。
 // 仅处理周期排行榜；一次性排行榜由 Manager 直接处理。
 func (h *Handler) GetRoundInfos(state *PeriodicState) (currentRound int32, rounds []RoundInfo, err error) {
-	currentRound = state.CurrentRound
+	// BUG3: 原子读取一次，整个函数使用同一快照，避免并发 advance 导致前后不一致
+	currentRound = state.GetCurrentRound()
+
 	totalRounds := int32(1)
 	if state.CycleMinutes > 0 && state.TotalCloseTime > state.TotalOpenTime {
 		dur := state.TotalCloseTime - state.TotalOpenTime
 		totalRounds = int32((dur + cycleDurationMs(state.CycleMinutes) - 1) / cycleDurationMs(state.CycleMinutes))
 	}
 
+	nowMs := time.Now().UnixMilli()
 	rounds = make([]RoundInfo, 0, totalRounds)
 	for r := int32(1); r <= totalRounds; r++ {
 		open, close := state.computeRoundWindow(r)
 		if open >= state.TotalCloseTime {
 			break
 		}
+		// OBS7: 当前轮窗口已关闭（活动已结束）时标记为 Settled，
+		// 避免最后一轮因 CurrentRound 不再递增而永远显示 Settled=false。
+		settled := r < currentRound || (r == currentRound && close <= nowMs)
 		rounds = append(rounds, RoundInfo{
 			Round:     r,
 			OpenTime:  open,
 			CloseTime: close,
-			Settled:   r < state.CurrentRound,
-			Current:   r == state.CurrentRound,
+			Settled:   settled,
+			Current:   r == currentRound,
 		})
 	}
 	return currentRound, rounds, nil
@@ -372,7 +411,8 @@ func roundSettledTTL(cycleMinutes int32) time.Duration {
 // CleanupHistoricalRounds 在启动恢复时清理所有已结算轮次（< CurrentRound）的 Redis 热数据。
 // 幂等操作，可重复执行。
 func (h *Handler) CleanupHistoricalRounds(state *PeriodicState) {
-	for r := int32(1); r < state.CurrentRound; r++ {
+	curRound := state.GetCurrentRound()
+	for r := int32(1); r < curRound; r++ {
 		bizId := state.roundBizId(r)
 		store := engine.NewStore(h.rdb, h.dao, bizId)
 		store.CleanupLiveData(nil)

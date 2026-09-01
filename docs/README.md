@@ -193,7 +193,7 @@ cd socialserver
 | `S2SGetRewardUsers` | 获取有奖励资格的玩家列表 |
 | `S2SClaimReward` | 原子幂等写入领奖记录；首次返回 `claimed=false`，重复返回 `claimed=true` |
 | `S2SGetClaimStatus` | 查询玩家领奖状态 |
-| `S2SGetRankRounds` | 查询周期排行榜所有轮次摘要（currentRound + 各轮 settled 状态） |
+| `S2SGetRankCurRound` | 查询周期排行榜所有轮次摘要（currentRound + 各轮 settled 状态） |
 
 ### GM 接口（运营后台）
 

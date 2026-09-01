@@ -24,6 +24,7 @@ func (m *Manager) GetEngineServiceByKey(logicalKey string) *engine.Service {
 
 // registerSubService 注册一个不写入 MongoDB 配置的 engine.Service，并存入 services/engineServices。
 // logicalKey 为 services 和 engineServices 中的查找键（始终是 "{bizType}:{actID}"）。
+// BUG5 fix: 双重检查锁，保证并发注册时不覆盖已有服务。
 func (m *Manager) registerSubService(ctx context.Context, bizType BizType, logicalKey string, cfg engine.Config) (*engine.Service, error) {
 	if cfg.RankCode == "" {
 		cfg.RankCode = fmt.Sprintf("%s_score_%d", bizType, cfg.ActID)
@@ -31,6 +32,14 @@ func (m *Manager) registerSubService(ctx context.Context, bizType BizType, logic
 	if cfg.CreateTime == 0 {
 		cfg.CreateTime = time.Now().UnixMilli()
 	}
+
+	// 快速路径：已存在则直接返回
+	m.mu.RLock()
+	if existing, ok := m.engineServices[logicalKey]; ok {
+		m.mu.RUnlock()
+		return existing, nil
+	}
+	m.mu.RUnlock()
 
 	if err := m.rankService.RegisterRank(ctx, commonrank.Rank{
 		RankCode:       cfg.RankCode,
@@ -55,7 +64,12 @@ func (m *Manager) registerSubService(ctx context.Context, bizType BizType, logic
 		return nil, err
 	}
 
+	// 写锁下二次检查，防止并发调用互相覆盖
 	m.mu.Lock()
+	if existing, ok := m.engineServices[logicalKey]; ok {
+		m.mu.Unlock()
+		return existing, nil
+	}
 	m.services[logicalKey] = newBizServiceWrapper(bizType, service)
 	m.engineServices[logicalKey] = service
 	m.mu.Unlock()
@@ -128,11 +142,13 @@ func (m *Manager) ResolveEngineService(bizType BizType, actID int32, round int32
 	if state == nil {
 		return m.GetEngineService(bizType, actID), false
 	}
+	// BUG3: 原子读取一次，避免两次读取之间 advance 导致 effectiveRound >= currentRound 误判
+	curRound := state.GetCurrentRound()
 	effectiveRound := round
 	if effectiveRound == 0 {
-		effectiveRound = state.CurrentRound
+		effectiveRound = curRound
 	}
-	if effectiveRound >= state.CurrentRound {
+	if effectiveRound >= curRound {
 		return m.GetEngineService(bizType, actID), false
 	}
 	return nil, true

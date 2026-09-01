@@ -42,11 +42,11 @@ func (h *ServerHandler) S2SUpsertScore(ctx context.Context, req *pb.PBS2SUpsertS
 	manager := rankservice.GetGlobalManager()
 	if manager != nil {
 		if ps := manager.GetPeriodicState(bizType, req.ActId); ps != nil {
-			currentRound = ps.CurrentRound
-			if req.Round > 0 && req.Round != ps.CurrentRound {
+			currentRound = ps.GetCurrentRound()
+			if req.Round > 0 && req.Round != ps.GetCurrentRound() {
 				return &pb.PBS2SUpsertScoreResponse{
 					MsgCode:      commonMsg.MsgCode_CODE_RANK_ROUND_CHANGED,
-					CurrentRound: ps.CurrentRound,
+					CurrentRound: ps.GetCurrentRound(),
 				}, nil
 			}
 		}
@@ -101,7 +101,7 @@ func (h *ServerHandler) S2SGetRankList(ctx context.Context, req *pb.PBS2SGetRank
 	// 确定当前轮次（一次性排行榜固定为 1）
 	currentRound := int32(1)
 	if ps := manager.GetPeriodicState(bizType, req.ActId); ps != nil {
-		currentRound = ps.CurrentRound
+		currentRound = ps.GetCurrentRound()
 	}
 
 	if isHistorical {
@@ -413,7 +413,7 @@ func (h *ServerHandler) S2SGetRankConfig(ctx context.Context, req *pb.PBS2SGetRa
 		if state := manager.GetPeriodicState(rankservice.BizType(req.BizType), req.ActId); state != nil {
 			rankType = pb.RankType_RANK_TYPE_PERIODIC
 			cycleMinutes = state.CycleMinutes
-			currentRound = state.CurrentRound
+			currentRound = state.GetCurrentRound()
 		}
 	}
 
@@ -489,18 +489,26 @@ func (h *ServerHandler) S2SListRankConfigs(ctx context.Context, req *pb.PBS2SLis
 	for i, info := range infos {
 		var rankType pb.RankType = pb.RankType_RANK_TYPE_ONCE
 		var cycleMinutes, currentRound int32
+		// OBS9: 周期排行榜的 OpenTime/CloseTime 取整体活动窗口（TotalOpenTime/TotalCloseTime），
+		// 而非当前子轮注册到 engine.Config 的轮次窗口（避免调用方误读为活动总时间）。
+		openTime := info.Config.OpenTime
+		closeTime := info.Config.CloseTime
+		gameEndTime := effectiveGameEndTime(info.Config.GameEndTime, info.Config.CloseTime)
 		if state := manager.GetPeriodicState(info.BizType, info.ActID); state != nil {
 			rankType = pb.RankType_RANK_TYPE_PERIODIC
 			cycleMinutes = state.CycleMinutes
-			currentRound = state.CurrentRound
+			currentRound = state.GetCurrentRound()
+			openTime = state.TotalOpenTime
+			closeTime = state.TotalCloseTime
+			gameEndTime = state.TotalCloseTime
 		}
 		ranks[i] = &pb.PBRankConfigSummary{
 			BizType:      string(info.BizType),
 			ActId:        info.ActID,
 			RankCode:     info.Config.RankCode,
-			OpenTime:     info.Config.OpenTime,
-			CloseTime:    info.Config.CloseTime,
-			GameEndTime:  effectiveGameEndTime(info.Config.GameEndTime, info.Config.CloseTime),
+			OpenTime:     openTime,
+			CloseTime:    closeTime,
+			GameEndTime:  gameEndTime,
 			Settled:      info.Settled,
 			GroupCount:   info.GroupCount,
 			MemberCount:  info.MemberCount,
@@ -513,38 +521,46 @@ func (h *ServerHandler) S2SListRankConfigs(ctx context.Context, req *pb.PBS2SLis
 	return &pb.PBS2SListRankConfigsResponse{Ranks: ranks}, nil
 }
 
-// S2SGetRankRounds 查询排行榜活动的轮次列表（周期排行榜）。
-func (h *ServerHandler) S2SGetRankRounds(ctx context.Context, req *pb.PBS2SGetRankRoundsRequest) (resp *pb.PBS2SGetRankRoundsResponse, retErr error) {
-	zaplog.LoggerSugar.Infof("[rank] S2SGetRankRounds req bizType=%s actId=%d", req.BizType, req.ActId)
+// S2SGetRankCurRound 查询排行榜活动当前轮次信息（周期/一次性排行榜通用）。
+func (h *ServerHandler) S2SGetRankCurRound(ctx context.Context, req *pb.PBS2SGetRankCurRoundRequest) (resp *pb.PBS2SGetRankCurRoundResponse, retErr error) {
+	zaplog.LoggerSugar.Infof("[rank] S2SGetRankCurRound req bizType=%s actId=%d", req.BizType, req.ActId)
 	defer func() {
 		if retErr != nil {
-			zaplog.LoggerSugar.Warnf("[rank] S2SGetRankRounds resp err=%v", retErr)
+			zaplog.LoggerSugar.Warnf("[rank] S2SGetRankCurRound resp err=%v", retErr)
 		} else {
-			zaplog.LoggerSugar.Infof("[rank] S2SGetRankRounds resp currentRound=%d roundCount=%d", resp.CurrentRound, len(resp.Rounds))
+			zaplog.LoggerSugar.Infof("[rank] S2SGetRankCurRound resp currentRound=%v", resp.CurrentRound)
 		}
 	}()
 	manager := rankservice.GetGlobalManager()
 	if manager == nil {
 		return nil, status.Error(codes.Internal, "rank manager not initialized")
 	}
+	// 复用 GetRoundInfos 统一处理周期/一次性排行榜：轮次时间窗口由不可变的总窗口计算，
+	// 避免直接读取运行中可能被 advanceRound 并发修改的 RoundOpenTime/RoundCloseTime。
 	currentRound, roundInfos, err := manager.GetRoundInfos(rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return nil, status.Error(codes.NotFound, err.Error())
 	}
-	pbRounds := make([]*pb.PBRoundInfo, len(roundInfos))
-	for i, r := range roundInfos {
-		pbRounds[i] = &pb.PBRoundInfo{
-			Round:     r.Round,
-			OpenTime:  r.OpenTime,
-			CloseTime: r.CloseTime,
-			Settled:   r.Settled,
-			Current:   r.Current,
+	var pbCurrentRound *pb.PBRoundInfo
+	for i := range roundInfos {
+		if roundInfos[i].Round != currentRound {
+			continue
 		}
+		pbCurrentRound = &pb.PBRoundInfo{
+			Round:     roundInfos[i].Round,
+			OpenTime:  roundInfos[i].OpenTime,
+			CloseTime: roundInfos[i].CloseTime,
+			Settled:   roundInfos[i].Settled,
+			Current:   roundInfos[i].Current,
+		}
+		break
 	}
-	return &pb.PBS2SGetRankRoundsResponse{
+	if pbCurrentRound == nil {
+		return nil, status.Errorf(codes.NotFound, "service not found: bizType=%s actId=%d", req.BizType, req.ActId)
+	}
+	return &pb.PBS2SGetRankCurRoundResponse{
 		MsgCode:      commonMsg.MsgCode_CODE_OK,
-		CurrentRound: currentRound,
-		Rounds:       pbRounds,
+		CurrentRound: pbCurrentRound,
 	}, nil
 }
 
