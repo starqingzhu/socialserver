@@ -238,5 +238,85 @@
     "num": "2",
     "overtakeInterval": "360",
     "overtakeTime": "1800"
+  },
+  {
+    "LockTokenTime": "43200",
+    "MaxToken": "340124",
+    "beiZhu": "A级",
+    "bizType": "monopoly",
+    "defaultTokenRange": [
+      105000,
+      110000
+    ],
+    "growTokenCd": "600",
+    "growTokenRange": [
+      9000,
+      11000
+    ],
+    "id": "13",
+    "maxDifferenceToken": "20310",
+    "num": "1",
+    "overtakeInterval": "60",
+    "overtakeTime": "300"
+  },
+  {
+    "LockTokenTime": "64800",
+    "MaxToken": "270557",
+    "beiZhu": "B级",
+    "bizType": "monopoly",
+    "defaultTokenRange": [
+      102000,
+      105000
+    ],
+    "growTokenCd": "1200",
+    "growTokenRange": [
+      9000,
+      10200
+    ],
+    "id": "14",
+    "maxDifferenceToken": "10540",
+    "num": "1",
+    "overtakeInterval": "120",
+    "overtakeTime": "600"
+  },
+  {
+    "LockTokenTime": "86400",
+    "MaxToken": "180010",
+    "beiZhu": "C级",
+    "bizType": "monopoly",
+    "defaultTokenRange": [
+      101000,
+      102000
+    ],
+    "growTokenCd": "2400",
+    "growTokenRange": [
+      7500,
+      9000
+    ],
+    "id": "15",
+    "maxDifferenceToken": "5880",
+    "num": "1",
+    "overtakeInterval": "240",
+    "overtakeTime": "1200"
+  },
+  {
+    "LockTokenTime": "86400",
+    "MaxToken": "120509",
+    "beiZhu": "D级",
+    "bizType": "monopoly",
+    "defaultTokenRange": [
+      100000,
+      101000
+    ],
+    "growTokenCd": "3600",
+    "growTokenRange": [
+      6000,
+      7500
+    ],
+    "id": "16",
+    "maxDifferenceToken": "1260",
+    "num": "2",
+    "overtakeInterval": "360",
+    "overtakeTime": "1800"
   }
 ]

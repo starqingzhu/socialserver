@@ -22,19 +22,19 @@
   {
     "balloonRankOpenToken": "0",
     "bizType": "camper_competition",
-    "cycleMinutes": "0",
+    "cycleMinutes": "15",
     "id": "3",
     "name": "camper_competition_title",
     "rankPeopleNum": "30",
-    "rankType": "1",
+    "rankType": "2",
     "topNameColor": "#266519"
   },
   {
-    "balloonRankOpenToken": "100",
+    "balloonRankOpenToken": "100000",
     "bizType": "monopoly",
     "cycleMinutes": "0",
     "id": "4",
-    "name": "activity_DropEggDecoration_rank_title",
+    "name": "activity_MonopolyDecoration_rank_title",
     "rankPeopleNum": "30",
     "rankType": "1",
     "topNameColor": "#266519"
