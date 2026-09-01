@@ -185,7 +185,7 @@ func (h *ServerHandler) S2SGetMemberRank(ctx context.Context, req *pb.PBS2SGetMe
 			return nil, status.Error(codes.Internal, err.Error())
 		}
 		_ = snapshots
-		return &pb.PBS2SGetMemberRankResponse{Snapshot: snapshotToProto(mySnap)}, nil
+		return &pb.PBS2SGetMemberRankResponse{Snapshot: snapshotToProto(mySnap), SettleStage: 1}, nil
 	}
 	if svc == nil {
 		return nil, status.Errorf(codes.NotFound, "service not found: bizType=%s actId=%d", req.BizType, req.ActId)
