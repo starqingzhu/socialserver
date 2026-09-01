@@ -267,7 +267,7 @@ type Handler struct {
 
 | 方法 | 说明 |
 | --- | --- |
-| `Register(ctx, bizType, logicalKey, cfg, cycleDays)` | 注册或恢复周期活动，创建第 1 轮 Service |
+| `Register(ctx, bizType, logicalKey, cfg, cycleDays)` | 注册或恢复周期活动，创建当前轮 Service（按当前时间定位） |
 | `TickAll(ctx, now)` | 遍历所有状态，检查轮次是否到期并推进 |
 | `GetState(logicalKey)` | 读取当前 PeriodicState |
 | `GetRoundInfos(bizType, actID)` | 返回所有历史轮次摘要 |
@@ -408,7 +408,7 @@ Manager.Register()
 ── 周期排行榜注册 ──
 Manager.Register() with rankType=Periodic
   └── periodicHandler.Register(ctx, bizType, logicalKey, cfg, cycleDays)
-        ├── 创建初始 PeriodicState（CurrentRound=1，计算第 1 轮窗口）
+        ├── 创建初始 PeriodicState（按当前时间定位 CurrentRound，计算对应轮窗口）
         ├── registry.RegisterRoundService(bizType, roundBizId, cfg) ← 回调 Manager
         └── 保存 PeriodicState 到 MongoDB
 

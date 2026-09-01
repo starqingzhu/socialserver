@@ -3,6 +3,7 @@ package periodic
 import (
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	"socialserver/internal/rank/engine"
 )
@@ -102,6 +103,36 @@ func (p *PeriodicState) computeRoundWindow(round int32) (openTime, closeTime int
 	return
 }
 
+// computeRoundAt 返回时间点 now 所属的轮次（从 1 开始）。
+// 按 (now - TotalOpenTime) / 周期时长 + 1 计算，并截断到活动有效轮次内。
+func (p *PeriodicState) computeRoundAt(now int64) int32 {
+	if p.CycleMinutes <= 0 {
+		return 1
+	}
+	cycleDur := int64(p.CycleMinutes) * 60 * 1000
+	if now <= p.TotalOpenTime {
+		return 1
+	}
+	round := int32((now-p.TotalOpenTime)/cycleDur) + 1
+	if max := p.maxRound(); round > max {
+		return max
+	}
+	return round
+}
+
+// maxRound 返回该活动可容纳的最大轮次号。
+func (p *PeriodicState) maxRound() int32 {
+	if p.CycleMinutes <= 0 {
+		return 1
+	}
+	span := p.TotalCloseTime - p.TotalOpenTime
+	if span <= 0 {
+		return 1
+	}
+	cycleDur := int64(p.CycleMinutes) * 60 * 1000
+	return int32((span-1)/cycleDur) + 1
+}
+
 // isRoundExpired 判断当前轮是否已到结束时间。
 // 仅由 tick goroutine 调用，RoundCloseTime 无需 atomic 保护。
 func (p *PeriodicState) isRoundExpired(now int64) bool {
@@ -157,6 +188,7 @@ func StateFromSaved(bizType string, actID int32, s engine.PeriodicSavedState) *P
 }
 
 // NewPeriodicState 创建新的 PeriodicState（首次注册时使用）。
+// 创建时直接按当前时间定位到所在轮次，而不是从第 1 轮开始逐步 tick 推进。
 // cycleMinutes 必须 > 0，否则返回 error。
 func NewPeriodicState(bizType string, actID int32, cycleMinutes int32, totalOpenTime, totalCloseTime int64) (*PeriodicState, error) {
 	if cycleMinutes <= 0 {
@@ -169,7 +201,8 @@ func NewPeriodicState(bizType string, actID int32, cycleMinutes int32, totalOpen
 		TotalOpenTime:  totalOpenTime,
 		TotalCloseTime: totalCloseTime,
 	}
-	p.currentRound = 1
-	p.RoundOpenTime, p.RoundCloseTime = p.computeRoundWindow(1)
+	curRound := p.computeRoundAt(time.Now().UnixMilli())
+	p.currentRound = curRound
+	p.RoundOpenTime, p.RoundCloseTime = p.computeRoundWindow(curRound)
 	return p, nil
 }

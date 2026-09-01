@@ -107,7 +107,7 @@ func (h *Handler) Register(ctx context.Context, bizType, logicalKey string, cfg 
 	roundCfg.RoundIndex = state.GetCurrentRound()
 
 	if _, err := h.registry.RegisterRoundService(ctx, bizType, logicalKey, roundCfg); err != nil {
-		return fmt.Errorf("register periodic round1: %w", err)
+		return fmt.Errorf("register periodic round%d: %w", state.GetCurrentRound(), err)
 	}
 
 	// 写锁下二次检查，防止并发写覆盖（BUG5）
@@ -129,8 +129,8 @@ func (h *Handler) Register(ctx context.Context, bizType, logicalKey string, cfg 
 			zaplog.LoggerSugar.Errorf("rank periodic: save config+state logicalKey=%s: %v", logicalKey, err)
 		}
 	}
-	zaplog.LoggerSugar.Infof("rank periodic: registered bizType=%s actID=%d cycleMinutes=%d round=1 [%d, %d)",
-		bizType, cfg.ActID, cycleMinutes, state.RoundOpenTime, state.RoundCloseTime)
+	zaplog.LoggerSugar.Infof("rank periodic: registered bizType=%s actID=%d cycleMinutes=%d round=%d [%d, %d)",
+		bizType, cfg.ActID, cycleMinutes, state.GetCurrentRound(), state.RoundOpenTime, state.RoundCloseTime)
 	return nil
 }
 
