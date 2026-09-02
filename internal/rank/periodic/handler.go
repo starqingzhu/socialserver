@@ -325,20 +325,21 @@ func (h *Handler) GetHistoricalRoundList(ctx context.Context, bizType string, ac
 	// 再降级到 MongoDB，避免因异步写入延迟导致历史查询短暂失败。
 	store := engine.NewStore(h.rdb, h.dao, bizId)
 	groupID, found, err := store.GetMember(userID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("get member: %w", err)
-	}
-	if !found {
-		// member→group 索引（rank_member，Redis TTL 过期 + Mongo 异步写未落库）可能丢失。
+	if err != nil || !found {
+		// member→group 索引（rank_member）读失败或未命中（Redis TTL 过期 / Mongo 异步写未落库 / Redis 短暂不可用）。
 		// 已结算分组快照（rank_settled）是权威数据，直接扫描该轮次全部分组定位用户。
+		if err != nil {
+			zaplog.LoggerSugar.Warnf("rank periodic: get member index err, try settled fallback bizType=%s actID=%d round=%d userID=%d err=%v",
+				bizType, actID, round, userID, err)
+		}
 		groupID, found, err = h.findUserGroupFromSettled(bizId, userID)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("get member: %w", err)
 		}
 		if !found {
 			return nil, nil, nil
 		}
-		zaplog.LoggerSugar.Warnf("rank periodic: historical member index miss, recovered from settled bizType=%s actID=%d round=%d userID=%d groupID=%d",
+		zaplog.LoggerSugar.Warnf("rank periodic: historical member index unavailable, recovered from settled bizType=%s actID=%d round=%d userID=%d groupID=%d",
 			bizType, actID, round, userID, groupID)
 	}
 
