@@ -245,5 +245,24 @@ func (m *Manager) ResolveEngineService(bizType BizType, actID int32, round int32
 	return currentSvc, false
 }
 
+// FallbackClaimReward 为一次性排行榜在服务不在内存时（>7天后重启或GM删除前）直接走 Store/DAO 路径。
+// bizId 固定为 "{bizType}_{actID}"（无轮次后缀）。
+func (m *Manager) FallbackClaimReward(bizType BizType, actID int32, userID int64, now int64) (bool, int64, error) {
+	bizId := fmt.Sprintf("%s_%d", bizType, actID)
+	store := engine.NewStore(m.rdb, m.dao, bizId)
+	return store.AtomicClaim(userID, now)
+}
+
+// FallbackGetClaimStatus 为一次性排行榜在服务不在内存时直接走 Store/DAO 路径查询领奖状态。
+func (m *Manager) FallbackGetClaimStatus(bizType BizType, actID int32, userID int64) (bool, int64, error) {
+	bizId := fmt.Sprintf("%s_%d", bizType, actID)
+	store := engine.NewStore(m.rdb, m.dao, bizId)
+	ct, found, err := store.GetClaim(userID)
+	if err != nil {
+		return false, 0, err
+	}
+	return found, ct, nil
+}
+
 // 编译期确保 Manager 实现 periodic.ServiceRegistrar。
 var _ periodic.ServiceRegistrar = (*Manager)(nil)

@@ -403,6 +403,7 @@ func (st *Store) CleanupLiveData(groups []*Group) {
 	st.rdb.Expire(rediskeys.GetRankMetaKey(st.bizId), settledDataRetentionTTL)
 	st.rdb.Expire(rediskeys.GetRankGroupsKey(st.bizId), settledDataRetentionTTL)
 	st.rdb.Expire(rediskeys.GetRankMembersKey(st.bizId), settledDataRetentionTTL)
+	st.rdb.Expire(rediskeys.GetRankClaimsKey(st.bizId), settledDataRetentionTTL)
 	st.rdb.Expire(rediskeys.GetRankMongoCheckedKey(st.bizId), settledDataRetentionTTL)
 	for _, g := range groups {
 		if g == nil {
@@ -588,9 +589,16 @@ func (st *Store) AtomicClaim(userID int64, now int64) (claimed bool, claimTime i
 			st.rdb.HSet(claimsKey, uidStr, strconv.FormatInt(mongoTime, 10))
 			return true, mongoTime, nil
 		}
-		// Genuinely first claim — persist synchronously so Redis eviction can't cause a duplicate.
-		if e := st.dao.SaveClaim(st.bizId, userID, now); e != nil {
+		// Genuinely first claim — persist atomically via $setOnInsert so Redis eviction can't cause
+		// a duplicate (SaveClaim uses an async write queue and silently drops errors, which is unsafe here).
+		isFirst, savedTime, e := st.dao.SaveClaimIfNotExists(st.bizId, userID, now)
+		if e != nil {
 			return false, 0, e
+		}
+		if !isFirst {
+			// Concurrent write from another node won the race; update Redis and report as already claimed.
+			st.rdb.HSet(claimsKey, uidStr, strconv.FormatInt(savedTime, 10))
+			return true, savedTime, nil
 		}
 	}
 	return false, now, nil

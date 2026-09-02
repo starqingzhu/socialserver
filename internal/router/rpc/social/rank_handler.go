@@ -305,7 +305,12 @@ func (h *ServerHandler) S2SClaimReward(ctx context.Context, req *pb.PBS2SClaimRe
 		return &pb.PBS2SClaimRewardResponse{Claimed: claimed, ClaimTime: claimTime}, nil
 	}
 	if svc == nil {
-		return nil, status.Errorf(codes.NotFound, "service not found: bizType=%s actId=%d", req.BizType, req.ActId)
+		// 一次性排行榜：服务已从内存移除（>7天过期或重启未恢复），直接走 Store/DAO 路径。
+		claimed, claimTime, err := manager.FallbackClaimReward(bizType, req.ActId, req.UserId, time.Now().UnixMilli())
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		return &pb.PBS2SClaimRewardResponse{Claimed: claimed, ClaimTime: claimTime}, nil
 	}
 	claimed, claimTime, err := svc.ClaimReward(req.UserId, time.Now().UnixMilli())
 	if err != nil {
@@ -340,7 +345,12 @@ func (h *ServerHandler) S2SGetClaimStatus(ctx context.Context, req *pb.PBS2SGetC
 		return &pb.PBS2SGetClaimStatusResponse{Claimed: claimed, ClaimTime: claimTime}, nil
 	}
 	if svc == nil {
-		return nil, status.Errorf(codes.NotFound, "service not found: bizType=%s actId=%d", req.BizType, req.ActId)
+		// 一次性排行榜：服务已从内存移除，直接走 Store/DAO 路径查询。
+		claimed, claimTime, err := manager.FallbackGetClaimStatus(bizType, req.ActId, req.UserId)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		return &pb.PBS2SGetClaimStatusResponse{Claimed: claimed, ClaimTime: claimTime}, nil
 	}
 	claimed, claimTime, err := svc.GetClaimStatus(req.UserId)
 	if err != nil {
