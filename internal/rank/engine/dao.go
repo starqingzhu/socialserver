@@ -127,8 +127,25 @@ func (d *DAO) LoadAllRankConfigs() ([]RankConfigDoc, error) {
 	return docs, nil
 }
 
-func (d *DAO) DeleteRankConfig(bizKey string) error {
+// LoadRankConfig 按逻辑键 "{bizType}:{actID}" 加载单个排行榜配置文档。
+// 供无内存状态时（如已过期活动的历史查询）懒加载周期元数据判断路由。
+func (d *DAO) LoadRankConfig(bizKey string) (RankConfigDoc, bool, error) {
 	if !d.available() {
+		return RankConfigDoc{}, false, nil
+	}
+	var doc RankConfigDoc
+	err := d.session().FindOne(d.dbName, commonrank.CT_RANK_CONFIG,
+		bson.M{"_id": bizKey}, &doc)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return RankConfigDoc{}, false, nil
+		}
+		return RankConfigDoc{}, false, err
+	}
+	return doc, true, nil
+}
+
+func (d *DAO) DeleteRankConfig(bizKey string) error {	if !d.available() {
 		return nil
 	}
 	task := mongoTask.GWriteTaskBuilder.BuildDeleteTask(

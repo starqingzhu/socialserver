@@ -281,27 +281,45 @@ func (h *Handler) setSettledTTLForRound(svc *engine.Service, state *PeriodicStat
 	}
 }
 
+// resolveHistoricalRound 解析历史查询的目标轮次：round=0 表示"当前轮"。
+// 不依赖内存 PeriodicState，已过期活动（无内存状态）也能工作：
+// 依次从 Redis curRound 键、MongoDB 周期元数据、内存 state 解析。
+func (h *Handler) resolveHistoricalRound(logicalKey, bizType string, actID, round int32) (int32, error) {
+	if round > 0 {
+		return round, nil
+	}
+	if r := h.readCurRoundFromRedis(logicalKey); r > 0 {
+		return r, nil
+	}
+	if h.dao != nil {
+		if doc, ok, err := h.dao.LoadRankConfig(logicalKey); err == nil && ok && doc.Periodic != nil && doc.Periodic.CurrentRound > 0 {
+			return doc.Periodic.CurrentRound, nil
+		}
+	}
+	if state := h.GetState(logicalKey); state != nil {
+		if r := state.GetCurrentRound(); r > 0 {
+			return r, nil
+		}
+	}
+	return 0, fmt.Errorf("cannot resolve current round for %s", logicalKey)
+}
+
+// roundBizId 返回第 round 轮的 engine 内部 BizId（与 PeriodicState.roundBizId 一致，但不依赖状态）。
+func roundBizId(bizType string, actID, round int32) string {
+	return fmt.Sprintf("%s_%d_r%d", bizType, actID, round)
+}
+
 // GetHistoricalRoundList 查询历史轮次的排行榜（从 MongoDB/Redis 读取已结算数据）。
 func (h *Handler) GetHistoricalRoundList(ctx context.Context, bizType string, actID int32, round int32, userID int64, start, end int64) ([]commonrank.RankMemberSnapshot, *commonrank.RankMemberSnapshot, error) {
 	if h.dao == nil {
 		return nil, nil, fmt.Errorf("dao not available")
 	}
 	logicalKey := LogicalKey(bizType, actID)
-	state := h.GetState(logicalKey)
-	if state == nil {
-		return nil, nil, fmt.Errorf("not a periodic activity: bizType=%s actID=%d", bizType, actID)
+	round, err := h.resolveHistoricalRound(logicalKey, bizType, actID, round)
+	if err != nil {
+		return nil, nil, err
 	}
-
-	// round=0 表示当前轮，解析为实际轮号。
-	// 结算后的当前轮会被路由到历史路径，此时 req.Round 可能仍为 0。
-	if round == 0 {
-		round = state.GetCurrentRound()
-		if redisCurRound := h.readCurRoundFromRedis(logicalKey); redisCurRound > round {
-			round = redisCurRound
-		}
-	}
-
-	bizId := state.roundBizId(round)
+	bizId := roundBizId(bizType, actID, round)
 
 	// 优先从 Redis 查询（CleanupLiveData 前 1 个周期内仍有效），
 	// 再降级到 MongoDB，避免因异步写入延迟导致历史查询短暂失败。
@@ -351,17 +369,11 @@ func (h *Handler) GetHistoricalRewardUsers(ctx context.Context, bizType string, 
 		return nil, fmt.Errorf("dao not available")
 	}
 	logicalKey := LogicalKey(bizType, actID)
-	state := h.GetState(logicalKey)
-	if state == nil {
-		return nil, fmt.Errorf("not a periodic activity: bizType=%s actID=%d", bizType, actID)
+	round, err := h.resolveHistoricalRound(logicalKey, bizType, actID, round)
+	if err != nil {
+		return nil, err
 	}
-	if round == 0 {
-		round = state.GetCurrentRound()
-		if redisCurRound := h.readCurRoundFromRedis(logicalKey); redisCurRound > round {
-			round = redisCurRound
-		}
-	}
-	bizId := state.roundBizId(round)
+	bizId := roundBizId(bizType, actID, round)
 	members, err := h.dao.LoadAllMembers(bizId)
 	if err != nil {
 		return nil, err
@@ -381,17 +393,11 @@ func (h *Handler) GetHistoricalClaimStatus(bizType string, actID int32, round in
 		return false, 0, fmt.Errorf("dao not available")
 	}
 	logicalKey := LogicalKey(bizType, actID)
-	state := h.GetState(logicalKey)
-	if state == nil {
-		return false, 0, fmt.Errorf("not a periodic activity: bizType=%s actID=%d", bizType, actID)
+	round, err = h.resolveHistoricalRound(logicalKey, bizType, actID, round)
+	if err != nil {
+		return false, 0, err
 	}
-	if round == 0 {
-		round = state.GetCurrentRound()
-		if redisCurRound := h.readCurRoundFromRedis(logicalKey); redisCurRound > round {
-			round = redisCurRound
-		}
-	}
-	bizId := state.roundBizId(round)
+	bizId := roundBizId(bizType, actID, round)
 	ct, found, err := h.dao.GetClaim(bizId, userID)
 	if err != nil {
 		return false, 0, err
@@ -405,17 +411,11 @@ func (h *Handler) ClaimHistoricalReward(bizType string, actID int32, round int32
 		return false, 0, fmt.Errorf("dao not available")
 	}
 	logicalKey := LogicalKey(bizType, actID)
-	state := h.GetState(logicalKey)
-	if state == nil {
-		return false, 0, fmt.Errorf("not a periodic activity: bizType=%s actID=%d", bizType, actID)
+	round, err = h.resolveHistoricalRound(logicalKey, bizType, actID, round)
+	if err != nil {
+		return false, 0, err
 	}
-	if round == 0 {
-		round = state.GetCurrentRound()
-		if redisCurRound := h.readCurRoundFromRedis(logicalKey); redisCurRound > round {
-			round = redisCurRound
-		}
-	}
-	bizId := state.roundBizId(round)
+	bizId := roundBizId(bizType, actID, round)
 	isFirst, ct, upsertErr := h.dao.SaveClaimIfNotExists(bizId, userID, time.Now().UnixMilli())
 	if upsertErr != nil {
 		return false, 0, upsertErr

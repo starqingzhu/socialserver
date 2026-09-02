@@ -207,7 +207,19 @@ func (m *Manager) ResolveEngineService(bizType BizType, actID int32, round int32
 	key := NewBizKey(bizType, actID).String()
 	state := m.periodicHandler.GetState(key)
 	if state == nil {
-		return m.GetEngineService(bizType, actID), false
+		currentSvc := m.GetEngineService(bizType, actID)
+		if currentSvc != nil {
+			return currentSvc, false
+		}
+		// 无内存状态且无活跃服务：可能是已过期（>7天）的周期活动。
+		// 懒加载 MongoDB 配置文档，若为周期活动则路由到历史查询路径。
+		// 一次性活动或文档不存在时返回 NotFound。
+		if m.dao != nil {
+			if doc, ok, err := m.dao.LoadRankConfig(key); err == nil && ok && doc.Periodic != nil {
+				return nil, true
+			}
+		}
+		return nil, false
 	}
 	// 同时读本地 state 和 Redis，取较大值保证多节点一致性：
 	// advanceRound 先写 Redis 再写 MongoDB，syncFromMongo 基于 MongoDB 更新本地 state，

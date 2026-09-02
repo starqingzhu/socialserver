@@ -720,9 +720,6 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 	added := 0
 	for _, doc := range docs {
 		cfg := doc.Config
-		if cfg.CloseTime > 0 && now > cfg.CloseTime+7*86400000 {
-			continue
-		}
 
 		bizType := BizType(cfg.BizType)
 		if bizType == "" {
@@ -730,9 +727,16 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 			cfg.BizType = string(bizType)
 		}
 		key := NewBizKey(bizType, cfg.ActID).String()
+
+		// 超过 7 天的活动不再维护 in-memory 热服务（内存管理）。
+		// 其历史轮次查询由 ResolveEngineService 懒加载 MongoDB 周期元数据路由到历史路径，无需恢复状态。
+		if cfg.CloseTime > 0 && now > cfg.CloseTime+7*86400000 {
+			continue
+		}
+
 		mongoKeys[key] = struct{}{}
 
-		// 若文档含周期状态，恢复 PeriodicState。
+		// 若文档含周期状态，恢复 PeriodicState（仅有效期内的活动）。
 		// 当本节点的内存状态落后于 MongoDB（另一节点已推进了轮次）时，强制刷新。
 		if doc.Periodic != nil {
 			existing := m.periodicHandler.GetState(key)
