@@ -639,60 +639,77 @@ func (m *Manager) warmUpAllServices(ctx context.Context) {
 }
 
 // subscribeDeleteEvents 订阅排行榜删除广播，收到消息后立即在本节点移除对应 Service。
+// 连接断开后自动重连，与 subscribeCreateEvents 保持一致。
 func (m *Manager) subscribeDeleteEvents() {
 	if m.rdb == nil {
 		return
 	}
-	ps, err := m.rdb.Subscribe(rediskeys.RankDeleteChannel)
-	if err != nil {
-		zaplog.LoggerSugar.Errorf("rank: subscribe delete channel: %v", err)
-		return
-	}
-	defer ps.Close()
-
-	ch := ps.Channel()
 	for {
 		select {
 		case <-m.stopCh:
 			return
-		case msg, ok := <-ch:
-			if !ok {
+		default:
+		}
+
+		ps, err := m.rdb.Subscribe(rediskeys.RankDeleteChannel)
+		if err != nil {
+			zaplog.LoggerSugar.Errorf("rank: subscribe delete channel: %v", err)
+			select {
+			case <-m.stopCh:
 				return
+			case <-time.After(5 * time.Second):
 			}
-			bizKey := msg.Payload
-			if bizKey == "" {
-				continue
-			}
-			sep := strings.LastIndex(bizKey, ":")
-			if sep <= 0 {
-				continue
-			}
-			bizType := BizType(bizKey[:sep])
-			actIDInt, err := strconv.ParseInt(bizKey[sep+1:], 10, 32)
-			if err != nil {
-				continue
-			}
-			actID := int32(actIDInt)
+			continue
+		}
 
-			m.mu.Lock()
-			svc, ok := m.engineServices[bizKey]
-			if ok {
-				delete(m.services, bizKey)
-				delete(m.engineServices, bizKey)
-				m.memberIndex.RemoveByKey(bizKey)
-			}
-			m.mu.Unlock()
-
-			m.periodicHandler.RemoveState(bizKey)
-
-			if ok {
-				zaplog.LoggerSugar.Infof("rank: subscribeDeleteEvents received delete bizKey=%s, cleaning up", bizKey)
-				if members, err := svc.GetAllMembers(); err == nil && len(members) > 0 {
-					m.memberIndex.RemoveUserEntries(bizType, actID, members)
+		ch := ps.Channel()
+	loop:
+		for {
+			select {
+			case <-m.stopCh:
+				ps.Close()
+				return
+			case msg, ok := <-ch:
+				if !ok {
+					zaplog.LoggerSugar.Warnf("rank: delete channel closed, reconnecting")
+					break loop
 				}
-				svc.Cleanup()
+				bizKey := msg.Payload
+				if bizKey == "" {
+					continue
+				}
+				sep := strings.LastIndex(bizKey, ":")
+				if sep <= 0 {
+					continue
+				}
+				bizType := BizType(bizKey[:sep])
+				actIDInt, err := strconv.ParseInt(bizKey[sep+1:], 10, 32)
+				if err != nil {
+					continue
+				}
+				actID := int32(actIDInt)
+
+				m.mu.Lock()
+				svc, ok := m.engineServices[bizKey]
+				if ok {
+					delete(m.services, bizKey)
+					delete(m.engineServices, bizKey)
+					m.memberIndex.RemoveByKey(bizKey)
+				}
+				m.mu.Unlock()
+
+				m.periodicHandler.RemoveState(bizKey)
+
+				if ok {
+					zaplog.LoggerSugar.Infof("rank: subscribeDeleteEvents received delete bizKey=%s, cleaning up", bizKey)
+					if members, err := svc.GetAllMembers(); err == nil && len(members) > 0 {
+						m.memberIndex.RemoveUserEntries(bizType, actID, members)
+					}
+					svc.Cleanup()
+				}
 			}
 		}
+		ps.Close()
 	}
 }
 
@@ -952,35 +969,52 @@ func (m *Manager) applyRankConfigDoc(ctx context.Context, doc engine.RankConfigD
 }
 
 // subscribeCreateEvents 订阅排行榜创建广播，收到消息后立即在本节点注册对应 Service。
+// 连接断开后自动重连，与 subscribeDeleteEvents 保持一致。
 func (m *Manager) subscribeCreateEvents() {
 	if m.rdb == nil {
 		return
 	}
-	ps, err := m.rdb.Subscribe(rediskeys.RankCreateChannel)
-	if err != nil {
-		zaplog.LoggerSugar.Errorf("rank: subscribe create channel: %v", err)
-		return
-	}
-	defer ps.Close()
-
-	ch := ps.Channel()
 	for {
 		select {
 		case <-m.stopCh:
 			return
-		case msg, ok := <-ch:
-			if !ok {
+		default:
+		}
+
+		ps, err := m.rdb.Subscribe(rediskeys.RankCreateChannel)
+		if err != nil {
+			zaplog.LoggerSugar.Errorf("rank: subscribe create channel: %v", err)
+			select {
+			case <-m.stopCh:
 				return
+			case <-time.After(5 * time.Second):
 			}
-			var doc engine.RankConfigDoc
-			if err := json.Unmarshal([]byte(msg.Payload), &doc); err != nil {
-				zaplog.LoggerSugar.Warnf("rank: subscribeCreateEvents unmarshal: %v", err)
-				continue
-			}
-			added := m.applyRankConfigDoc(context.Background(), doc)
-			if added {
-				zaplog.LoggerSugar.Infof("rank: subscribeCreateEvents applied bizKey=%s", doc.BizKey)
+			continue
+		}
+
+		ch := ps.Channel()
+	loop:
+		for {
+			select {
+			case <-m.stopCh:
+				ps.Close()
+				return
+			case msg, ok := <-ch:
+				if !ok {
+					zaplog.LoggerSugar.Warnf("rank: create channel closed, reconnecting")
+					break loop
+				}
+				var doc engine.RankConfigDoc
+				if err := json.Unmarshal([]byte(msg.Payload), &doc); err != nil {
+					zaplog.LoggerSugar.Warnf("rank: subscribeCreateEvents unmarshal: %v", err)
+					continue
+				}
+				added := m.applyRankConfigDoc(context.Background(), doc)
+				if added {
+					zaplog.LoggerSugar.Infof("rank: subscribeCreateEvents applied bizKey=%s", doc.BizKey)
+				}
 			}
 		}
+		ps.Close()
 	}
 }
