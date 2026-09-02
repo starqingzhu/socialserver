@@ -753,21 +753,30 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 
 		mongoKeys[key] = struct{}{}
 
+		// 前置检查：服务已存在时快速路径，同时防止 MongoDB 旧文档污染内存 periodic 状态。
+		// 必须在 periodic 状态恢复之前执行，以正确处理类型 2→1 切换场景：
+		// GM 删除后异步 MongoDB 删除尚未落盘，此时旧文档仍含 Periodic 字段，
+		// 若此节点已通过 Redis 广播注册了新的一次性服务，不能用旧 Periodic 覆盖。
+		m.mu.RLock()
+		existingSvc, exists := m.engineServices[key]
+		m.mu.RUnlock()
+
 		// 若文档含周期状态，恢复 PeriodicState（仅有效期内的活动）。
 		// 当本节点的内存状态落后于 MongoDB（另一节点已推进了轮次）时，强制刷新。
+		// 若服务已存在且为一次性（RoundIndex==0），跳过 periodic 状态恢复，
+		// 防止类型从 2→1 切换后 MongoDB 旧文档（异步删除尚未落盘）污染内存状态。
 		if doc.Periodic != nil {
-			existing := m.periodicHandler.GetState(key)
-			if existing == nil || existing.GetCurrentRound() < doc.Periodic.CurrentRound {
-				ps := periodic.StateFromSaved(string(bizType), cfg.ActID, *doc.Periodic)
-				m.periodicHandler.SetState(key, ps)
-				// 清理历史轮次残留的 Redis 热数据（重启后 in-memory timer 已丢失）。
-				m.periodicHandler.CleanupHistoricalRounds(ps)
+			if !exists || (existingSvc != nil && existingSvc.GetConfig().RoundIndex > 0) {
+				existing := m.periodicHandler.GetState(key)
+				if existing == nil || existing.GetCurrentRound() < doc.Periodic.CurrentRound {
+					ps := periodic.StateFromSaved(string(bizType), cfg.ActID, *doc.Periodic)
+					m.periodicHandler.SetState(key, ps)
+					// 清理历史轮次残留的 Redis 热数据（重启后 in-memory timer 已丢失）。
+					m.periodicHandler.CleanupHistoricalRounds(ps)
+				}
 			}
 		}
 
-		m.mu.RLock()
-		_, exists := m.engineServices[key]
-		m.mu.RUnlock()
 		if exists {
 			continue
 		}

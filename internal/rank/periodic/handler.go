@@ -67,11 +67,17 @@ func (h *Handler) SetState(logicalKey string, s *PeriodicState) {
 	h.mu.Unlock()
 }
 
-// RemoveState 线程安全地删除 PeriodicState。
+// RemoveState 线程安全地删除 PeriodicState，同时清理 Redis 中的持久化键。
+// 两个无 TTL 的 Redis 键（periodic_meta / periodic_cur_round）必须在删除时主动清理，
+// 防止节点重启或排行榜类型切换后被 tryRecoverPeriodicFromRedis / syncFromRedis 误恢复。
 func (h *Handler) RemoveState(logicalKey string) {
 	h.mu.Lock()
 	delete(h.states, logicalKey)
 	h.mu.Unlock()
+	if h.rdb != nil {
+		_, _ = h.rdb.Del(curRoundRedisKey(logicalKey))
+		_, _ = h.rdb.Del(periodicMetaRedisKey(logicalKey))
+	}
 }
 
 // Clear 清空所有状态（用于关闭时清理）。
