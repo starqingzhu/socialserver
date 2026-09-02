@@ -329,7 +329,17 @@ func (h *Handler) GetHistoricalRoundList(ctx context.Context, bizType string, ac
 		return nil, nil, fmt.Errorf("get member: %w", err)
 	}
 	if !found {
-		return nil, nil, nil
+		// member→group 索引（rank_member，Redis TTL 过期 + Mongo 异步写未落库）可能丢失。
+		// 已结算分组快照（rank_settled）是权威数据，直接扫描该轮次全部分组定位用户。
+		groupID, found, err = h.findUserGroupFromSettled(bizId, userID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !found {
+			return nil, nil, nil
+		}
+		zaplog.LoggerSugar.Warnf("rank periodic: historical member index miss, recovered from settled bizType=%s actID=%d round=%d userID=%d groupID=%d",
+			bizType, actID, round, userID, groupID)
 	}
 
 	snapshots, err := h.dao.LoadGroupSettled(bizId, groupID)
@@ -363,6 +373,26 @@ func (h *Handler) GetHistoricalRoundList(ctx context.Context, bizType string, ac
 	return snapshots[start : end+1], mySnap, nil
 }
 
+// findUserGroupFromSettled 在指定轮次的已结算分组快照中查找用户所在分组。
+// 用于 member→group 索引（rank_member）丢失时的兜底：结算快照（rank_settled）是权威数据。
+func (h *Handler) findUserGroupFromSettled(bizId string, userID int64) (int32, bool, error) {
+	if h.dao == nil {
+		return 0, false, nil
+	}
+	settledByGroup, err := h.dao.LoadAllSettledByBizId(bizId)
+	if err != nil {
+		return 0, false, fmt.Errorf("load settled by bizId: %w", err)
+	}
+	for groupID, snaps := range settledByGroup {
+		for _, s := range snaps {
+			if s.MemberId == userID {
+				return groupID, true, nil
+			}
+		}
+	}
+	return 0, false, nil
+}
+
 // GetHistoricalRewardUsers 查询历史轮次的入榜真实玩家 ID 列表。
 func (h *Handler) GetHistoricalRewardUsers(ctx context.Context, bizType string, actID int32, round int32) ([]int64, error) {
 	if h.dao == nil {
@@ -382,6 +412,43 @@ func (h *Handler) GetHistoricalRewardUsers(ctx context.Context, bizType string, 
 	for uid := range members {
 		if uid > 0 {
 			result = append(result, uid)
+		}
+	}
+	// member→group 索引可能丢失，从权威结算快照兜底恢复入榜真实玩家。
+	if len(result) == 0 {
+		realUsers, err := h.realUsersFromSettled(bizId)
+		if err != nil {
+			return nil, err
+		}
+		if len(realUsers) > 0 {
+			zaplog.LoggerSugar.Warnf("rank periodic: reward users index miss, recovered from settled bizType=%s actID=%d round=%d count=%d",
+				bizType, actID, round, len(realUsers))
+			return realUsers, nil
+		}
+	}
+	return result, nil
+}
+
+// realUsersFromSettled 从某轮次全部已结算分组快照中提取入榜真实玩家 ID（排除负 ID 机器人）。
+func (h *Handler) realUsersFromSettled(bizId string) ([]int64, error) {
+	if h.dao == nil {
+		return nil, nil
+	}
+	settledByGroup, err := h.dao.LoadAllSettledByBizId(bizId)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[int64]struct{})
+	result := make([]int64, 0)
+	for _, snaps := range settledByGroup {
+		for _, s := range snaps {
+			if s.MemberId > 0 {
+				if _, dup := seen[s.MemberId]; dup {
+					continue
+				}
+				seen[s.MemberId] = struct{}{}
+				result = append(result, s.MemberId)
+			}
 		}
 	}
 	return result, nil

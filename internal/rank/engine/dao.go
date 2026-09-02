@@ -595,6 +595,29 @@ func (d *DAO) LoadGroupSettled(bizId string, groupID int32) ([]commonrank.RankMe
 	return doc.Snapshots, nil
 }
 
+// LoadAllSettledByBizId 读取某轮次全部已结算分组的快照，按 groupId 分组。
+// 用于 member→group 索引（rank_member）丢失时，从权威结算快照中定位用户所在分组。
+func (d *DAO) LoadAllSettledByBizId(bizId string) (map[int32][]commonrank.RankMemberSnapshot, error) {
+	if !d.available() {
+		return nil, nil
+	}
+	cursor, err := d.session().Find(d.dbName, commonrank.CT_RANK_SETTLED, bson.M{"bizId": bizId})
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := d.session().GetDefaultContext()
+	defer cancel()
+	var docs []SettledDoc
+	if err := cursor.All(ctx, &docs); err != nil {
+		return nil, err
+	}
+	result := make(map[int32][]commonrank.RankMemberSnapshot, len(docs))
+	for _, doc := range docs {
+		result[doc.GroupID] = doc.Snapshots
+	}
+	return result, nil
+}
+
 // --- 榜单实例元数据 ---
 
 // RankInstDoc 榜单实例文档，对应 Redis 中的 rank:inst:{instanceId}。
