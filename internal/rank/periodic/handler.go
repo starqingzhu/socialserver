@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,7 +19,15 @@ import (
 // 使用 string 而非 rankservice.BizType，避免循环引用。
 type ServiceRegistrar interface {
 	RegisterRoundService(ctx context.Context, bizType, logicalKey string, cfg engine.Config) (*engine.Service, error)
+	ReplaceRoundService(ctx context.Context, bizType, logicalKey string, cfg engine.Config) (*engine.Service, error)
 	GetEngineServiceByKey(logicalKey string) *engine.Service
+}
+
+// PeriodicMeta 存储在 Redis 中的周期活动元数据，用于在 MongoDB 数据不可用时从 Redis 恢复活动。
+type PeriodicMeta struct {
+	TotalOpenTime  int64
+	TotalCloseTime int64
+	CycleMinutes   int32
 }
 
 // Handler 封装周期排行榜的所有运行时逻辑，由 Manager 通过组合持有。
@@ -121,6 +130,8 @@ func (h *Handler) Register(ctx context.Context, bizType, logicalKey string, cfg 
 
 	// 初始 currentRound 写入 Redis，供其他节点快速同步
 	h.setCurRoundInRedis(logicalKey, state.GetCurrentRound())
+	// 周期元数据同步写入 Redis，用于重启后 MongoDB 不可用时的降级恢复
+	h.setPeriodicMetaInRedis(logicalKey, state)
 
 	if h.dao != nil {
 		overallCfg := cfg
@@ -222,7 +233,7 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 	nextCfg.CreateTime = 0
 
 	// BUG1: 注册成功后才推进 state，失败时 state 保持在 currentRound
-	if _, err := h.registry.RegisterRoundService(ctx, state.BizType, logicalKey, nextCfg); err != nil {
+	if _, err := h.registry.ReplaceRoundService(ctx, state.BizType, logicalKey, nextCfg); err != nil {
 		zaplog.LoggerSugar.Errorf("rank periodic: register next round=%d logicalKey=%s err=%v",
 			nextRound, logicalKey, err)
 		return
@@ -283,7 +294,10 @@ func (h *Handler) GetHistoricalRoundList(ctx context.Context, bizType string, ac
 
 	bizId := state.roundBizId(round)
 
-	groupID, found, err := h.dao.GetMember(bizId, userID)
+	// 优先从 Redis 查询（CleanupLiveData 前 1 个周期内仍有效），
+	// 再降级到 MongoDB，避免因异步写入延迟导致历史查询短暂失败。
+	store := engine.NewStore(h.rdb, h.dao, bizId)
+	groupID, found, err := store.GetMember(userID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get member: %w", err)
 	}
@@ -479,4 +493,52 @@ func (h *Handler) CleanupHistoricalRounds(state *PeriodicState) {
 		store := engine.NewStore(h.rdb, h.dao, bizId)
 		store.CleanupLiveData(nil)
 	}
+}
+
+// periodicMetaRedisKey 返回存储周期活动元数据的 Redis 键。
+func periodicMetaRedisKey(logicalKey string) string {
+	return fmt.Sprintf("rank:periodic_meta:{%s}", logicalKey)
+}
+
+// GetCurRoundFromRedis 导出 readCurRoundFromRedis，供 manager 在恢复时调用。
+func (h *Handler) GetCurRoundFromRedis(logicalKey string) int32 {
+	return h.readCurRoundFromRedis(logicalKey)
+}
+
+// setPeriodicMetaInRedis 将周期活动元数据同步写入 Redis。
+// 格式："TotalOpenTime,TotalCloseTime,CycleMinutes"，供重启后 MongoDB 不可用时降级恢复。
+func (h *Handler) setPeriodicMetaInRedis(logicalKey string, state *PeriodicState) {
+	if h.rdb == nil {
+		return
+	}
+	val := fmt.Sprintf("%d,%d,%d", state.TotalOpenTime, state.TotalCloseTime, state.CycleMinutes)
+	if err := h.rdb.Set(periodicMetaRedisKey(logicalKey), val); err != nil {
+		zaplog.LoggerSugar.Warnf("rank periodic: set periodic_meta redis key logicalKey=%s: %v", logicalKey, err)
+	}
+}
+
+// GetPeriodicMetaFromRedis 从 Redis 读取周期活动元数据；不存在或解析失败时返回 (PeriodicMeta{}, false)。
+func (h *Handler) GetPeriodicMetaFromRedis(logicalKey string) (PeriodicMeta, bool) {
+	if h.rdb == nil {
+		return PeriodicMeta{}, false
+	}
+	val, err := h.rdb.Get(periodicMetaRedisKey(logicalKey))
+	if err != nil || val == "" {
+		return PeriodicMeta{}, false
+	}
+	parts := strings.Split(val, ",")
+	if len(parts) != 3 {
+		return PeriodicMeta{}, false
+	}
+	totalOpen, err1 := strconv.ParseInt(parts[0], 10, 64)
+	totalClose, err2 := strconv.ParseInt(parts[1], 10, 64)
+	cycleMin, err3 := strconv.ParseInt(parts[2], 10, 32)
+	if err1 != nil || err2 != nil || err3 != nil {
+		return PeriodicMeta{}, false
+	}
+	return PeriodicMeta{
+		TotalOpenTime:  totalOpen,
+		TotalCloseTime: totalClose,
+		CycleMinutes:   int32(cycleMin),
+	}, true
 }

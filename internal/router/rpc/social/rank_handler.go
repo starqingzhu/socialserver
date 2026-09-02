@@ -26,13 +26,14 @@ func (h *ServerHandler) S2SUpsertScore(ctx context.Context, req *pb.PBS2SUpsertS
 		req.BizType, req.ActId, req.UserId, req.TotalScore, req.Timestamp, req.Round)
 	defer func() {
 		if retErr != nil {
-			zaplog.LoggerSugar.Warnf("[rank] S2SUpsertScore resp err=%v", retErr)
+			zaplog.LoggerSugar.Warnf("[rank] S2SUpsertScore resp userId=%d err=%v", req.UserId, retErr)
 		} else {
 			var myRank int64
 			if resp.MyRank != nil {
 				myRank = resp.MyRank.Rank
 			}
-			zaplog.LoggerSugar.Infof("[rank] S2SUpsertScore resp ok rank=%d", myRank)
+			zaplog.LoggerSugar.Infof("[rank] S2SUpsertScore resp userId=%d rank=%d round=%d msgCode=%v",
+				req.UserId, myRank, resp.CurrentRound, resp.MsgCode)
 		}
 	}()
 
@@ -85,9 +86,10 @@ func (h *ServerHandler) S2SGetRankList(ctx context.Context, req *pb.PBS2SGetRank
 		req.BizType, req.ActId, req.UserId, req.Start, req.End, req.Round)
 	defer func() {
 		if retErr != nil {
-			zaplog.LoggerSugar.Warnf("[rank] S2SGetRankList resp err=%v", retErr)
+			zaplog.LoggerSugar.Warnf("[rank] S2SGetRankList resp userId=%d err=%v", req.UserId, retErr)
 		} else {
-			zaplog.LoggerSugar.Infof("[rank] S2SGetRankList resp memberCount=%d", len(resp.Members))
+			zaplog.LoggerSugar.Infof("[rank] S2SGetRankList resp userId=%d memberCount=%d currentRound=%d",
+				req.UserId, len(resp.Members), resp.CurrentRound)
 		}
 	}()
 	manager := rankservice.GetGlobalManager()
@@ -163,13 +165,15 @@ func (h *ServerHandler) S2SGetMemberRank(ctx context.Context, req *pb.PBS2SGetMe
 		req.BizType, req.ActId, req.UserId, req.Round)
 	defer func() {
 		if retErr != nil {
-			zaplog.LoggerSugar.Warnf("[rank] S2SGetMemberRank resp err=%v", retErr)
+			zaplog.LoggerSugar.Warnf("[rank] S2SGetMemberRank resp userId=%d err=%v", req.UserId, retErr)
 		} else {
-			var memberRank int64
+			var memberRank, score int64
 			if resp.Snapshot != nil {
 				memberRank = resp.Snapshot.Rank
+				score = resp.Snapshot.Score
 			}
-			zaplog.LoggerSugar.Infof("[rank] S2SGetMemberRank resp rank=%d", memberRank)
+			zaplog.LoggerSugar.Infof("[rank] S2SGetMemberRank resp userId=%d rank=%d score=%d settleStage=%d",
+				req.UserId, memberRank, score, resp.SettleStage)
 		}
 	}()
 	manager := rankservice.GetGlobalManager()
@@ -264,9 +268,10 @@ func (h *ServerHandler) S2SClaimReward(ctx context.Context, req *pb.PBS2SClaimRe
 		req.BizType, req.ActId, req.UserId, req.Round)
 	defer func() {
 		if retErr != nil {
-			zaplog.LoggerSugar.Warnf("[rank] S2SClaimReward resp err=%v", retErr)
+			zaplog.LoggerSugar.Warnf("[rank] S2SClaimReward resp userId=%d err=%v", req.UserId, retErr)
 		} else {
-			zaplog.LoggerSugar.Infof("[rank] S2SClaimReward resp claimed=%v claimTime=%d", resp.Claimed, resp.ClaimTime)
+			zaplog.LoggerSugar.Infof("[rank] S2SClaimReward resp userId=%d claimed=%v claimTime=%d",
+				req.UserId, resp.Claimed, resp.ClaimTime)
 		}
 	}()
 	manager := rankservice.GetGlobalManager()
@@ -297,9 +302,10 @@ func (h *ServerHandler) S2SGetClaimStatus(ctx context.Context, req *pb.PBS2SGetC
 		req.BizType, req.ActId, req.UserId, req.Round)
 	defer func() {
 		if retErr != nil {
-			zaplog.LoggerSugar.Warnf("[rank] S2SGetClaimStatus resp err=%v", retErr)
+			zaplog.LoggerSugar.Warnf("[rank] S2SGetClaimStatus resp userId=%d err=%v", req.UserId, retErr)
 		} else {
-			zaplog.LoggerSugar.Infof("[rank] S2SGetClaimStatus resp claimed=%v claimTime=%d", resp.Claimed, resp.ClaimTime)
+			zaplog.LoggerSugar.Infof("[rank] S2SGetClaimStatus resp userId=%d claimed=%v claimTime=%d",
+				req.UserId, resp.Claimed, resp.ClaimTime)
 		}
 	}()
 	manager := rankservice.GetGlobalManager()

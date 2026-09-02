@@ -15,6 +15,12 @@ func (m *Manager) RegisterRoundService(ctx context.Context, bizType, logicalKey 
 	return m.registerSubService(ctx, BizType(bizType), logicalKey, cfg)
 }
 
+// ReplaceRoundService 实现 periodic.ServiceRegistrar 接口，强制替换子轮服务（不走快速路径）。
+// 用于轮次推进时创建新一轮服务，绕过 registerSubService 的"已存在则直接返回"保护。
+func (m *Manager) ReplaceRoundService(ctx context.Context, bizType, logicalKey string, cfg engine.Config) (*engine.Service, error) {
+	return m.replaceSubService(ctx, BizType(bizType), logicalKey, cfg)
+}
+
 // GetEngineServiceByKey 实现 periodic.ServiceRegistrar 接口，按 logicalKey 返回引擎服务。
 func (m *Manager) GetEngineServiceByKey(logicalKey string) *engine.Service {
 	m.mu.RLock()
@@ -77,7 +83,46 @@ func (m *Manager) registerSubService(ctx context.Context, bizType BizType, logic
 	return service, nil
 }
 
-// tickPeriodicActivities 委托给 periodicHandler 检查所有周期活动并按需推进轮次。
+// replaceSubService 与 registerSubService 相同，但不跳过已存在检查，强制替换 engineServices 中的服务。
+// 用于轮次推进时将 logicalKey 指向新一轮的 engine.Service。
+func (m *Manager) replaceSubService(ctx context.Context, bizType BizType, logicalKey string, cfg engine.Config) (*engine.Service, error) {
+	if cfg.RankCode == "" {
+		cfg.RankCode = fmt.Sprintf("%s_score_%d", bizType, cfg.ActID)
+	}
+	if cfg.CreateTime == 0 {
+		cfg.CreateTime = time.Now().UnixMilli()
+	}
+
+	if err := m.rankService.RegisterRank(ctx, commonrank.Rank{
+		RankCode:       cfg.RankCode,
+		RankName:       fmt.Sprintf("%s_rank_%d", bizType, cfg.ActID),
+		ScoreOrder:     commonrank.ScoreOrderDesc,
+		TieBreakPolicy: commonrank.TieBreakPolicyFirstEnter,
+		CreateTime:     cfg.OpenTime,
+		UpdateTime:     cfg.OpenTime,
+	}); err != nil {
+		return nil, err
+	}
+
+	onMemberJoin := func(userID int64, groupID int32) {
+		m.memberIndex.Track(userID, MemberEntry{
+			BizType: bizType,
+			ActID:   cfg.ActID,
+			GroupID: groupID,
+		})
+	}
+	service, err := engine.NewService(m.rankService, cfg, m.rdb, m.dao, engine.WithOnMemberJoin(onMemberJoin))
+	if err != nil {
+		return nil, err
+	}
+
+	m.mu.Lock()
+	m.services[logicalKey] = newBizServiceWrapper(bizType, service)
+	m.engineServices[logicalKey] = service
+	m.mu.Unlock()
+
+	return service, nil
+}
 func (m *Manager) tickPeriodicActivities(ctx context.Context, now int64) {
 	m.periodicHandler.TickAll(ctx, now)
 }
@@ -156,24 +201,36 @@ func (m *Manager) GetCurrentRoundInfo(bizType BizType, actID int32) (periodic.Ro
 
 // ResolveEngineService 根据 bizType/actID/round 返回对应的引擎服务和是否为历史查询。
 // round=0 表示当前轮。
-// 一次性排行榜或请求当前轮：返回 (svc, false)；
-// 周期排行榜历史轮次（round < currentRound）：返回 (nil, true)。
+// 一次性排行榜或请求当前轮（且服务活跃）：返回 (svc, false)；
+// 周期排行榜历史轮次（round < currentRound）或当前轮已结算/服务不可用：返回 (nil, true)。
 func (m *Manager) ResolveEngineService(bizType BizType, actID int32, round int32) (svc *engine.Service, isHistorical bool) {
 	key := NewBizKey(bizType, actID).String()
 	state := m.periodicHandler.GetState(key)
 	if state == nil {
 		return m.GetEngineService(bizType, actID), false
 	}
-	// BUG3: 原子读取一次，避免两次读取之间 advance 导致 effectiveRound >= currentRound 误判
+	// 同时读本地 state 和 Redis，取较大值保证多节点一致性：
+	// advanceRound 先写 Redis 再写 MongoDB，syncFromMongo 基于 MongoDB 更新本地 state，
+	// 因此 Redis 值在短期内比本地 state 更新。
 	curRound := state.GetCurrentRound()
+	if redisCurRound := m.periodicHandler.GetCurRoundFromRedis(key); redisCurRound > curRound {
+		curRound = redisCurRound
+	}
 	effectiveRound := round
 	if effectiveRound == 0 {
 		effectiveRound = curRound
 	}
-	if effectiveRound >= curRound {
-		return m.GetEngineService(bizType, actID), false
+	if effectiveRound < curRound {
+		return nil, true
 	}
-	return nil, true
+	// effectiveRound >= curRound：检查当前服务是否可用且未结算。
+	// 若服务不存在或已全部结算（活动最后一轮结束后、重启恢复后等场景），
+	// 路由到历史 MongoDB 路径以保证数据可靠返回，避免因 Redis 热数据已清理而出错。
+	currentSvc := m.GetEngineService(bizType, actID)
+	if currentSvc == nil || currentSvc.IsSettled() {
+		return nil, true
+	}
+	return currentSvc, false
 }
 
 // 编译期确保 Manager 实现 periodic.ServiceRegistrar。

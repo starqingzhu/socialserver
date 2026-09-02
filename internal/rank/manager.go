@@ -452,17 +452,20 @@ func (m *Manager) syncFromRedis(ctx context.Context) {
 		if sep <= 0 {
 			continue
 		}
+
+		// 周期排行榜子轮次 BizId（格式 "{bizType}_{actID}_r{N}"）：
+		// 尝试从 Redis 元数据降级恢复（主路径是 syncFromMongo），然后跳过常规注册流程。
+		if periodic.IsRoundBizId(bizId) {
+			m.tryRecoverPeriodicFromRedis(ctx, bizId)
+			continue
+		}
+
 		actIDInt, err := strconv.ParseInt(bizId[sep+1:], 10, 32)
 		if err != nil {
 			continue
 		}
 		bizType := BizType(bizId[:sep])
 		actID := int32(actIDInt)
-
-		// 跳过周期排行榜的子轮次 BizId（格式 "{bizType}_{actID}_r{N}"），由 syncFromMongo 恢复
-		if periodic.IsRoundBizId(bizId) {
-			continue
-		}
 
 		bizKey := NewBizKey(bizType, actID).String()
 		m.mu.RLock()
@@ -536,6 +539,80 @@ func (m *Manager) syncFromRedis(ctx context.Context) {
 	if added > 0 {
 		zaplog.LoggerSugar.Infof("rank: syncFromRedis completed, added=%d", added)
 	}
+}
+
+// tryRecoverPeriodicFromRedis 在 syncFromRedis 时遇到周期子轮次 BizId（格式 "{bizType}_{actID}_r{N}"），
+// 尝试用 Redis 中的元数据恢复该活动——仅在 syncFromMongo 未能恢复时生效（即 MongoDB 写入在 SIGKILL 前未落盘）。
+// 若 Redis 已被清空则静默跳过，依赖 syncFromMongo 从 MongoDB 恢复。
+func (m *Manager) tryRecoverPeriodicFromRedis(ctx context.Context, roundBizId string) {
+	base, ok := periodic.ExtractRoundBizBase(roundBizId)
+	if !ok {
+		return
+	}
+	sep := strings.LastIndex(base, "_")
+	if sep <= 0 {
+		return
+	}
+	actIDInt, err := strconv.ParseInt(base[sep+1:], 10, 32)
+	if err != nil {
+		return
+	}
+	bizType := BizType(base[:sep])
+	actID := int32(actIDInt)
+	logicalKey := NewBizKey(bizType, actID).String()
+
+	m.mu.RLock()
+	_, exists := m.engineServices[logicalKey]
+	m.mu.RUnlock()
+	if exists {
+		return // syncFromMongo 已恢复，无需降级
+	}
+
+	meta, ok := m.periodicHandler.GetPeriodicMetaFromRedis(logicalKey)
+	if !ok {
+		return // Redis 元数据不存在（Redis 被清空）→ 依赖 syncFromMongo
+	}
+
+	curRound := m.periodicHandler.GetCurRoundFromRedis(logicalKey)
+	if curRound <= 0 {
+		curRound = 1
+	}
+
+	cycleDurMs := int64(meta.CycleMinutes) * 60 * 1000
+	roundOpen := meta.TotalOpenTime + int64(curRound-1)*cycleDurMs
+	roundClose := roundOpen + cycleDurMs
+	if roundClose > meta.TotalCloseTime {
+		roundClose = meta.TotalCloseTime
+	}
+
+	saved := engine.PeriodicSavedState{
+		CycleMinutes:   meta.CycleMinutes,
+		TotalOpenTime:  meta.TotalOpenTime,
+		TotalCloseTime: meta.TotalCloseTime,
+		CurrentRound:   curRound,
+		RoundOpenTime:  roundOpen,
+		RoundCloseTime: roundClose,
+	}
+	ps := periodic.StateFromSaved(string(bizType), actID, saved)
+	m.periodicHandler.SetState(logicalKey, ps)
+	m.periodicHandler.CleanupHistoricalRounds(ps)
+
+	cfg := engine.Config{
+		BizType:     string(bizType),
+		ActID:       actID,
+		OpenTime:    roundOpen,
+		CloseTime:   roundClose,
+		GameEndTime: roundClose,
+		RoundIndex:  curRound,
+	}
+	if err := FillConfigFromFiles(bizType, &cfg); err != nil {
+		zaplog.LoggerSugar.Warnf("rank: tryRecoverPeriodicFromRedis fill config %s: %v", logicalKey, err)
+	}
+	if _, err := m.RegisterRoundService(ctx, string(bizType), logicalKey, cfg); err != nil {
+		zaplog.LoggerSugar.Warnf("rank: tryRecoverPeriodicFromRedis register %s round=%d: %v", logicalKey, curRound, err)
+		return
+	}
+	zaplog.LoggerSugar.Infof("rank: tryRecoverPeriodicFromRedis recovered bizType=%s actID=%d curRound=%d", bizType, actID, curRound)
 }
 
 // warmUpAllServices 并发调用所有已注册服务的 WarmUp。

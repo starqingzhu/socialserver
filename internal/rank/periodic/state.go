@@ -72,6 +72,26 @@ func IsRoundBizId(bizId string) bool {
 	return false
 }
 
+// ExtractRoundBizBase 从轮次 BizId（格式 "{bizType}_{actID}_r{N}"）中提取基础部分（"{bizType}_{actID}"）。
+// 若 bizId 不符合轮次格式则返回 ("", false)。
+func ExtractRoundBizBase(roundBizId string) (base string, ok bool) {
+	for i := len(roundBizId) - 1; i >= 0; i-- {
+		if roundBizId[i] == '_' {
+			suffix := roundBizId[i+1:]
+			if len(suffix) >= 2 && suffix[0] == 'r' {
+				for _, ch := range suffix[1:] {
+					if ch < '0' || ch > '9' {
+						return "", false
+					}
+				}
+				return roundBizId[:i], true
+			}
+			return "", false
+		}
+	}
+	return "", false
+}
+
 // StateLogicalKey 返回该状态的 map 键。
 func (p *PeriodicState) StateLogicalKey() string {
 	return LogicalKey(p.BizType, p.ActID)
