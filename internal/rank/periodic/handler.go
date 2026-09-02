@@ -292,6 +292,15 @@ func (h *Handler) GetHistoricalRoundList(ctx context.Context, bizType string, ac
 		return nil, nil, fmt.Errorf("not a periodic activity: bizType=%s actID=%d", bizType, actID)
 	}
 
+	// round=0 表示当前轮，解析为实际轮号。
+	// 结算后的当前轮会被路由到历史路径，此时 req.Round 可能仍为 0。
+	if round == 0 {
+		round = state.GetCurrentRound()
+		if redisCurRound := h.readCurRoundFromRedis(logicalKey); redisCurRound > round {
+			round = redisCurRound
+		}
+	}
+
 	bizId := state.roundBizId(round)
 
 	// 优先从 Redis 查询（CleanupLiveData 前 1 个周期内仍有效），
@@ -346,6 +355,12 @@ func (h *Handler) GetHistoricalRewardUsers(ctx context.Context, bizType string, 
 	if state == nil {
 		return nil, fmt.Errorf("not a periodic activity: bizType=%s actID=%d", bizType, actID)
 	}
+	if round == 0 {
+		round = state.GetCurrentRound()
+		if redisCurRound := h.readCurRoundFromRedis(logicalKey); redisCurRound > round {
+			round = redisCurRound
+		}
+	}
 	bizId := state.roundBizId(round)
 	members, err := h.dao.LoadAllMembers(bizId)
 	if err != nil {
@@ -370,6 +385,12 @@ func (h *Handler) GetHistoricalClaimStatus(bizType string, actID int32, round in
 	if state == nil {
 		return false, 0, fmt.Errorf("not a periodic activity: bizType=%s actID=%d", bizType, actID)
 	}
+	if round == 0 {
+		round = state.GetCurrentRound()
+		if redisCurRound := h.readCurRoundFromRedis(logicalKey); redisCurRound > round {
+			round = redisCurRound
+		}
+	}
 	bizId := state.roundBizId(round)
 	ct, found, err := h.dao.GetClaim(bizId, userID)
 	if err != nil {
@@ -387,6 +408,12 @@ func (h *Handler) ClaimHistoricalReward(bizType string, actID int32, round int32
 	state := h.GetState(logicalKey)
 	if state == nil {
 		return false, 0, fmt.Errorf("not a periodic activity: bizType=%s actID=%d", bizType, actID)
+	}
+	if round == 0 {
+		round = state.GetCurrentRound()
+		if redisCurRound := h.readCurRoundFromRedis(logicalKey); redisCurRound > round {
+			round = redisCurRound
+		}
 	}
 	bizId := state.roundBizId(round)
 	isFirst, ct, upsertErr := h.dao.SaveClaimIfNotExists(bizId, userID, time.Now().UnixMilli())
