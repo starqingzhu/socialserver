@@ -921,8 +921,8 @@ func (s *Service) Cleanup() {
 	}
 }
 
-// CleanupLiveData 清理该轮次的 Redis 热数据，保留结算快照和 MongoDB 数据。
-// 用于周期排行榜历史轮次的延迟清理（延迟 = 1 个周期）。
+// CleanupLiveData 为该轮次的 Redis 热数据设置 2 周保留 TTL，保留结算快照和 MongoDB 数据。
+// 用于周期排行榜历史轮次的延迟设置 TTL（延迟 = 1 个周期，之后数据保留 2 周承接历史查询）。
 func (s *Service) CleanupLiveData() {
 	s.mu.Lock()
 	groups := s.groups
@@ -938,7 +938,7 @@ func (s *Service) CleanupLiveData() {
 			continue
 		}
 		instanceID := s.groupInstanceID(g.GroupID)
-		if err := s.rankService.ExpireInstance(ctx, instanceID, liveDataCleanupTTL); err != nil {
+		if err := s.rankService.ExpireInstance(ctx, instanceID, settledDataRetentionTTL); err != nil {
 			zaplog.LoggerSugar.Warnf("rank engine: CleanupLiveData expire instance %s: %v", instanceID, err)
 		}
 	}

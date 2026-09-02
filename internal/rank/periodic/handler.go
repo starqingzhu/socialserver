@@ -2,6 +2,7 @@ package periodic
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	commonrank "common/rank"
+	rediskeys "common/redis"
 	goredis "golib/redis"
 	"golib/zaplog"
 	"socialserver/internal/rank/engine"
@@ -262,20 +264,19 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 		nextRound, logicalKey, nextOpen, nextClose)
 }
 
-// setSettledTTLForRound 对历史轮次的 Redis 结算快照键设置 TTL（2 个周期）。
+// setSettledTTLForRound 对历史轮次的 Redis 结算快照键设置 TTL（2 周）。
 // round 参数为刚刚结算完成的轮次号，由调用方在 advanceToNextRound 前传入。
 func (h *Handler) setSettledTTLForRound(svc *engine.Service, state *PeriodicState, round int32) {
 	if h.rdb == nil {
 		return
 	}
-	ttl := roundSettledTTL(state.CycleMinutes)
 	groups := svc.ListGroups()
 	rankCode := fmt.Sprintf("%s_score_%d", state.BizType, state.ActID)
 	bizId := state.roundBizId(round)
 	for _, g := range groups {
 		instanceID := commonrank.NewInstanceID(rankCode, bizId, fmt.Sprintf("group_%d", g.GroupID))
-		settledKey := fmt.Sprintf("rank:settled:{%s}", instanceID)
-		if _, err := h.rdb.Expire(settledKey, ttl); err != nil {
+		settledKey := rediskeys.GetRankSettledKey(instanceID)
+		if _, err := h.rdb.Expire(settledKey, commonrank.SettledCacheTTL); err != nil {
 			zaplog.LoggerSugar.Warnf("rank periodic: set TTL key=%s: %v", settledKey, err)
 		}
 	}
@@ -320,8 +321,9 @@ func (h *Handler) GetHistoricalRoundList(ctx context.Context, bizType string, ac
 		return nil, nil, err
 	}
 	bizId := roundBizId(bizType, actID, round)
+	rankCode := fmt.Sprintf("%s_score_%d", bizType, actID)
 
-	// 优先从 Redis 查询（CleanupLiveData 前 1 个周期内仍有效），
+	// 优先从 Redis 查询（结算后 2 周内仍有效），
 	// 再降级到 MongoDB，避免因异步写入延迟导致历史查询短暂失败。
 	store := engine.NewStore(h.rdb, h.dao, bizId)
 	groupID, found, err := store.GetMember(userID)
@@ -332,7 +334,7 @@ func (h *Handler) GetHistoricalRoundList(ctx context.Context, bizType string, ac
 			zaplog.LoggerSugar.Warnf("rank periodic: get member index err, try settled fallback bizType=%s actID=%d round=%d userID=%d err=%v",
 				bizType, actID, round, userID, err)
 		}
-		groupID, found, err = h.findUserGroupFromSettled(bizId, userID)
+		groupID, found, err = h.findUserGroupFromSettled(bizId, rankCode, userID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("get member: %w", err)
 		}
@@ -342,8 +344,13 @@ func (h *Handler) GetHistoricalRoundList(ctx context.Context, bizType string, ac
 		zaplog.LoggerSugar.Warnf("rank periodic: historical member index unavailable, recovered from settled bizType=%s actID=%d round=%d userID=%d groupID=%d",
 			bizType, actID, round, userID, groupID)
 	}
+	// 已定位用户分组：刷新成员索引 2 周 TTL（含 store.GetMember 经 Mongo 回写、未带 TTL 的情况）
+	if h.rdb != nil {
+		_, _ = h.rdb.Expire(rediskeys.GetRankMembersKey(bizId), commonrank.SettledCacheTTL)
+	}
 
-	snapshots, err := h.dao.LoadGroupSettled(bizId, groupID)
+	instanceID := commonrank.NewInstanceID(rankCode, bizId, fmt.Sprintf("group_%d", groupID))
+	snapshots, err := store.LoadGroupSettledCached(instanceID, groupID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load settled: %w", err)
 	}
@@ -376,7 +383,8 @@ func (h *Handler) GetHistoricalRoundList(ctx context.Context, bizType string, ac
 
 // findUserGroupFromSettled 在指定轮次的已结算分组快照中查找用户所在分组。
 // 用于 member→group 索引（rank_member）丢失时的兜底：结算快照（rank_settled）是权威数据。
-func (h *Handler) findUserGroupFromSettled(bizId string, userID int64) (int32, bool, error) {
+// 顺带将整轮权威数据写回 Redis（warmRoundCacheFromSettled），避免后续历史查询反复打 Mongo。
+func (h *Handler) findUserGroupFromSettled(bizId, rankCode string, userID int64) (int32, bool, error) {
 	if h.dao == nil {
 		return 0, false, nil
 	}
@@ -384,6 +392,7 @@ func (h *Handler) findUserGroupFromSettled(bizId string, userID int64) (int32, b
 	if err != nil {
 		return 0, false, fmt.Errorf("load settled by bizId: %w", err)
 	}
+	h.warmRoundCacheFromSettled(bizId, rankCode, settledByGroup)
 	for groupID, snaps := range settledByGroup {
 		for _, s := range snaps {
 			if s.MemberId == userID {
@@ -392,6 +401,32 @@ func (h *Handler) findUserGroupFromSettled(bizId string, userID int64) (int32, b
 		}
 	}
 	return 0, false, nil
+}
+
+// warmRoundCacheFromSettled 将整轮已结算分组快照写回 Redis（2 周 TTL）：
+// rank:settled 缓存各分组快照、rank:members 重建真实玩家分组索引，使后续历史查询直接命中 Redis。
+// 仅在一次"全轮结算扫描"（LoadAllSettledByBizId）后调用，把权威数据回写以分担 Mongo 压力。
+func (h *Handler) warmRoundCacheFromSettled(bizId, rankCode string, settledByGroup map[int32][]commonrank.RankMemberSnapshot) {
+	if h.rdb == nil || len(settledByGroup) == 0 {
+		return
+	}
+	membersKey := rediskeys.GetRankMembersKey(bizId)
+	for groupID, snaps := range settledByGroup {
+		instanceID := commonrank.NewInstanceID(rankCode, bizId, fmt.Sprintf("group_%d", groupID))
+		if len(snaps) > 0 {
+			if data, err := json.Marshal(snaps); err == nil {
+				if err := h.rdb.SetEX(rediskeys.GetRankSettledKey(instanceID), string(data), commonrank.SettledCacheTTL); err != nil {
+					zaplog.LoggerSugar.Warnf("rank periodic: warm settled cache bizId=%s group=%d: %v", bizId, groupID, err)
+				}
+			}
+		}
+		for _, s := range snaps {
+			if s.MemberId > 0 {
+				_, _ = h.rdb.HSet(membersKey, strconv.FormatInt(s.MemberId, 10), strconv.FormatInt(int64(groupID), 10))
+			}
+		}
+	}
+	_, _ = h.rdb.Expire(membersKey, commonrank.SettledCacheTTL)
 }
 
 // GetHistoricalRewardUsers 查询历史轮次的入榜真实玩家 ID 列表。
@@ -405,9 +440,16 @@ func (h *Handler) GetHistoricalRewardUsers(ctx context.Context, bizType string, 
 		return nil, err
 	}
 	bizId := roundBizId(bizType, actID, round)
-	members, err := h.dao.LoadAllMembers(bizId)
+	rankCode := fmt.Sprintf("%s_score_%d", bizType, actID)
+	// Redis 优先、Mongo 兜底回写（2 周 TTL），避免历史查询反复打 Mongo。
+	store := engine.NewStore(h.rdb, h.dao, bizId)
+	members, err := store.GetAllMembers()
 	if err != nil {
 		return nil, err
+	}
+	// 成员索引命中即刷新 2 周 TTL（含 store 经 Mongo 回写、未带 TTL 的情况）
+	if len(members) > 0 && h.rdb != nil {
+		_, _ = h.rdb.Expire(rediskeys.GetRankMembersKey(bizId), commonrank.SettledCacheTTL)
 	}
 	result := make([]int64, 0, len(members))
 	for uid := range members {
@@ -417,7 +459,7 @@ func (h *Handler) GetHistoricalRewardUsers(ctx context.Context, bizType string, 
 	}
 	// member→group 索引可能丢失，从权威结算快照兜底恢复入榜真实玩家。
 	if len(result) == 0 {
-		realUsers, err := h.realUsersFromSettled(bizId)
+		realUsers, err := h.realUsersFromSettled(bizId, rankCode)
 		if err != nil {
 			return nil, err
 		}
@@ -430,8 +472,9 @@ func (h *Handler) GetHistoricalRewardUsers(ctx context.Context, bizType string, 
 	return result, nil
 }
 
-// realUsersFromSettled 从某轮次全部已结算分组快照中提取入榜真实玩家 ID（排除负 ID 机器人）。
-func (h *Handler) realUsersFromSettled(bizId string) ([]int64, error) {
+// realUsersFromSettled 从某轮次全部已结算分组快照中提取入榜真实玩家 ID（排除负 ID 机器人），
+// 并顺带将该轮权威数据写回 Redis（warmRoundCacheFromSettled），避免后续历史查询反复打 Mongo。
+func (h *Handler) realUsersFromSettled(bizId, rankCode string) ([]int64, error) {
 	if h.dao == nil {
 		return nil, nil
 	}
@@ -439,6 +482,7 @@ func (h *Handler) realUsersFromSettled(bizId string) ([]int64, error) {
 	if err != nil {
 		return nil, err
 	}
+	h.warmRoundCacheFromSettled(bizId, rankCode, settledByGroup)
 	seen := make(map[int64]struct{})
 	result := make([]int64, 0)
 	for _, snaps := range settledByGroup {
@@ -540,11 +584,6 @@ func (h *Handler) GetCurrentRoundInfo(state *PeriodicState) (RoundInfo, error) {
 // cycleDurationMs 将分钟数转换为毫秒。
 func cycleDurationMs(minutes int32) int64 {
 	return int64(minutes) * 60 * 1000
-}
-
-// roundSettledTTL 历史轮次 Redis 结算快照的保留时长（2 个周期）。
-func roundSettledTTL(cycleMinutes int32) time.Duration {
-	return time.Duration(cycleMinutes) * 2 * time.Minute
 }
 
 // curRoundRedisKey 返回存储周期活动当前轮号的 Redis 键。

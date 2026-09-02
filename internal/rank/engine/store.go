@@ -384,12 +384,13 @@ func (st *Store) LoadUsedInfoIDs(groupID int32) (map[int64]struct{}, error) {
 	return result, nil
 }
 
-// liveDataCleanupTTL 热数据清理的 TTL：由 Redis 异步回收，避免大 key 阻塞。
-const liveDataCleanupTTL = 1 * time.Second
+// settledDataRetentionTTL 已结算轮次 Redis 热数据的保留时长（2 周）。
+// 轮次结束后热数据不立即清理，而是保留 2 周承接历史查询；到期后由 Redis 异步回收，避免大 key 阻塞。
+const settledDataRetentionTTL = commonrank.SettledCacheTTL
 
-// CleanupLiveData 清理该轮次的 Redis 热数据（分组/成员/机器人），保留结算快照和 MongoDB 数据。
-// 用于周期排行榜历史轮次的延迟清理（清理窗口 = 1 个周期）。
-// 不删除 rank:settled（有 TTL 自行过期）和 MongoDB（永久保留）。
+// CleanupLiveData 为该轮次的 Redis 数据设置 2 周保留 TTL（meta/分组/成员/机器人/查询哨兵）。
+// 用于周期排行榜历史轮次的延迟清理（清理窗口 = 1 个周期，之后保留 2 周）。
+// 不删除 rank:settled（同样 2 周 TTL）和 MongoDB（永久保留）。
 func (st *Store) CleanupLiveData(groups []*Group) {
 	if !st.available() {
 		return
@@ -399,16 +400,16 @@ func (st *Store) CleanupLiveData(groups []*Group) {
 			groups = loaded
 		}
 	}
-	st.rdb.Expire(rediskeys.GetRankMetaKey(st.bizId), liveDataCleanupTTL)
-	st.rdb.Expire(rediskeys.GetRankGroupsKey(st.bizId), liveDataCleanupTTL)
-	st.rdb.Expire(rediskeys.GetRankMembersKey(st.bizId), liveDataCleanupTTL)
-	st.rdb.Expire(rediskeys.GetRankMongoCheckedKey(st.bizId), liveDataCleanupTTL)
+	st.rdb.Expire(rediskeys.GetRankMetaKey(st.bizId), settledDataRetentionTTL)
+	st.rdb.Expire(rediskeys.GetRankGroupsKey(st.bizId), settledDataRetentionTTL)
+	st.rdb.Expire(rediskeys.GetRankMembersKey(st.bizId), settledDataRetentionTTL)
+	st.rdb.Expire(rediskeys.GetRankMongoCheckedKey(st.bizId), settledDataRetentionTTL)
 	for _, g := range groups {
 		if g == nil {
 			continue
 		}
-		st.rdb.Expire(rediskeys.GetRankRobotsKey(st.bizId, g.GroupID), liveDataCleanupTTL)
-		st.rdb.Expire(rediskeys.GetRankRobotInfosKey(st.bizId, g.GroupID), liveDataCleanupTTL)
+		st.rdb.Expire(rediskeys.GetRankRobotsKey(st.bizId, g.GroupID), settledDataRetentionTTL)
+		st.rdb.Expire(rediskeys.GetRankRobotInfosKey(st.bizId, g.GroupID), settledDataRetentionTTL)
 	}
 }
 
@@ -717,6 +718,38 @@ func (st *Store) LoadGroupSettled(groupID int32) ([]commonrank.RankMemberSnapsho
 		return nil, nil
 	}
 	return st.dao.LoadGroupSettled(st.bizId, groupID)
+}
+
+// LoadGroupSettledCached 读取指定分组结算快照：优先 Redis rank:settled，
+// miss 时从 MongoDB 加载并写回 Redis（2 周 TTL），避免历史查询反复打 Mongo。
+// instanceID 为对应分组实例 ID（rankCode:bizId:group_N），与 RestoreSettled 同 key。
+func (st *Store) LoadGroupSettledCached(instanceID string, groupID int32) ([]commonrank.RankMemberSnapshot, error) {
+	if st.available() {
+		key := rediskeys.GetRankSettledKey(instanceID)
+		if raw, err := st.rdb.Get(key); err == nil {
+			var snaps []commonrank.RankMemberSnapshot
+			if json.Unmarshal([]byte(raw), &snaps) == nil && len(snaps) > 0 {
+				_, _ = st.rdb.Expire(key, commonrank.SettledCacheTTL)
+				return snaps, nil
+			}
+		} else if !st.rdb.IsNil(err) {
+			return nil, err
+		}
+	}
+	if !st.hasMongo() {
+		return nil, nil
+	}
+	snaps, err := st.dao.LoadGroupSettled(st.bizId, groupID)
+	if err != nil {
+		return nil, err
+	}
+	if st.available() && len(snaps) > 0 {
+		key := rediskeys.GetRankSettledKey(instanceID)
+		if data, err := json.Marshal(snaps); err == nil {
+			_ = st.rdb.SetEX(key, string(data), commonrank.SettledCacheTTL)
+		}
+	}
+	return snaps, nil
 }
 
 // --- 榜单实例元数据持久化 ---
