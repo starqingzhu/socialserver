@@ -778,6 +778,30 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 		}
 
 		if exists {
+			// 周期排行榜：检测是否另一节点已推进轮次，本节点服务落后需替换。
+			// syncFromMongo 已刷新了 PeriodicState，但 engineServices[key] 仍指向旧轮次服务，
+			// 导致 canUpdateScore 用旧 CloseTime 判断，误报 ErrInstanceClosed。
+			if doc.Periodic != nil && existingSvc != nil {
+				curIdx := existingSvc.GetConfig().RoundIndex
+				if curIdx > 0 && curIdx < doc.Periodic.CurrentRound {
+					existingCfg := existingSvc.GetConfig()
+					roundCfg := existingCfg
+					roundCfg.OpenTime = doc.Periodic.RoundOpenTime
+					roundCfg.CloseTime = doc.Periodic.RoundCloseTime
+					roundCfg.GameEndTime = doc.Periodic.RoundCloseTime
+					roundCfg.RoundIndex = doc.Periodic.CurrentRound
+					roundCfg.CreateTime = doc.Periodic.RoundOpenTime
+					if newSvc, replErr := m.ReplaceRoundService(ctx, string(bizType), key, roundCfg); replErr != nil {
+						zaplog.LoggerSugar.Warnf("rank: syncFromMongo replace stale periodic service %s round %d→%d: %v",
+							key, curIdx, doc.Periodic.CurrentRound, replErr)
+					} else {
+						zaplog.LoggerSugar.Infof("rank: syncFromMongo replaced stale periodic service %s round %d→%d",
+							key, curIdx, doc.Periodic.CurrentRound)
+						localNewSvc := newSvc
+						go localNewSvc.WarmUp(context.Background())
+					}
+				}
+			}
 			continue
 		}
 
