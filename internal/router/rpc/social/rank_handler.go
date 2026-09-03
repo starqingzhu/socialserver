@@ -523,33 +523,34 @@ func (h *ServerHandler) S2SListRankConfigs(ctx context.Context, req *pb.PBS2SLis
 	for i, info := range infos {
 		var rankType pb.RankType = pb.RankType_RANK_TYPE_ONCE
 		var cycleMinutes, currentRound int32
-		// OBS9: 周期排行榜的 OpenTime/CloseTime 取整体活动窗口（TotalOpenTime/TotalCloseTime），
-		// 而非当前子轮注册到 engine.Config 的轮次窗口（避免调用方误读为活动总时间）。
 		openTime := info.Config.OpenTime
 		closeTime := info.Config.CloseTime
 		gameEndTime := effectiveGameEndTime(info.Config.GameEndTime, info.Config.CloseTime)
+		createTime := info.CreateTime
 		if state := manager.GetPeriodicState(info.BizType, info.ActID); state != nil {
 			rankType = pb.RankType_RANK_TYPE_PERIODIC
 			cycleMinutes = state.CycleMinutes
 			currentRound = state.GetCurrentRound()
-			openTime = state.TotalOpenTime
-			closeTime = state.TotalCloseTime
-			gameEndTime = state.TotalCloseTime
+			openTime = state.RoundOpenTime
+			closeTime = state.RoundCloseTime
+			gameEndTime = state.RoundCloseTime
+			createTime = state.TotalOpenTime
 		}
 		ranks[i] = &pb.PBRankConfigSummary{
-			BizType:      string(info.BizType),
-			ActId:        info.ActID,
-			RankCode:     info.Config.RankCode,
-			OpenTime:     openTime,
-			CloseTime:    closeTime,
-			GameEndTime:  gameEndTime,
-			Settled:      info.Settled,
-			GroupCount:   info.GroupCount,
-			MemberCount:  info.MemberCount,
-			CreateTime:   info.CreateTime,
-			RankType:     rankType,
-			CycleMinutes: cycleMinutes,
-			CurrentRound: currentRound,
+			BizType:          string(info.BizType),
+			ActId:            info.ActID,
+			RankCode:         info.Config.RankCode,
+			OpenTime:         openTime,
+			CloseTime:        closeTime,
+			GameEndTime:      gameEndTime,
+			Settled:          info.Settled,
+			GroupCount:       info.GroupCount,
+			MemberCount:      info.MemberCount,
+			CreateTime:       createTime,
+			RankType:         rankType,
+			CycleMinutes:     cycleMinutes,
+			CurrentRound:     currentRound,
+			ActivityTypeName: rankservice.GetRankBaseName(info.BizType),
 		}
 	}
 	return &pb.PBS2SListRankConfigsResponse{Ranks: ranks}, nil

@@ -148,6 +148,16 @@ func loadRankBase(bizType BizType) (*cfgtypes.RankBaseConfig, error) {
 	return nil, fmt.Errorf("RankBase config not found for bizType=%s", bizType)
 }
 
+// GetRankBaseName 返回指定业务类型在 RankBase 配置中的名称（活动类型名）。
+// 若未找到配置则返回空字符串。
+func GetRankBaseName(bizType BizType) string {
+	base, err := loadRankBase(bizType)
+	if err != nil {
+		return ""
+	}
+	return base.Name
+}
+
 // ValidateBizType 验证业务类型是否支持。
 // 通过检查 RankBase.json 配置文件中是否存在该业务类型的配置。
 func ValidateBizType(bizType BizType) error {
