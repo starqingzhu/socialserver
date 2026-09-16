@@ -19,6 +19,8 @@ import (
 	rankservice "socialserver/internal/rank"
 	hrouter "socialserver/internal/router/http"
 	rpcservice "socialserver/internal/router/rpc"
+	"socialserver/internal/dispatch"
+	"socialserver/internal/handler"
 
 	"github.com/gin-gonic/gin"
 )
@@ -135,6 +137,9 @@ func (s *Server) OnInit() {
 
 	if err := rankservice.InitGlobalManager(redis.Main, config.Default.MongoCfg.Database); err != nil {
 		zaplog.LoggerSugar.Fatalf("init rank manager failed: %v", err)
+	}
+	if err := handler.RegisterAll(dispatch.Main); err != nil {
+		zaplog.LoggerSugar.Fatalf("OnInit: register handlers failed: %v", err)
 	}
 	rpcservice.InitAllRPC()
 
