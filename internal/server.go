@@ -16,11 +16,11 @@ import (
 	"golib/utils"
 	"golib/yamlcfg"
 	"golib/zaplog"
+	"socialserver/internal/dispatch"
+	"socialserver/internal/handler"
 	rankservice "socialserver/internal/rank"
 	hrouter "socialserver/internal/router/http"
 	rpcservice "socialserver/internal/router/rpc"
-	"socialserver/internal/dispatch"
-	"socialserver/internal/handler"
 
 	"github.com/gin-gonic/gin"
 )
@@ -151,12 +151,20 @@ func (s *Server) OnInit() {
 }
 
 func (s *Server) OnClose() {
+	// 立即从 etcd 吊销 lease，使负载均衡器不再路由新请求到本节点。
+	// 必须第一步，否则 gRPC/HTTP 停后节点仍在注册表中，调用方会拿到 connection refused。
+	cetcd.Close()
+
+	if e := gohttp.Main.Close(); e != nil {
+		zaplog.LoggerSugar.Error("http server close err:", e)
+	}
+	rpcservice.Close()
+
 	configmgr.StopWatch()
+
 	if manager := rankservice.GetGlobalManager(); manager != nil {
 		manager.Close()
 	}
-	rpcservice.Close()
-	cetcd.Close()
 	if e := queue.Shutdown(); e != nil {
 		zaplog.LoggerSugar.Error("queue shutdown err:", e)
 	}

@@ -24,15 +24,16 @@ const (
 )
 
 type Manager struct {
-	mu             sync.RWMutex
-	rdb            *goredis.Redis
-	dao            *engine.DAO
-	rankService    commonrank.Service
-	memberIndex    *MemberIndex
-	services       map[string]RankBizService
-	engineServices map[string]*engine.Service
+	mu              sync.RWMutex
+	wg              sync.WaitGroup
+	rdb             *goredis.Redis
+	dao             *engine.DAO
+	rankService     commonrank.Service
+	memberIndex     *MemberIndex
+	services        map[string]RankBizService
+	engineServices  map[string]*engine.Service
 	periodicHandler *periodic.Handler
-	stopCh         chan struct{}
+	stopCh          chan struct{}
 }
 
 var globalManager *Manager
@@ -73,6 +74,7 @@ func (m *Manager) Close() {
 		return
 	}
 	close(m.stopCh)
+	m.wg.Wait() // 等所有后台 goroutine 退出，再关闭 Redis/MongoDB
 	m.periodicHandler.Clear()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -82,10 +84,11 @@ func (m *Manager) Close() {
 }
 
 func (m *Manager) startBackground() {
-	go m.tickLoop()
-	go m.syncLoop()
-	go m.subscribeDeleteEvents()
-	go m.subscribeCreateEvents()
+	m.wg.Add(4)
+	go func() { defer m.wg.Done(); m.tickLoop() }()
+	go func() { defer m.wg.Done(); m.syncLoop() }()
+	go func() { defer m.wg.Done(); m.subscribeDeleteEvents() }()
+	go func() { defer m.wg.Done(); m.subscribeCreateEvents() }()
 }
 
 func (m *Manager) tickLoop() {
