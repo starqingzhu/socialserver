@@ -949,6 +949,14 @@ func (s *Service) GetAllMembers() (map[int64]int32, error) {
 	return s.store.GetAllMembers()
 }
 
+// GetMemberGroupID 返回用户所在分组 ID；若不在本活动中则 ok=false。
+func (s *Service) GetMemberGroupID(userID int64) (groupID int32, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	groupID, ok = s.memberGroup[userID]
+	return
+}
+
 func (s *Service) ClaimReward(userID int64, now int64) (bool, int64, error) {
 	return s.store.AtomicClaim(userID, now)
 }

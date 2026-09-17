@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	syncInterval = 30 * time.Second
-	tickInterval = time.Second
+	syncInterval   = 30 * time.Second
+	tickInterval   = time.Second
+	memberIndexTTL = 7 * 24 * time.Hour
 )
 
 type Manager struct {
@@ -47,7 +48,7 @@ func InitGlobalManager(rdb *goredis.Redis, dbName string) error {
 		rdb:            rdb,
 		dao:            dao,
 		rankService:    commonrank.NewRedisService(rdb),
-		memberIndex:    NewMemberIndex(rdb),
+		memberIndex:    NewMemberIndex(rdb, memberIndexTTL),
 		services:       make(map[string]RankBizService),
 		engineServices: make(map[string]*engine.Service),
 		stopCh:         make(chan struct{}),
@@ -379,11 +380,43 @@ func (m *Manager) ListServices(filterBizType BizType) []ServiceInfo {
 }
 
 // GetMemberEntries 返回用户参与的所有排行榜记录。
+// Redis 索引键带 TTL，过期后首次查询会从内存中的 engine service 重建。
 func (m *Manager) GetMemberEntries(userID int64) []MemberEntry {
 	if m == nil {
 		return nil
 	}
-	return m.memberIndex.Lookup(userID)
+	if entries := m.memberIndex.Lookup(userID); len(entries) > 0 {
+		return entries
+	}
+	return m.rebuildMemberIndex(userID)
+}
+
+// rebuildMemberIndex 扫描所有已加载的 engine service，重建指定用户的成员索引。
+// engine.Service 的 memberGroup 常驻内存（WarmUp 时加载一次），不产生 Redis/MongoDB 访问。
+func (m *Manager) rebuildMemberIndex(userID int64) []MemberEntry {
+	m.mu.RLock()
+	svcs := make([]*engine.Service, 0, len(m.engineServices))
+	for _, svc := range m.engineServices {
+		svcs = append(svcs, svc)
+	}
+	m.mu.RUnlock()
+
+	var entries []MemberEntry
+	for _, svc := range svcs {
+		groupID, ok := svc.GetMemberGroupID(userID)
+		if !ok {
+			continue
+		}
+		cfg := svc.GetConfig()
+		entry := MemberEntry{
+			BizType: BizType(cfg.BizType),
+			ActID:   cfg.ActID,
+			GroupID: groupID,
+		}
+		m.memberIndex.Track(userID, entry)
+		entries = append(entries, entry)
+	}
+	return entries
 }
 
 // GetMemberRankEntries 返回用户在所有排行榜中的名次快照（GM 查询用）。
@@ -391,7 +424,7 @@ func (m *Manager) GetMemberRankEntries(ctx context.Context, userID int64) ([]Mem
 	if m == nil {
 		return nil, nil
 	}
-	entries := m.memberIndex.Lookup(userID)
+	entries := m.GetMemberEntries(userID)
 	if len(entries) == 0 {
 		return nil, nil
 	}

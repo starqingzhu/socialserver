@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	rediskeys "common/redis"
 	goredis "golib/redis"
@@ -11,12 +12,14 @@ import (
 
 type MemberIndex struct {
 	rdb     *goredis.Redis
+	ttl     time.Duration // 0 = no expiry
 	entries map[int64][]MemberEntry
 }
 
-func NewMemberIndex(rdb *goredis.Redis) *MemberIndex {
+func NewMemberIndex(rdb *goredis.Redis, ttl time.Duration) *MemberIndex {
 	return &MemberIndex{
 		rdb:     rdb,
+		ttl:     ttl,
 		entries: make(map[int64][]MemberEntry),
 	}
 }
@@ -47,7 +50,11 @@ func decodeMemberEntry(s string) (MemberEntry, bool) {
 
 func (idx *MemberIndex) Track(userID int64, entry MemberEntry) {
 	if idx.rdb != nil {
-		idx.rdb.SAdd(rediskeys.GetRankMemberIndexKey(userID), encodeMemberEntry(entry))
+		key := rediskeys.GetRankMemberIndexKey(userID)
+		idx.rdb.SAdd(key, encodeMemberEntry(entry))
+		if idx.ttl > 0 {
+			idx.rdb.Expire(key, idx.ttl)
+		}
 		return
 	}
 	for _, existing := range idx.entries[userID] {
