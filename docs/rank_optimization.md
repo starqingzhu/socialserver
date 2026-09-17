@@ -26,17 +26,17 @@
 | 12 | findTier/robotAvatarInfo 改为 map 查找 | `service_robot.go` | 🟢 质量 |
 | 13 | WarmUp 加原子快路径（`sync.Once` 与两阶段改造均不做） | `service.go` | 🟢 质量 |
 
-**本轮已重写**：00（补充 ticker 背压约束与池内不可再等池的硬约束）、01（改为「启动 SCAN 建表 + 注册表」，取消周期扫描）、02（改为整份分组列表缓存 + 2 秒有效期 + `Range(0,-1)` 收敛；活跃期 TTL 覆盖全部 13 个 key、回填补 TTL、走灰度）、06（`settledAt` 比较 + `canUpdateScore` 闸门，修正两处论断）、08（现状核验 + 清理链路缺陷 (a)–(d3)）、09（删除改为修复）、13（改为 `WarmUp` 原子快路径）；新增「基础原则与全量盘点」一节（两条原则 + 17 个 key 的 TTL/恢复台账 + 全仓扫库审计）
+**本轮已重写**：00（补充 ticker 背压约束与池内不可再等池的硬约束）、01（改为「启动 SCAN 建表 + 注册表」，取消周期扫描；注册表 key 加滑动 TTL）、02（改为整份分组列表缓存 + 2 秒有效期 + `Range(0,-1)` 收敛；活跃期 TTL 覆盖全部 13 个 key、回填补 TTL、走灰度）、06（`settledAt` 比较 + `canUpdateScore` 闸门，修正两处论断）、08（现状核验 + 清理链路缺陷 (a)–(d3)）、09（删除改为修复）、13（改为 `WarmUp` 原子快路径）；新增「基础原则与全量盘点」一节（**不允许存在永久 key** + 不得扫库两条原则、17 个 key 的 TTL/恢复台账、缺陷 1–8、落地形态、可恢复性论证、全仓扫库审计）
 
-**待办**：本轮另发现 10 项问题（A–J），见文末「修订记录」，不在原 13 条内
+**待办**：本轮另发现 11 项问题（A–K），见文末「修订记录」，不在原 13 条内
 
-**基础原则**：见下一节「基础原则与全量盘点」——① Redis 只是缓存，所有 key 都必须有 TTL **且**有恢复路径；② 正常逻辑不得扫库。这两条是全文的判定依据。
+**基础原则**：见下一节「基础原则与全量盘点」——① **不允许存在永久 key**：每个 key 都必须有生命周期（写时带 TTL），且必须能从 MongoDB 单调用恢复；② 正常逻辑不得扫库。这两条是全文的判定依据，任何条目与之冲突以它为准。
 
 ---
 
-**🔴 上线前必改（2026-09-17 二次复核新增）**
+**🔴 上线前必改（2026-09-17 复核新增）**
 
-以下 6 项是复核第 02、06 条方案时发现的**方案自身缺陷 + 与基础原则冲突处**，不是原代码的既有问题——即"照本文档实施反而会引入 bug"。必须先修正再落地：
+以下 9 项是复核第 01、02、06 条方案时发现的**方案自身缺陷 + 与两条基础原则的冲突点**，不是原代码的既有问题——即「照本文档实施反而会引入 bug，或仍然留着违反原则的洞」。必须先修正再落地：
 
 | # | 问题 | 触发条件 | 后果 | 落点 |
 |---|---|---|---|---|
@@ -45,16 +45,21 @@
 | 必改-3 | 第 02 条缓存 API 形状与真实调用点不符 | — | `getGroup(groupID)` 是按分组取值，而 `tickAllRobots` 需要的是**整份未结算分组列表**，按现 sketch 落不了地 | 第 02 条 |
 | 必改-4 | 第 06 条未定义 `settledAt.Store` 的**落点** | — | 若放在成功分支内，则只有抢到 `TryLockSettle` 的 1/N 节点受益，其余节点每秒 2 次 HGETALL 原样保留 | 第 06 条 |
 | 必改-5 | 第 02 条的 TTL 会被**懒加载回填**永久抵消 | TTL 到期后发生任意一次读（`LoadGroups` / `GetMember` / `GetAllMembers` / `LoadRobots` / `RestoreSettled`） | 回填用 `HSet`/`Set` 且**不带 TTL** → key 变永久。而这些正是历史查询的目标活动，**等于 TTL 在最该生效的场景失效** | 缺陷 3 |
-| 必改-6 | `rank:def` **不能只设 TTL 不加懒恢复** | 设了 TTL 且到期 | `OpenInstance` 依赖 `rank:def` 存在否则返 `ErrDefinitionNotFound` → **新分组建不出来，活动不可玩**，最坏 30 秒窗口（等 `syncLoop` 重建）。必须配 `GetRank` miss → 从内存 `s.config` 零 IO 重建 | 缺陷 1 |
+| 必改-6 | `rank:def` **不能只设 TTL 不加懒恢复** | 设了 TTL 且到期 | `OpenInstance` 依赖 `rank:def` 存在否则返 `ErrDefinitionNotFound` → **新分组建不出来，活动不可玩**，最坏 30 秒窗口（等 `syncLoop` 重建）。必须配 `GetRank` miss → 从内存 `s.config` 零 IO 重建，**且 `OpenInstance` 的存在性检查要从 `Exists` 改成走 `GetRank`**（`Exists` 不经过 `GetRank`，只包一层修不到） | 缺陷 1 |
+| 必改-7 | **一次性活动结算后没有任何 TTL 设置点** | 任何 `RankTypeOnce` 活动走完 `Tick` → `Settle()` | `Service.Settle()` 不设 TTL，而 `CleanupLiveData` / `ExpireInstance` **只被周期路径调用** → 11 个 key **永久残留**（自带 TTL 的只有 `rank:member_index` 7 天、`rank:mongo_chk` 10 分钟），直到 GM 手动 `RemoveService`（连 MongoDB 一起删的硬删除）。**这是"永久 key"的最大来源，也是全文最容易被忽略的一处** | 缺陷 6 |
+| 必改-8 | 第 02 条 TTL 公式在 `effectiveSettleAt() == 0` 时**无定义**，旧写法的 `ttl <= 0` 分支会**静默留成永久 key** | `CloseTime=0 && GameEndTime=0`（RPC 可直接构造，无校验） | `time.Until(time.UnixMilli(0))` ≈ -56 年 → 旧写法跳过 `Expire` → key 永久。**不能靠"跳过"来保护，必须退化为滑动 TTL** | 缺陷 7 |
+| 必改-9 | 第 01 条新增的注册表 **key 自身是永久 key**，且成员用「远期哨兵值表示永不过期」 | 注册表被使用 | 成员会被惰性修剪但 **key 不会**；哨兵值把"永久"编进了数据模型。与原则一直接冲突 | 缺陷 8 |
 
-**结论**：必改-1 是全文唯一会**静默吞掉玩家奖励**的问题，必须最先处理；必改-5 是唯一会让**第 02 条整体失效**的问题。
+**结论**：必改-1 是全文唯一会**静默吞掉玩家奖励**的问题，必须最先处理；必改-5 是唯一会让**第 02 条整体失效**的问题；**必改-6/7/8/9 是「不允许存在永久 key」这条原则的四个落点**，其中必改-7 的影响面最大（一次性活动是最常见的活动形态，而现在它的 key 全部永久）。
 
 ---
 
 实施顺序建议：**00（基础设施）→ 01 → 04/05（接入池）→ 06 → 09 → 08 → 02/03 → 其余**
 （08 提到 09 之后：09 的修复分支要复用 08 的 `cleanupServiceData`；13 与任何一条都无耦合，1 行改动，可随时插入 → 见第 13 条）
 
-**落地上须先做的四件事**：① 第 06 条加 `canUpdateScore` 闸门（必改-1，全文唯一会静默吞奖励的问题）；② 第 02 条缓存改为「整份分组列表 + 2 秒有效期」（必改-2、必改-3，两者是同一段代码）；③ 缺陷 3 的回填补 TTL 必须与第 02 条**同批上线**（必改-5，否则 TTL 在历史查询场景下完全失效）；④ 第 02 条活跃期 TTL 是全文唯一**不可逆**改动，必须先灰度（见该条「⚠️ 唯一不可逆的改动」与待办 H）。另：`rank:def` 在补上懒恢复前**不得设 TTL**（必改-6）。
+**落地上须先做的五件事**：① 第 06 条加 `canUpdateScore` 闸门（必改-1，全文唯一会静默吞奖励的问题）；② 第 02 条缓存改为「整份分组列表 + 2 秒有效期」（必改-2、必改-3，两者是同一段代码）；③ 缺陷 3 的回填补 TTL 必须与第 02 条**同批上线**（必改-5，否则 TTL 在历史查询场景下完全失效）；④ 缺陷 6 的 per-group TTL 要与 ③ 一起做——**它才是「不允许存在永久 key」的主要落点**（一次性活动当前完全无 TTL）；⑤ 第 02 条活跃期 TTL 是全文唯一**不可逆**改动，必须先灰度（见该条「⚠️ 唯一不可逆的改动」与待办 H）。
+
+另外两条成对落地，不能拆：`rank:def` 的懒恢复（含 `OpenInstance` 改走 `GetRank`）与它的 TTL 是**同一个改动包**（必改-6）；第 01 条的注册表 TTL 与注册表本身是**同一个改动包**（必改-9）。
 
 ---
 
@@ -62,36 +67,67 @@
 
 本节的两条原则是全文所有条目的判定依据；任何条目若与本节冲突，以本节为准。
 
-### 原则一：Redis 只是缓存 —— 所有排行榜 key 都必须有 TTL，且必须有恢复路径
+### 原则一：Redis 只是缓存 —— 不允许存在永久 key
 
-这两件事是一体两面，**只做一半都会出问题**：
+**硬规则（三条，无例外）**
+
+1. **每个 key 在写入时必须带 TTL。** 任何 `Set` / `HSet` / `SAdd` / `SetNX` / `Restore*` 的落点，都要在同一次往返里把过期时间设上。**不存在「这个 key 需要常驻，所以不设 TTL」的例外**——常驻需求用「滑动 TTL + 写时续期」表达（第 3 条），不是用「无 TTL」表达。
+2. **每个 key 必须有一条「单调用可恢复」的路径。** 权威源是 MongoDB（`rank:member_index` 例外，权威源是 engine 内存）。判定标准：**把这个 key 删掉，下次读它时能否不依赖任何其它 Redis key 自行恢复**。做不到的 key 不允许设 TTL——它属于「必须常驻」，走第 3 条。
+3. **TTL 必须覆盖两种 key 形态**（这是第 1 条能落地的前提）：
+
+| key 形态 | 举例 | TTL 规则 | 是否需要续期 |
+|---|---|---|---|
+| **活动数据**（有 `effectiveSettleAt()`） | meta / groups / members / claims / inst / mb / seq / settled / robots | 绝对过期时刻 = `effectiveSettleAt() + SettledCacheTTL`，**与设置时机无关** | ❌ 写一次即可；后续写入重复设同一个绝对值是幂等的 |
+| **非活动数据**（没有天然结束时刻） | `rank:def`、第 01 条的注册表、`rank:member_index` | **滑动 TTL**：每次写刷新到 `now + 冷数据 TTL` | ✅ 活跃期被持续续期；连续一个 TTL 时长无写入才算冷掉，才回收 |
+
+「滑动 TTL + 写时续期」是「这个 key 需要常驻」的**唯一合法表达方式**——它把"常驻"从"永不回收"改写成"只要还在被使用就不会回收"。这正是本原则允许「活动数据用绝对过期、定义/注册表用滑动过期」却仍然没有任何永久 key 的原因。
+
+**没有第三种形态。** 遇到一个 key 说不清属于哪一类，说明它的生命周期没设计完，而不是它需要豁免。
+
+**「冷数据 TTL」的取值**：下文多处用到 `coldDataTTL`，统一定义为
+
+```go
+// 与 memberIndexTTL 取同一个值，避免多一个需要解释的魔数。
+const coldDataTTL = 7 * 24 * time.Hour
+```
+
+它表达的是「静默多久才算真的冷掉」。取值考虑三点：① 比任何活动的最短周期都长，避免活跃服务被误回收；② 与既有的 `rank:member_index` TTL 一致；③ 回收本身是安全的（权威源在 MongoDB），所以取值偏大的代价只是"多占几天内存"，偏小的代价才是风险——因此这个值宁大勿小。
+
+**两件事是一体两面，只做一半都会出问题**：
 
 - **只设 TTL 不做恢复** → 到期后功能直接失效。最典型的例子是 `rank:def`：`OpenInstance` 先 `Exists(rank:def)`，不存在就返回 `ErrDefinitionNotFound`（[service_redis.go:189-195](../../common/rank/service_redis.go)）——即**新分组无法创建**，活动彻底不可玩。
-- **只做恢复不设 TTL** → 未走结算/删除流程的活动永久占内存。这正是当前现状（见下表「活跃期」一列）。
+- **只做恢复不设 TTL** → 未走结算/删除流程的活动永久占内存。这正是当前现状，而且**比原先估计的严重得多**：见下表「结算后 TTL」一列——**一次性活动结算后根本没有任何地方设 TTL**（缺陷 6），它的 11 个 key 永久残留（仅 `rank:member_index` 的 7 天和 `rank:mongo_chk` 的 10 分钟是自带 TTL 的），直到 GM 手动 `RemoveService`（而那是连 MongoDB 一起删的硬删除）。
 
-**全量 key 台账**（14 个数据 key + 3 个锁 key，其中 1 个数据 key 是死代码 → 13 个在用）
+**全量 key 台账**（14 个数据 key，其中 1 个是死代码；+ 3 个锁 key；+ 第 01 条将新增的注册表 → 共 **17 个在用 key**）
 
-| key | 活跃期 TTL | 结算后 TTL | 恢复路径（Mongo 权威源） | 缺口 |
+| key | 活跃期 TTL | 结算后 TTL（一次性 / 周期） | 权威源 → 恢复路径 | 缺口 |
 |---|---|---|---|---|
-| `rank:def:{rankCode}` | ❌ 无（`Set`） | ❌ 无 | 6 处 `RegisterRank` 从配置重建（最长 30s 延迟） | ⚠️ **缺陷 1** |
-| `rank:inst:{instanceID}` | ❌ 无（`SetNX` TTL=0） | ✅ 2 周（`ExpireInstance`） | `LoadGroupInst` ← `CT_RANK_INST` | ⚠️ 缺陷 2 |
-| `rank:mb:{instanceID}` | ❌ 无 | ✅ 2 周（同上） | `recoverGroupData` ← `CT_RANK_SCORE` | ⚠️ 缺陷 2 |
-| `rank:seq:{instanceID}` | ❌ 无 | ✅ 2 周（同上） | `RestoreMembers` 推进到 `max(sequence)`（Lua） | ⚠️ 缺陷 2 |
-| `rank:settled:{instanceID}` | — | ⚠️ 部分（见缺陷 4） | `LoadGroupSettled` ← `CT_RANK_SETTLED` | ⚠️ **缺陷 4** |
-| `rank:meta:{bizId}` | ❌ 无 | ✅ 2 周（`CleanupLiveData`） | `ensureLoaded` 从 `CT_RANK_GROUP` 重算 `nextGroupID` | ⚠️ 缺陷 2 |
-| `rank:groups:{bizId}` | ❌ 无 | ✅ 2 周（同上） | `LoadGroups` ← `CT_RANK_GROUP` | ⚠️ 缺陷 2 |
-| `rank:members:{bizId}` | ❌ 无 | ✅ 2 周（同上） | `GetMember` ← `CT_RANK_MEMBER` | ⚠️ 缺陷 2 |
-| `rank:claims:{bizId}` | ❌ 无 | ✅ 2 周（同上） | `AtomicClaim` 回退 `GetClaim`/`SaveClaimIfNotExists` ← `CT_RANK_CLAIM` | ⚠️ 缺陷 2 |
-| `rank:robots:{bizId}:{gid}` | ❌ 无 | ✅ 2 周（同上） | `LoadRobots` ← `CT_RANK_ROBOT` | ⚠️ 缺陷 2 |
-| `rank:robot_infos:{bizId}:{gid}` | ❌ 无 | ✅ 2 周（同上） | 同上 | ⚠️ 缺陷 2 |
-| `rank:member_index:{uid}` | ✅ 7 天 | ✅ 7 天 | `rebuildMemberIndex` ← engine 内存 | 无（第 08 条） |
-| `rank:mongo_chk:{bizId}` | ✅ 10 分钟 | ✅ 2 周 | 无需（哨兵本身是缓存） | 无 |
-| `rank:max_score:{bizId}` | — | — | — | ⚠️ **缺陷 5（死代码）** |
-| `rank:settle:{bizId}:{gid}` | ✅ 10 分钟 | ✅ | 无需（锁） | 无 |
-| `rank:robot_tick:{bizId}:{sec}` | ✅ 3 秒 | ✅ | 无需（锁） | 无 |
-| `rank:periodic_advance:{lk}:r{n}` | ✅ 1 分钟 | ✅ | 无需（锁） | 无 |
+| `rank:def:{rankCode}` | ❌ 无（`Set`） | ❌ / ❌ | `CT_RANK_CONFIG` → 6 处 `RegisterRank`（最长 30s） | ⚠️ **缺陷 1** |
+| `rank:inst:{instanceID}` | ❌ 无（`SetNX` TTL=0） | ❌ / ✅ 2 周 | `CT_RANK_INST` → `LoadGroupInst` | ⚠️ 缺陷 2 + 6 |
+| `rank:mb:{instanceID}` | ❌ 无 | ❌ / ✅ 2 周 | `CT_RANK_SCORE` → `recoverGroupData` | ⚠️ 缺陷 2 + 6 |
+| `rank:seq:{instanceID}` | ❌ 无 | ❌ / ✅ 2 周 | `CT_RANK_SCORE` → `RestoreMembers` 推进到 `max(sequence)`（Lua） | ⚠️ 缺陷 2 + 6 |
+| `rank:settled:{instanceID}` | — | ❌ / ⚠️ 部分 | `CT_RANK_SETTLED` → `LoadGroupSettled` | ⚠️ **缺陷 4 + 6** |
+| `rank:meta:{bizId}` | ❌ 无 | ❌ / ✅ 2 周 | `CT_RANK_GROUP` → `ensureLoaded` 重算 `nextGroupID` | ⚠️ 缺陷 2 + 6 |
+| `rank:groups:{bizId}` | ❌ 无 | ❌ / ✅ 2 周 | `CT_RANK_GROUP` → `LoadGroups` | ⚠️ 缺陷 2 + 6 |
+| `rank:members:{bizId}` | ❌ 无 | ❌ / ✅ 2 周 | `CT_RANK_MEMBER` → `GetMember` | ⚠️ 缺陷 2 + 6 |
+| `rank:claims:{bizId}` | ❌ 无 | ❌ / ✅ 2 周 | `CT_RANK_CLAIM` → `AtomicClaim` 回退 `GetClaim`/`SaveClaimIfNotExists` | ⚠️ 缺陷 2 + 6 |
+| `rank:robots:{bizId}:{gid}` | ❌ 无 | ❌ / ✅ 2 周 | `CT_RANK_ROBOT` → `LoadRobots` | ⚠️ 缺陷 2 + 6 |
+| `rank:robot_infos:{bizId}:{gid}` | ❌ 无 | ❌ / ✅ 2 周 | 同上 | ⚠️ 缺陷 2 + 6 |
+| `rank:member_index:{uid}` | ✅ 7 天 | ✅ / ✅ 7 天 | engine 内存 → `rebuildMemberIndex` | 无（第 08 条） |
+| `rank:mongo_chk:{bizId}` | ✅ 10 分钟 | ✅ / ✅ 2 周 | 无需（哨兵本身是缓存） | 无 |
+| `rank:max_score:{bizId}` | — | — / — | — | ⚠️ **缺陷 5（死代码）** |
+| `rank:settle:{bizId}:{gid}` | ✅ 10 分钟 | ✅ / ✅ | 无需（锁） | 无 |
+| `rank:robot_tick:{bizId}:{sec}` | ✅ 3 秒 | ✅ / ✅ | 无需（锁） | 无 |
+| `rank:periodic_advance:{lk}:r{n}` | ✅ 1 分钟 | ✅ / ✅ | 无需（锁） | 无 |
+| `rank:{active_services}`（第 01 条新增） | ❌ 无 | ❌ / ❌ | `CT_RANK_GROUP` → `syncFromMongo` → `NewService` → `SaveActivityTimes` SADD | ⚠️ **缺陷 8** |
 
-**结论**：13 个在用数据 key 中，**活跃期有 TTL 的只有 2 个**（`rank:member_index`、`rank:mongo_chk`）。其余 11 个在活动存续期间**永不过期**，一旦活动未走 `Settle`→`CleanupLiveData` 或 `RemoveService`，key 永久残留。第 02 条的「活跃期 TTL」正是补这一块缺口，但它的现表**只列了 9 个 key**，漏掉 `rank:def` / `rank:inst` / `rank:mb` / `rank:seq`，且 `rank:settled` 行的「设置者」写错了（见缺陷 4）。第 02 条已按本节的写法修正。
+**结论（三句话）**：
+
+1. **活跃期**：14 个在用数据 key 中只有 2 个有 TTL（`rank:member_index`、`rank:mongo_chk`），其余 12 个在活动存续期间永不过期。
+2. **结算后**：**周期轮次**有 11 个 key 会被 `CleanupLiveData`（7 个）+ `ExpireInstance`（4 个）设上 2 周 TTL；**一次性活动一个都没有**（设 TTL 的 key 数 = 0）——`CleanupLiveData` 只被周期路径调用（[periodic/handler.go:218](../../socialserver/internal/rank/periodic/handler.go)、`634`），一次性活动走完 `Settle()` 后没有任何 TTL 设置点（缺陷 6）。
+3. **注册表**：第 01 条引入的 `rank:{active_services}` 自身也是永久 key（缺陷 8）。
+
+所以「不允许存在永久 key」这条原则，**当前 17 个在用 key 里有 12 个不合规**——合规的只有 `rank:member_index`（第 08 条刚做的）、`rank:mongo_chk` 和 3 个锁 key。分工是：第 02 条补活跃期（缺陷 2），缺陷 6 补一次性活动的结算后，缺陷 7 补 `effectiveSettleAt()==0` 的退化分支，缺陷 8 补注册表。第 02 条的现表**只列了 9 个 key**，漏掉 `rank:def` / `rank:inst` / `rank:mb` / `rank:seq`，且 `rank:settled` 行的「设置者」写错了（见缺陷 4），已按本节修正。
 
 ---
 
@@ -109,6 +145,17 @@ t0+Δ    syncLoop 下一轮（Δ 最坏 30s）才 RegisterRank 重建
 ```
 
 也就是说，**只要给 `rank:def` 设 TTL 而不加读路径懒恢复，就会周期性出现「活动在但玩家进不去」的故障**，窗口最坏 30 秒。
+
+**注意 `Exists` 不经过 `GetRank`**。`OpenInstance` 查的是 `Exists(rank:def)`（[service_redis.go:189](../../common/rank/service_redis.go)），只包一层 `GetRank` 修不到它——必须**同时**把 `OpenInstance` 的存在性检查换成 `GetRank`（附带好处：把 `Exists` + `SetNX` 两次往返压成一次读）：
+
+```go
+// common/rank/service_redis.go —— OpenInstance 开头
+// 原：exists, err := s.rdb.Exists(GetRankDefKey(rankCode))
+// 改为走 GetRank，才能命中懒恢复
+if _, err := s.GetRank(ctx, instance.RankCode); err != nil {
+    return err   // ErrDefinitionNotFound 原样透出
+}
+```
 
 **修法**：`GetRank` miss 时按需重建，而 `engine.Service` 内存里就有 `s.config`，所以这是**零 IO 恢复**：
 
@@ -129,7 +176,16 @@ func (s *Service) GetRank(ctx context.Context, rankCode string) (*rank.Rank, err
 }
 ```
 
-**在补上这个懒恢复之前，`rank:def` 不要设 TTL。** 这是「原则一要求设 TTL」与「设了会故障」的唯一冲突点，必须成对落地。
+**落地顺序**：先补懒恢复，**再**给 `rank:def` 设 TTL。按新原则（不允许永久 key），`rank:def` **不能因为"设了会故障"就豁免 TTL**——那样等于承认一个永久 key。它的生命周期这样表达：
+
+| 项 | 取值 | 说明 |
+|---|---|---|
+| TTL | 24 小时（滑动） | 定义不是活动数据，没有天然结束时刻，所以用滑动 TTL |
+| 续期 | 每次 `RegisterRank` 刷新 | 注册路径每 30 秒被 `syncLoop` 走一遍（`syncFromRedis` / `syncFromMongo`）→ 活跃定义的 TTL 永远被顶回 24h |
+| 回收 | 连续 24h 无注册 | 即「该 rankCode 已不再被任何配置引用」，此时回收正是想要的 |
+| 恢复 | `GetRank` miss → `s.config` 零 IO 重建 | 见上方 sketch |
+
+即：**「设 TTL」与「加懒恢复」是同一个改动包，不再有先后取舍。**
 
 ---
 
@@ -172,24 +228,36 @@ T+∞      这个 key 永远存在了。且每查一个过期活动就多一个�
 
 **也就是说，第 02 条的 TTL 在「过期后仍被读取」的活动上完全失效**，而这些恰好就是历史查询的目标活动。不修这一条，原则一在第 02 条上落不了地。
 
-**修法**：把所有回填点统一改为「回填 + 补 TTL」，抽出一个小助手，照 `LoadGroupSettledCached` 的写法：
+**修法**：把所有回填点统一改为「回填 + 补 TTL」，抽出一个助手，把原则一的第 3 条（两种活动形态）实现在一处：
 
 ```go
-// Store —— 回填 Redis 后立即重设绝对过期时刻（与第 02 条同一个公式）
+// Store —— 回填 Redis 后立即把生命周期补上。
 // 顺序必须是先写数据再 EXPIRE：若先 EXPIRE 后 HSet，EXPIRE 作用在不存在的 key 上会被丢弃。
 func (st *Store) backfill(key string, write func()) {
     write()
-    if ttl := st.remainingRetention(); ttl > 0 {
-        st.rdb.Expire(key, ttl)
-    }
+    st.rdb.Expire(key, st.ttlFor(key))   // 注意：这里没有 "ttl <= 0 就跳过" 的分支，见下
 }
 
-// remainingRetention = (effectiveSettleAt + SettledCacheTTL) - now
-// 活动仍在进行时该值为「距结束 + 2 周」，与第 02 条活跃期 TTL 完全一致，
-// 因此活跃期回填与结算后回填可以共用同一个函数，不需要分支。
+// ttlFor 返回该 key 此刻应设的 TTL —— 原则一第 3 条的两种形态。
+func (st *Store) ttlFor(key string) time.Duration {
+    if end := st.effectiveSettleAt(); end > 0 {
+        // 有限期活动：绝对过期时刻 = end + SettledCacheTTL，与调用时机无关。
+        // 若已过 end + SettledCacheTTL，说明该 key 早该消失：
+        // 此时给一个极短 TTL（而非跳过），让它被回收，而不是留成永久 key。
+        if ttl := time.Until(time.UnixMilli(end).Add(commonrank.SettledCacheTTL)); ttl > 0 {
+            return ttl
+        }
+        return time.Minute
+    }
+    // 无结束时间：滑动 TTL，由每次写入续期（coldDataTTL 建议 7 天，与 memberIndexTTL 一致）
+    return coldDataTTL
+}
 ```
 
-`Expire` 的 TTL 用 `time.Until(activityEnd) + SettledCacheTTL`，**与第 02 条派生出的公式是同一个式子**，所以活跃期与结算后的回填天然一致，无需区分两条路径。`ttl <= 0` 时跳过（此时本应已过期，`Expire` 收到非正数会立即删除 key——比不设更危险）。
+**两个关键点**：
+
+1. **绝对过期时刻与设置时机无关**，所以活跃期回填与结算后回填共用同一个函数，不需要分支——这是原则一第 3 条第一行成立的原因。
+2. **不允许出现「`ttl <= 0` 就跳过」的分支**。`Expire` 收到非正数会**立即删除** key（比不设更危险），所以之前的写法选择跳过——但跳过就等于留成永久 key，正是本原则要消灭的东西。正确做法是上面这样：**已过期 → 给一个极短 TTL 让它被回收**（数据本来就在 MongoDB 里，删了不影响正确性）。这一处是上一版文档的漏洞，已修正。
 
 **注意 `RestoreMembers` 是例外**：它已经是用 Lua 写的恢复路径，`rank:seq` 由脚本内 `SET`/`INCR` 维护，补 TTL 需要在脚本里追加 `EXPIRE`，或在脚本返回后由 Go 侧补一次 `Expire`（后者更简单，且恢复是低频路径，多一次往返可接受）。
 
@@ -217,6 +285,79 @@ func (st *Store) backfill(key string, write func()) {
 
 ---
 
+#### 缺陷 6（**「永久 key」的主要来源**）：一次性活动结算后没有任何 TTL 设置点
+
+`Service.Settle()`（[service.go:638-693](../../socialserver/internal/rank/engine/service.go)）在结算一个分组时依次做 `CloseInstance` / `SettleInstance` / `SaveGroup` / `SaveSettled`（Mongo）/ `SaveRankInst`（Mongo）——**一次 `Expire` 都没有**。
+
+而 TTL 的两个设置点都只挂在周期路径上：
+
+| 设置点 | 覆盖 key | 调用者 | 是否覆盖一次性活动 |
+|---|---|---|---|
+| `Store.CleanupLiveData`（[store.go:394](../../socialserver/internal/rank/engine/store.go)） | meta / groups / members / claims / mongo_chk / robots / robot_infos | [periodic/handler.go:218](../../socialserver/internal/rank/periodic/handler.go)（轮次结算后 `time.AfterFunc`）、[`:634`](../../socialserver/internal/rank/periodic/handler.go)（`CleanupHistoricalRounds` 启动恢复） | ❌ **只有周期** |
+| `RedisService.ExpireInstance`（[service_redis.go:630](../../common/rank/service_redis.go)） | inst / mb / seq / settled | 只被 `Service.CleanupLiveData` 调用（[service.go:941](../../socialserver/internal/rank/engine/service.go)）→ 同上 | ❌ **只有周期** |
+
+**后果**：一次性活动（`RankTypeOnce`，非周期）走 `Tick` → `Settle()` 之后，它的 11 个 key **全部无 TTL，永久残留**（自带 TTL 的只有 `rank:member_index` 7 天、`rank:mongo_chk` 10 分钟）。唯一的回收路径是 GM 手动 `RemoveService` → `Cleanup()` → `CleanupAll`（[manager.go:299](../../socialserver/internal/rank/manager.go)、[store.go:417](../../socialserver/internal/rank/engine/store.go)）——而那是**连 MongoDB 一起删的硬删除**，不是生命周期管理。GM 不删，key 就永远在，且每结算一个一次性活动就永久多 11 个 key。
+
+这就是「不允许存在永久 key」在当前代码里最大的缺口——**比活跃期缺 TTL（缺陷 2）严重**，因为活跃期的 key 至少在活动结束时有机会被清掉，而这里的 key 已经走完了全部业务流程。
+
+**修法**：在 `Settle()` 的 per-group 循环内，`group.State = GroupStateSettled` 之后立刻给该分组的 key 设 TTL。
+
+**注意不能直接调用整个服务的 `Service.CleanupLiveData()`**——它会遍历服务下**所有**分组设 `settledDataRetentionTTL`（常数 14 天），把**尚未结算**的分组一并设成平 14 天，而不是按各自的 `settleAt` 派生。要的是 per-group 版本：
+
+```go
+// engine/service.go —— Settle() 循环内，group.State = GroupStateSettled 之后
+group.State = GroupStateSettled
+_ = s.store.SaveGroup(group)
+// ... 现有逻辑 ...
+
+// 新：per-group 设 TTL（只作用于本分组）
+ttl := time.Until(time.UnixMilli(settleAt).Add(commonrank.SettledCacheTTL))
+if ttl <= 0 {
+    ttl = time.Minute   // 已过期：让它被回收，而不是留成永久 key
+}
+_ = s.rankService.ExpireInstance(ctx, group.InstanceID, ttl)   // inst / mb / seq / settled
+s.store.ExpireLiveData(ttl)                                    // meta / groups / members / claims / robots / robot_infos
+```
+
+`Store.ExpireLiveData(ttl time.Duration)` 是 `CleanupLiveData` 的「按传入 TTL 版本」——把现有 `CleanupLiveData` 里的 `settledDataRetentionTTL` 换成参数即可，不需要新逻辑。这样周期性路径也可以改调它，两条路径的 TTL 语义彻底统一。
+
+---
+
+#### 缺陷 7：`effectiveSettleAt() == 0` 时公式无定义，且旧写法的 `ttl <= 0` 分支会静默留成永久 key
+
+原则一第 3 条依赖 `effectiveSettleAt()` 能给出一个正数。但 `effectiveSettleAt()` = `GameEndTime > 0 ? GameEndTime : CloseTime`，**两者都为 0 时返回 0**，于是：
+
+```text
+time.Until(time.UnixMilli(0))  ≈  -56 年     →  ttl 为负
+旧写法：if ttl > 0 { Expire(...) }           →  静默跳过 → key 永久
+```
+
+**这个配置是可达的**：`handleCreateRankConfig`（[rank.go:445-459](../../socialserver/internal/handler/rank.go)）把 `req.OpenTime` / `req.CloseTime` / `req.GameEndTime` **原样塞进 `engine.Config`，没有任何校验**，所以 `CloseTime=0 && GameEndTime=0` 可以直接通过 RPC 构造出来。
+
+**附带发现（比 TTL 更严重）**：`settleAt == 0` 时 `Tick` 的守卫 `if now < settleAt` 恒为假（`now` 是正的 UnixMilli），于是**活动在第一个 tick（≤1 秒）就直接走完 CloseInstance + SettleInstance + Settle**。所以「无结束时间的活动」在当前代码里不是"永久活动"，而是"**秒死活动**"。
+
+**两条结论**：
+
+1. **原则一第 3 条的"非活动数据"一栏不是为"永不结束的活动"准备的**——那种活动不存在。它是为 `rank:def`、注册表、`rank:member_index` 这类**本来就没有结束时刻的 key** 准备的。
+2. **活动数据 key 的 TTL 公式必须显式处理 `end == 0`**：不能跳过（跳过 = 永久 key），也不能 `Expire(负数)`（立即删除）。上面的 `ttlFor` 里退化为 `coldDataTTL` 滑动 TTL 兜底——即使真出现这种配置，key 最多存活一个 `coldDataTTL` 而不是永远。
+
+`CloseTime=0 && GameEndTime=0` 本身是配置错误（会在 1 秒内结算掉活动），见待办 K。
+
+---
+
+#### 缺陷 8：第 01 条的注册表 key 自身是永久 key，且把「永久」编进了数据模型
+
+第 01 条方案里有两处违反本原则：
+
+| 位置 | 问题 | 修法 |
+|---|---|---|
+| `rank:{active_services}`（[第 01 条](#01--syncfromredis-改启动-scan-建表--之后查注册表取消周期扫描)） | 这个 SET **自身没有 TTL**。成员会因 deadline 到期被惰性修剪，但 key 本身永远存在——即使全部成员都被修完 | 加**滑动 TTL**：每次 `SADD` 时 `Expire(key, coldDataTTL)`。有活跃服务时被持续续期；一个 `coldDataTTL` 内无任何服务创建，注册表连同 key 一起消失——这正是想要的 |
+| 成员编码 `{bizId}:{deadlineMillis}`，**「常驻活动用远期哨兵值表示永不过期」** | 把"永久"直接编进了数据模型：sentinel 值永远不会 `deadline < now`，成员永不修剪 | 删掉哨兵约定。按缺陷 7 的结论，**没有"永不结束的活动"**，所以每个成员都有真实 deadline。若真要为某类服务保留更长生命周期，改为写真实截止时间（如 `now + 10 年`），而不是"永不过期" |
+
+注册表的恢复路径是完整的（`syncFromMongo` → `NewService` → `SaveActivityTimes` → `SADD`，[第 01 条](#01--syncfromredis-改启动-scan-建表--之后查注册表取消周期扫描)已论证「Redis 被整体清空」场景），所以加 TTL 不会带来功能风险。
+
+---
+
 #### 补充核查：`setMongoChecked` 会把 2 周 TTL 缩短为 10 分钟（当前不可达，记录备查）
 
 `setMongoChecked` 用 `SetEX(mongo_chk, 10min)`（[store.go:42](../../socialserver/internal/rank/engine/store.go)），而 `CleanupLiveData` 用 `Expire(2周)`（[store.go:407](../../socialserver/internal/rank/engine/store.go)）。`SetEX` 会**覆盖** TTL，方向是缩短。
@@ -224,6 +365,60 @@ func (st *Store) backfill(key string, write func()) {
 已核查为**当前不可达**：`setMongoChecked` 只在「Redis 空且 Mongo 也空」时调用（[store.go:94-97](../../socialserver/internal/rank/engine/store.go)、`297-299`），而 `CleanupLiveData` 作用于「已有分组数据」的 bizId，两者不会命中同一个 bizId 的同一时刻。
 
 **但一旦第 02 条引入滑动刷新、或第 01 条的注册表修剪改变调用时机，它就会变成可达的**（TTL 从 2 周被压回 10 分钟 → `rank:groups` 被提前删除）。修法是把 `setMongoChecked` 也走缺陷 3 的 `backfill`，或把它的 TTL 改为「与同 bizId 其它 key 取同一个值」。**只要动了 TTL 方案，这条必须一起改。**
+
+### 落地形态：「写 + EXPIRE」放进一次 pipeline，零额外延迟
+
+「给所有 key 都加 TTL」听起来像要给每条写路径多加一次往返，所以先把成本说清楚：
+
+| 写法 | 往返 |
+|---|---|
+| 现状：裸 `HSet` / `SAdd` / `Set` | 1 |
+| 朴素改法：`HSet` + 单独一次 `Expire` | **2**（这才是看起来贵的原因） |
+| **本方案：pipeline 里 `HSet` + `Expire`** | **1**（与现状相同） |
+
+go-redis 的 pipeline 把 N 条命令合成一次往返，所以**合规的代价是零**：
+
+```go
+// Store —— 所有写路径统一改成"写 + 设 TTL"，一次往返。
+// golib 暴露的是 Pipeline()（返回 redis.Pipeliner），不是 Client.Pipelined(ctx, fn)。
+pipe := st.rdb.Pipeline()
+pipe.HSet(ctx, key, field, value)
+pipe.Expire(ctx, key, st.ttlFor(key))   // ttlFor 是纯内存计算，不产生 IO
+_, _ = pipe.Exec(ctx)
+```
+
+三点说明：
+
+1. **不需要原子性，所以用 `Pipeline()` 而不是 `TxPipeline()`。** `HSET` 与 `EXPIRE` 之间没有必须同时生效的关系——即使 `EXPIRE` 因为连接中断丢了，key 只是比预期活得更久，**下次写入会补上**。失败方向是"多留数据"而不是"错删数据"，是安全方向。（`TxPipeline` 会多一次 `MULTI`/`EXEC` 往返，换不来任何东西。）
+2. **有限期活动重复设同一个绝对值是幂等的**，所以不必判断"是不是首次写入"——判断本身反而要多一次往返。只有滑动 TTL 那一类才真正依赖"每次写都刷新"。
+3. `ttlFor` 只读 `s.config` 里的时间字段，不读 Redis / Mongo，所以不会把 pipeline 变成两次往返。
+
+**这意味着第 02 条提出的"活跃期 TTL"和缺陷 6 提出的"结算后 TTL"都不需要以性能为由打折扣**——它们只是把现有的单命令写改成 pipeline 写。
+
+---
+
+### 可恢复性完备性论证（为什么"所有 key 都设 TTL"不会丢数据）
+
+加 TTL 的安全前提是原则一第 2 条：**每个 key 都有一条不依赖其它 Redis key 的恢复路径**。逐一核对：
+
+| key 类别 | 权威源 | 恢复代价 |
+|---|---|---|
+| 11 个活动数据 key（meta / groups / members / claims / inst / mb / seq / settled / robots / robot_infos / mongo_chk） | MongoDB 的 7 个集合（`CT_RANK_GROUP` / `CT_RANK_MEMBER` / `CT_RANK_CLAIM` / `CT_RANK_INST` / `CT_RANK_SCORE` / `CT_RANK_ROBOT` / `CT_RANK_SETTLED`） | 一次 Mongo 查询（`recoverGroupData` / `Load*` 已有） |
+| `rank:def` | MongoDB `CT_RANK_CONFIG`；**但 engine 内存里已有 `s.config`** | **零 IO**（缺陷 1 的 sketch） |
+| `rank:member_index` | engine 内存 `memberGroup`（`WarmUp` 时从 Mongo 载入） | 零 Redis/Mongo 访问（第 08 条） |
+| 3 个锁 key | 无（瞬时状态） | 无需恢复；丢失即"锁被释放"，`TryLock*` 本身 fail-open |
+| `rank:mongo_chk` | 无（哨兵） | 无需恢复；丢失只是重查一次 Mongo |
+| `rank:claims` | MongoDB `CT_RANK_CLAIM` | `AtomicClaim` 已有 Mongo 回退（`GetClaim` / `SaveClaimIfNotExists`）——**所以 claims 的 TTL 不可能导致重复发奖** |
+
+**结论：Redis 里的每一个字节都能从 MongoDB（或 engine 内存）重算，所以给任何 key 设 TTL 都不会丢数据。**
+
+真正需要额外小心的**不是"能不能恢复"，而是"恢复是否零成本"**——因为恢复发生在读路径上（key 刚过期时的那次读）：
+
+- `rank:def` 的恢复必须**零 IO**，否则每次 miss 都要打 Mongo，而 `OpenInstance` 在写路径上（缺陷 1）。
+- `rank:member_index` 的恢复**不能争写锁**，否则 GM 批量查询会与 `UpsertScore` 抢锁（缺陷 (d3)）。
+- 其它 key 的恢复都是一次带索引的 Mongo 查询，且只在"冷活动被读"时发生，频率极低。
+
+**判定工具（「删 key 测试」）**：要判断某个 key 能不能设 TTL，直接 `DEL` 它，看系统能否自愈。不能自愈的 key 不允许设 TTL——但也不允许长期无 TTL，它属于"恢复路径还没做完"，是待办而不是豁免。
 
 ### 原则二：正常逻辑不得扫库
 
@@ -447,14 +642,19 @@ for range ticker.C {
 
 注册表的难点是「meta 因 TTL 到期消失后，成员会变成幽灵」。朴素做法是每次迭代对每个成员发 `EXISTS rank:meta:{bizId}`——但那样每次迭代的命令数就是 O(活跃服务数)，1 万活跃服务下每 30 秒 2 万条命令，**比它取代的扫描还贵**。
 
-正确做法是把截止时间编进成员本身：
+正确做法是把截止时间编进成员本身，并**同时给 key 本身加滑动 TTL**：
 
-```
+```text
 key:    rank:{active_services}       // 单 SET，hash tag 固定单一 slot
+        TTL = coldDataTTL（滑动；每次 SAdd / SRem 后刷新）  ← 不加就是永久 key（缺陷 8）
 member: {bizId}:{deadlineMillis}     // 如 balloon_1:1760000000000
 ```
 
-`deadline = settleAt + SettledCacheTTL`（正是第 02 条推导出的绝对过期时刻；常驻活动用远期哨兵值表示永不过期）。于是修剪变成**纯本地过滤**：`SMEMBERS` 返回后直接在内存里筛掉 `deadline < now` 的成员，攒够一批发一次 `SREM`。每次迭代的额外 Redis 命令数：`SMEMBERS` 1 条 +（有陈旧成员时）`SREM` 1 条。
+`deadline = settleAt + SettledCacheTTL`（正是第 02 条推导出的绝对过期时刻）。于是修剪变成**纯本地过滤**：`SMEMBERS` 返回后直接在内存里筛掉 `deadline < now` 的成员，攒够一批发一次 `SREM`。每次迭代的额外 Redis 命令数：`SMEMBERS` 1 条 +（有陈旧成员时）`SREM` 1 条。
+
+**key 自身的生命周期（缺陷 8）**：成员会被修剪，但 **key 不会**——所以必须给 key 一个滑动 TTL，续期点与成员的增删放在同一处（`SAdd` / `SRem` 之后各补一次 `Expire`，或与写命令放进同一个 pipeline，见「落地形态」）。有活跃服务时被持续续期；连续一个 `coldDataTTL` 无任何服务创建，注册表连同 key 一起消失——这正是想要的语义。恢复路径见下文「Redis 被整体清空」：`syncFromMongo` → `NewService` → `SaveActivityTimes` → `SADD` 会自动重建，所以设 TTL 没有功能风险。
+
+**没有「远期哨兵值」**：成员一律写真实 deadline。按缺陷 7 的结论，**不存在"永不结束的活动"**（`CloseTime=0 && GameEndTime=0` 会在 1 秒内被结算掉），所以把"永久"编进数据模型是伪需求。若某类服务确实需要更长生命周期，写一个真实的较远时间戳，而不是"永不过期"——前者仍然可回收，后者不可。
 
 ```go
 func (m *Manager) syncFromRedis(ctx context.Context) {
@@ -478,7 +678,11 @@ func (m *Manager) syncFromRedis(ctx context.Context) {
         live = append(live, bizId)
     }
     if len(stale) > 0 {
-        m.rdb.SRem(ctx, rediskeys.RankActiveServicesKey, stale...)
+        // 删成员的同时给 key 续期（缺陷 8：key 自身也要有生命周期）
+        pipe := m.rdb.Pipeline()
+        pipe.SRem(ctx, rediskeys.RankActiveServicesKey, stale...)
+        pipe.Expire(ctx, rediskeys.RankActiveServicesKey, coldDataTTL)
+        _, _ = pipe.Exec(ctx)
     }
 
     // ③ live 里的 bizId 走原有注册流程（LoadActivityTimes 仍会校验 meta 是否真在）
@@ -494,6 +698,7 @@ func (m *Manager) bootstrapRegistry(ctx context.Context) bool {
         bizId := extractBizId(key)
         deadline := m.registryDeadline(ctx, bizId)
         m.rdb.SAdd(ctx, rediskeys.RankActiveServicesKey, fmt.Sprintf("%s:%d", bizId, deadline))
+        m.rdb.Expire(ctx, rediskeys.RankActiveServicesKey, coldDataTTL)   // 缺陷 8
     }
     return true
 }
@@ -535,6 +740,8 @@ func (r *Redis) ScanAll(ctx context.Context, pattern string, count int64) ([]str
 | 删除 | `Store.CleanupAll`（[store.go:435](../../socialserver/internal/rank/engine/store.go)）→ `SRem` | meta key 的**唯一**删除出口 |
 | 过期 | `Store.CleanupLiveData` 设置的 TTL（[store.go:403](../../socialserver/internal/rank/engine/store.go)）到期后 meta 自动消失 | 无法在写入时预知，由 ③ 惰性修剪清理 |
 
+这三处同时也是注册表 **key 自身 TTL** 的续期点：`SAdd` / `SRem` 之后各补一次 `Expire(coldDataTTL)`（放进同一个 pipeline，零额外往返）。因为续期与成员增删同处，**不存在"改了成员忘了续期"的路径**——与「不存在"改了 meta 忘了改注册表"」是同一个论证。
+
 因为创建/删除都在 `Store` 内部、与 meta key 自身的生命周期同函数，**不存在"改了 meta 忘了改注册表"的路径**。`store.go:137/156` 的 `HIncrBy`（realCount / nextGroupID）虽然也会创建 meta hash，但只在 `NewService` 之后发生，此时注册表已 SADD。
 
 **注册表必须能自愈：三种不一致场景的兜底**
@@ -575,8 +782,8 @@ func (r *Redis) ScanAll(ctx context.Context, pattern string, count int64) ([]str
 |---|---|
 | 稳态成本从 O(全库 key 数) 降到 O(活跃服务数)，彻底消除周期扫描 | 新增 1 个注册表 key（**增量新增**：不改动任何现有 key 的结构或内容，现有 key 与查询结果完全不变） |
 | 维护点只有 2 个且都在 `Store` 内，与 meta key 生命周期同函数，不存在漏改路径 | 引入 meta 与注册表的一致性问题，需惰性修剪兜底（每 30s 收敛） |
-| 无哨兵、无两阶段发布、无存量迁移 | 惰性修剪需要全量 `SMEMBERS`，大小受上表上界约束；剔除是纯本地过滤，只多发一次批量 `SREM` |
-| 修复集群下只命中随机单节点的功能性 bug | `golib` 需新增 `ScanAll`（bootstrap 用，含一次类型断言） |
+| 注册表 key 自身带滑动 TTL，成员与 key 都有生命周期，**不产生永久 key**（缺陷 8） | 惰性修剪需要全量 `SMEMBERS`，大小受上表上界约束；剔除是纯本地过滤，只多发一次批量 `SREM` |
+| 无哨兵、无两阶段发布、无存量迁移 | `golib` 需新增 `ScanAll`（bootstrap 用，含一次类型断言） |
 | 每个节点独立 bootstrap，无单点故障 | bootstrap 仍是全库 SCAN，但只在启动时执行一次 |
 
 ---
@@ -607,21 +814,23 @@ func (r *Redis) ScanAll(ctx context.Context, pattern string, count int64) ([]str
 
 先摸清现状——现有设计**已经有 TTL，但只在结算时统一设置**：
 
-| key | 活跃期 | 结算后 | 设置者 |
+| key | 活跃期 | 结算后（一次性 / 周期） | 现状设置者 |
 |---|---|---|---|
-| `rank:def:{rankCode}` | 无 | 无 | `RegisterRank`（**须先做缺陷 1 的懒恢复才能设 TTL**） |
-| `rank:inst:{instanceID}` | 无 | 2 周 | `ExpireInstance`（经 `Service.CleanupLiveData`） |
-| `rank:mb:{instanceID}` | 无 | 2 周 | 同上 |
-| `rank:seq:{instanceID}` | 无 | 2 周 | 同上 |
-| `rank:settled:{instanceID}` | 无 | **2 周（但会被 `RestoreSettled` 抹掉，见缺陷 4）** | `ExpireInstance`，**不是** `SaveSettled`（后者只写 Mongo） |
-| `rank:meta:{bizId}` | 无 | 2 周 | `CleanupLiveData`（[store.go:403](../../socialserver/internal/rank/engine/store.go)） |
-| `rank:groups:{bizId}` | 无 | 2 周 | 同上 |
-| `rank:members:{bizId}` | 无 | 2 周 | 同上 |
-| `rank:claims:{bizId}` | 无 | 2 周 | 同上 |
-| `rank:robots:{bizId}:{gid}` | 无 | 2 周 | 同上 |
-| `rank:robot_infos:{bizId}:{gid}` | 无 | 2 周 | 同上 |
-| `rank:mongo_checked:{bizId}` | 10 分钟 | 2 周 | `SetEX` / `CleanupLiveData`（**`SetEX` 会把 2 周压回 10 分钟**，见文首「补充核查」） |
-| `rank:member_index:{uid}` | 7 天 | 7 天 | `MemberIndex.Track`（见第 08 条） |
+| `rank:def:{rankCode}` | 无 | 无 / 无 | `RegisterRank`（**须先做缺陷 1 的懒恢复才能设 TTL**；新方案为 24h 滑动，见缺陷 1） |
+| `rank:inst:{instanceID}` | 无 | ⚠️ **无** / 2 周 | `ExpireInstance`（经 `Service.CleanupLiveData`） |
+| `rank:mb:{instanceID}` | 无 | ⚠️ **无** / 2 周 | 同上 |
+| `rank:seq:{instanceID}` | 无 | ⚠️ **无** / 2 周 | 同上 |
+| `rank:settled:{instanceID}` | 无 | ⚠️ **无** / **2 周（但会被 `RestoreSettled` 抹掉，见缺陷 4）** | `ExpireInstance`，**不是** `SaveSettled`（后者只写 Mongo） |
+| `rank:meta:{bizId}` | 无 | ⚠️ **无** / 2 周 | `CleanupLiveData`（[store.go:403](../../socialserver/internal/rank/engine/store.go)） |
+| `rank:groups:{bizId}` | 无 | ⚠️ **无** / 2 周 | 同上 |
+| `rank:members:{bizId}` | 无 | ⚠️ **无** / 2 周 | 同上 |
+| `rank:claims:{bizId}` | 无 | ⚠️ **无** / 2 周 | 同上 |
+| `rank:robots:{bizId}:{gid}` | 无 | ⚠️ **无** / 2 周 | 同上 |
+| `rank:robot_infos:{bizId}:{gid}` | 无 | ⚠️ **无** / 2 周 | 同上 |
+| `rank:mongo_checked:{bizId}` | 10 分钟 | ⚠️ **无** / 2 周 | `SetEX` / `CleanupLiveData`（**`SetEX` 会把 2 周压回 10 分钟**，见文首「补充核查」） |
+| `rank:member_index:{uid}` | 7 天 | ✅ 7 天 / 7 天 | `MemberIndex.Track`（见第 08 条） |
+
+**⚠️「一次性 / 周期」这一列是本表最重要的信息**：上表两个设置者——`ExpireInstance` 与 `CleanupLiveData`——**只被周期路径调用**（[periodic/handler.go:218](../../socialserver/internal/rank/periodic/handler.go)、`634`），所以 13 个 key 里**一次性活动结算后有 11 个是"无"**（仅 `rank:member_index`、`rank:mongo_chk` 自带 TTL）。这就是缺陷 6，也是「不允许存在永久 key」在当前代码里最大的缺口——**比活跃期缺 TTL 更严重**，因为活跃期的 key 至少在结算时还有机会被清掉。
 
 **⚠️ 本表覆盖 13 个数据 key，缺一不可**（`rank:max_score` 是死代码，已从台账剔除，见缺陷 5）。原表只列了 7 个 `CleanupLiveData` 覆盖的 key + `rank:settled` + `rank:member_index`，漏掉 `rank:def` / `rank:inst` / `rank:mb` / `rank:seq`——这 4 个同样在活跃期永不过期，必须一并纳入。完整盘点与恢复路径见文首「[基础原则与全量盘点](#基础原则与全量盘点2026-09-17-补充)」。
 
@@ -650,14 +859,26 @@ T+1d 到 T+14d 之间历史查询读不到分组数据，构成功能性退化�
 //   activityEnd = GameEndTime > 0 ? GameEndTime : CloseTime
 // 两者若不一致，保留期就会算错（GameEndTime < CloseTime 的活动会提前过期）。
 activityEnd := s.effectiveSettleAt()
-// 绝对过期时刻 = activityEnd + settledDataRetentionTTL
-ttl := time.Until(activityEnd) + commonrank.SettledCacheTTL
-rdb.Expire(ctx, groupsKey, ttl)
+if activityEnd > 0 {
+    // 绝对过期时刻 = activityEnd + settledDataRetentionTTL
+    ttl := time.Until(activityEnd) + commonrank.SettledCacheTTL
+    if ttl <= 0 {
+        ttl = time.Minute   // 已过期 → 让它被回收；绝不能"跳过"（跳过 = 永久 key，见缺陷 7）
+    }
+    rdb.Expire(ctx, groupsKey, ttl)
+} else {
+    // activityEnd == 0：配置错误（待办 K），退化为滑动 TTL 兜底
+    rdb.Expire(ctx, groupsKey, coldDataTTL)
+}
 ```
+
+实际落地时这段逻辑应集中在缺陷 3 的 `ttlFor()` 一处，所有写路径共用——本条只是它的第一个使用点。`activityEnd == 0` 分支的由来见缺陷 7。
 
 这个式子的关键性质是**绝对过期时刻与设置时机无关**：设在 `t0`，过期于 `t0 + (end - t0) + R = end + R`。由此得到两个好处：
 
-1. **只需在活动创建/首次写入时设一次，之后无需刷新** → 不给 tick 热路径增加任何 EXPIRE 调用。这一点很重要：本条优化的目的是降低每秒 Redis 调用，若改成每次 `SaveGroup`/`SaveRobots` 都刷新 TTL，等于把省下的 HGETALL 又用 EXPIRE 还回去。
+1. **只需在活动创建/首次写入时设一次，之后无需刷新** → 不给 tick 热路径增加任何 EXPIRE 调用。
+
+   > 注：这条"不必刷新"的理由是**简单**，而不是**性能**。上一版文档写的是"每次 `SaveGroup`/`SaveRobots` 都刷新 TTL 等于把省下的 HGETALL 用 EXPIRE 还回去"——按文首「落地形态」，`HSet` + `Expire` 放进同一个 pipeline 只算**一次往返**，与裸 `HSet` 相同，所以刷新其实不额外花钱。之所以仍选择"设一次"，是因为绝对过期时刻与设置时机无关，**重复写同一个值是幂等的、不携带信息的操作**，能省则省。
 2. **与 `CleanupLiveData` 方向一致**：活跃期 TTL 的到期时刻恰好是 `end + 2周`，`CleanupLiveData` 之后把它重置为完整 2 周只是略微延后，永不提前。
 
 **⚠️ 这是全文唯一不可逆的改动 —— 必须灰度，不能直接上**
@@ -670,7 +891,9 @@ zaplog.LoggerSugar.Infof("rank ttl plan bizId=%s activityEnd=%d ttl=%s expireAt=
     bizId, activityEnd, ttl, time.Now().Add(ttl).UnixMilli())
 ```
 
-验收标准：对**已结束**的活动，日志里的 `expireAt` 必须等于 `activityEnd + SettledCacheTTL`，且不早于 `CleanupLiveData` 设的时刻。确认无误后再打开开关。可选加一层保护：`ttl <= 0` 时跳过 `Expire`（此时 key 本应已过期，不设比误删安全——`Expire` 收到非正数会**立即删除** key）。
+验收标准：对**已结束**的活动，日志里的 `expireAt` 必须等于 `activityEnd + SettledCacheTTL`，且不早于 `CleanupLiveData` 设的时刻。确认无误后再打开开关。
+
+**注意：不能用「`ttl <= 0` 就跳过 `Expire`」作为保护**——跳过等于把 key 留成永久的，与原则一直接冲突（详见缺陷 7）。正确做法是给一个极短 TTL（如 1 分钟）让它被回收；数据本来就在 MongoDB 里，删掉不影响正确性。
 
 **`rank:meta` 必须用同一个 TTL 一起过期（否则出现「空心服务」）**
 
@@ -678,16 +901,18 @@ zaplog.LoggerSugar.Infof("rank ttl plan bizId=%s activityEnd=%d ttl=%s expireAt=
 
 meta 一起过期是安全的：MongoDB 才是权威数据源，`syncFromMongo` 可重建服务定义；`syncFromRedis` 只承担「崩溃且未落盘」的恢复，而那种场景下活动刚结束不久，TTL 远未到期。
 
-**常驻活动（无固定结束时间）**
+**「常驻活动」这一形态不存在（缺陷 7 的结论）**
 
-无法计算自然结束点。原方案的「30 天滑动刷新」会给热路径带来持续开销，两种选择：
+上一版文档在这里给了「不设 TTL（推荐）」这个选项——**按原则一这是不允许的**，它就是一个永久 key。而且这个选项建立在「存在无结束时间的常驻活动」这一前提上，该前提已被证伪：
 
-| 选择 | 说明 |
+`settleAt == 0` 时 `Tick` 的守卫 `if now < settleAt` 恒为假（`now` 是正的 UnixMilli），所以 `CloseTime=0 && GameEndTime=0` 的活动**在第一个 tick（≤1 秒）就被结算掉**，不是"长期存活"。所以没有"需要不设 TTL 的活动"。
+
+| 情况 | 处理 |
 |---|---|
-| **不设 TTL**（推荐） | 常驻活动按定义应长期存活，终止依赖 `DeleteAllByBizId`（已有显式删除）。放弃「防无限增长」这层兜底，换取热路径零开销 |
-| 30 天滑动刷新 | 刷新点必须放在已有的 `syncLoop`（30s 一次，非热路径），**不能**放在 `SaveGroup`/`SaveRobots` |
+| `effectiveSettleAt() > 0`（正常配置） | 走上面的绝对过期公式，设一次 |
+| `effectiveSettleAt() == 0`（配置错误，见待办 K） | TTL 退化为 `coldDataTTL` 滑动值兜底——即使真出现这种配置，key 最多存活一个 `coldDataTTL`，不会永远活着 |
 
-若选滑动方案，务必确认刷新点不在 tick 路径上，否则每秒一次的 EXPIRE 会抵消本条优化的收益。
+**真正需要「滑动 TTL」的不是活动数据，而是没有天然结束时刻的非活动 key**：`rank:def`（24h 滑动，见缺陷 1）、第 01 条的注册表（`coldDataTTL` 滑动，见缺陷 8）、`rank:member_index`（7 天，见第 08 条）。它们的续期点都**不在 tick 热路径上**——`rank:def` 在 30s 的 `syncLoop` 注册路径、注册表在 `SaveActivityTimes` / `CleanupAll`、`rank:member_index` 在服务注册与同步路径——所以同样不会产生每秒一次的 `EXPIRE`。这也是本条"降低每秒 Redis 调用"的目标不受影响的原因。
 
 **必改-2 / 必改-3：缓存必须是「整份分组列表 + 2 秒有效期」**
 
@@ -1609,7 +1834,50 @@ func (s *Service) WarmUp(ctx context.Context) {
 
 ## 修订记录
 
+### 2026-09-17（三次补充：不允许存在永久 key）
+
+按强化后的「**不允许存在永久 key** —— 每个 key 都必须有生命周期，且到期后能从 MongoDB 恢复」重新盘点，发现上一轮**漏掉了最严重的一类**：结算后的 TTL 只覆盖周期轮次。
+
+**盘点结论（修正上一轮）**
+
+| 项 | 上一轮结论 | 本轮修正 |
+|---|---|---|
+| 在用 key 总数 | 13 个数据 key | 计入第 01 条的注册表后为 **17 个**（13 数据 + 1 注册表 + 3 锁） |
+| 活跃期有 TTL | 2 个 | 不变（`rank:member_index`、`rank:mongo_chk`） |
+| **结算后有 TTL** | 未区分活动形态，笼统写作"2 周" | **周期轮次 11 个；一次性活动 0 个**——`CleanupLiveData` / `ExpireInstance` 只被周期路径调用（缺陷 6） |
+| 「常驻活动」 | 建议"不设 TTL" | **该形态不存在**（缺陷 7），且"不设 TTL"本身就违反原则 |
+| 合规率 | 未计算 | 17 个在用 key 中 **12 个不合规**（合规的只有 `rank:member_index`、`rank:mongo_chk` 与 3 个锁 key） |
+
+**新增论断修正**
+
+| # | 上一轮的说法 | 实际 |
+|---|---|---|
+| 1 | 第 02 条台账「结算后 ✅ 2 周」 | 对**一次性活动**不成立——`Service.Settle()` 一次 `Expire` 都没有，而 `CleanupLiveData` / `ExpireInstance` 只被 `periodic/handler.go` 调用（缺陷 6） |
+| 2 | 第 01 条的注册表只需修剪成员 | **key 自身也是永久 key**；且「常驻活动用远期哨兵值表示永不过期」把"永久"直接编进了数据模型（缺陷 8） |
+| 3 | 第 02 条「`ttl <= 0` 时跳过 `Expire`」是保护措施 | **恰是漏洞**：跳过 = 留成永久 key；正确做法是给极短 TTL 让它被回收（缺陷 7） |
+| 4 | 第 02 条「常驻活动不设 TTL（推荐）」 | 违反原则；且 `CloseTime=0 && GameEndTime=0` 的活动会在 **1 秒内被结算**，根本不是"常驻" |
+| 5 | 第 02 条「每次刷新 TTL 等于把省下的 HGETALL 用 EXPIRE 还回去」 | 前提已过时：`HSet` + `Expire` 在同一 pipeline 内只算一次往返，刷新不额外花钱；保留"设一次"的理由改为"幂等且无信息量" |
+| 6 | 缺陷 1「补齐懒恢复之前不要给 `rank:def` 设 TTL」 | 结论方向不变但性质变了：按新原则**不能豁免 TTL**，改为「懒恢复 + TTL 同一改动包」；并补上 **`OpenInstance` 用 `Exists` 绕不过 `GetRank`** 这一点 |
+| 7 | 台账写「14 个数据 key + **4 个**锁 key」 | 锁 key 是 **3 个**（`rank:settle` / `rank:robot_tick` / `rank:periodic_advance`） |
+
+**新增内容**
+
+| 位置 | 内容 |
+|---|---|
+| 原则一 | 重写为**三条硬规则** + 两种 key 形态（活动数据用绝对过期、非活动数据用滑动 TTL），并明确「没有第三种形态」 |
+| 原则一 · 新增 | 「落地形态」：`HSet` + `Expire` 放进一次 pipeline，**合规代价为零** |
+| 原则一 · 新增 | 「可恢复性完备性论证」：逐类核对权威源，得出"给任何 key 设 TTL 都不会丢数据"；并给出「删 key 测试」作为判定工具 |
+| 原则一 · 新增 | **缺陷 6**（一次性活动结算后无 TTL 设置点）、**缺陷 7**（`effectiveSettleAt()==0` 时公式无定义 + 配置时间字段无校验）、**缺陷 8**（注册表 key 自身是永久 key） |
+| 第 01 条 | 注册表加滑动 TTL（续期点与成员增删同处，不存在漏改路径）；删除「远期哨兵值」约定；sketch 补 `Expire` |
+| 第 02 条 | 台账加「一次性 / 周期」一列；公式补 `activityEnd == 0` 分支；删除"跳过 `Expire`"的保护写法；重写「常驻活动」一节 |
+| 概览 | 必改从 6 项扩到 **9 项**（必改-7/8/9）；落地前置从四件事扩到**五件事**；基础原则表述更新为「不允许存在永久 key」 |
+| 待办 | 新增 **K**（配置时间字段无校验 → 活动在 1 秒内被结算）；H 补充「跳过 `Expire` 不可用作保护」 |
+
+---
+
 ### 2026-09-17（补充：两条基础原则的全量盘点）
+
+> ⚠️ 本节有三处结论已被上一节（三次补充）修正，以上一节为准：① **「结算后 TTL」**——本节笼统写作"2 周"，实际只有周期轮次如此，**一次性活动为 0**（缺陷 6）；② **「常驻活动」**——该形态不存在（缺陷 7）；③ **「数据 key 总数」**——计入第 01 条的注册表后，在用 key 为 17 个（13 数据 + 1 注册表 + 3 锁）。其余结论（活跃期 TTL 缺口、扫库审计、逐 key 恢复路径）仍然有效。
 
 按「① Redis 只是缓存，所有 key 都必须有 TTL 且必须有恢复路径；② 正常逻辑不得扫库」两条原则对全子系统做了一次全量盘点，新增文首「[基础原则与全量盘点](#基础原则与全量盘点2026-09-17-补充)」一节，并据此修正了第 02 条的台账、新增两个上线前必改。
 
@@ -1685,7 +1953,7 @@ func (s *Service) WarmUp(ctx context.Context) {
 | 09 | `registeredAt` + 60s 保护窗口（延迟删除） | 按「活动是否仍在进行」决定修复或删除 | 窗口只是延后删除而非根治；`tryRecoverPeriodicFromRedis` 存在 30 秒恢复-删除振荡循环。删除不可逆，修复幂等且自愈 |
 | 13 | 替换为 `sync.Once` | **`WarmUp` 加 `atomic.Bool` 快路径；`sync.Once` 与两阶段改造均不做** | 仅替换 bool 无收益（14 处调用点全在锁内）；两阶段改造需改动全部读路径加锁边界，风险与收益不匹配。而 `WarmUp` 是唯一自己持锁的调用点，只改它即可消掉稳态锁获取，1 行、零风险 |
 
-**新增待办（两轮累计发现，A–H 来自首轮，I–J 来自补充盘点；均未在 13 条内）**
+**新增待办（三轮累计发现，A–H 来自首轮，I–J 来自上一轮盘点，K 来自本轮「无永久 key」盘点；均未在 13 条内）**
 
 | 项 | 问题 | 位置 |
 |---|---|---|
@@ -1696,6 +1964,7 @@ func (s *Service) WarmUp(ctx context.Context) {
 | E | `CleanupAll` 删除的 key 集合不含 `rank:member_index`，且因 `bizId` 与索引条目编码不可逆而无法自行处理 | [store.go:435-446](../../socialserver/internal/rank/engine/store.go) |
 | F | 00 的补充：常驻 ticker 循环不能用无界 `SubmitWait`，否则 ticker channel（容量 1）静默丢 tick；需增加 `SubmitWaitTimeout` 提交入口 | 见第 00 条 |
 | G | 两处随规模放大而未被覆盖的清理/重建开销：① `RemoveUserEntries` 逐条 `SRem`、无分块无 pipeline，而 `members` 是整个活动的成员表（10 万人 = 10 万次串行往返）；② `rebuildMemberIndex` **无负缓存**（miss 不被记住，重复全扫 N 个服务），且 `GetMemberGroupID` 取的是 `s.mu.Lock()` **写锁**，GM 批量查 U 用户 × N 服务 = U×N 次写锁，与 `UpsertScore` 直接争锁。两者都需改 `engine.Service` 的锁粒度，应独立立项 | [member_index.go:123-131](../../socialserver/internal/rank/member_index.go)、[manager.go:396-420](../../socialserver/internal/rank/manager.go) |
-| H | 第 02 条活跃期 TTL 是全文**唯一不可逆**改动（`EXPIRE` 到期即删，不可回滚，且 `ttl <= 0` 会被 Redis 当作立即删除）。落地前须：① 按该条「⚠️ 唯一不可逆的改动」先跑只记录不设 TTL 的灰度；② 给「`ttl <= 0` 的分组数」加指标；③ 大活动（`RankPeopleNum` 打满）删档后验证 `rank:mb` / `rank:seq` 在保留期内仍可读 | 见第 02 条 |
+| H | 第 02 条活跃期 TTL 是全文**唯一不可逆**改动（`EXPIRE` 到期即删，不可回滚）。落地前须：① 按该条「⚠️ 唯一不可逆的改动」先跑只记录不设 TTL 的灰度；② 给「`ttl <= 0` 的分组数」加指标；③ 大活动（`RankPeopleNum` 打满）删档后验证 `rank:mb` / `rank:seq` 在保留期内仍可读。**注意：不能用"`ttl <= 0` 就跳过 `Expire`"作为保护**（那会留下永久 key，见缺陷 7），要退化为极短 TTL | 见第 02 条 |
 | I | `rank:max_score` 是**死代码**：`RankMaxScoreKeyPrefix` / `GetRankMaxScoreKey` 全仓只有定义、无任何生产者与消费者。「真实玩家最高分」功能从未接入。建议删除定义或明确标注为预留 | [defines_rank.go:88-123](../../common/redis/defines_rank.go) |
 | J | `setMongoChecked` 的 `SetEX(10min)` 会把同 bizId 其它 key 的 2 周 TTL **缩短**为 10 分钟（`SetEX` 覆盖 TTL）。当前**不可达**（它只在 Redis 与 Mongo 双空时调用，与 `CleanupLiveData` 的作用对象不重叠），但一旦引入滑动刷新或注册表修剪改变调用时机即变为可达 → `rank:groups` 被提前删除。**只要动 TTL 方案就必须一起改** | [store.go:42](../../socialserver/internal/rank/engine/store.go)、`407` |
+| K | 配置的时间字段**完全没有校验**：`handleCreateRankConfig` 把 `OpenTime` / `CloseTime` / `GameEndTime` 原样写入 `engine.Config`。`CloseTime=0 && GameEndTime=0` 会让 `settleAt == 0`，而 `Tick` 的守卫 `if now < settleAt` 恒为假（`now` 是正的 UnixMilli）→ **活动在第一个 tick（≤1 秒）就被结算**；同时该配置让第 02 条的 TTL 公式退化为负值（缺陷 7）。建议在 handler 层加校验 `CloseTime > 0 \|\| GameEndTime > 0`，并让 `Tick` 对 `settleAt <= 0` 直接跳过结算 | [rank.go:445-459](../../socialserver/internal/handler/rank.go)、[service.go:345-353](../../socialserver/internal/rank/engine/service.go) |
