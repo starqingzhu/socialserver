@@ -1,7 +1,9 @@
 package internal
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"common/config"
 	"common/configmgr"
@@ -21,6 +23,7 @@ import (
 	rankservice "socialserver/internal/rank"
 	hrouter "socialserver/internal/router/http"
 	rpcservice "socialserver/internal/router/rpc"
+	"socialserver/internal/taskpool"
 
 	"github.com/gin-gonic/gin"
 )
@@ -135,6 +138,8 @@ func (s *Server) OnInit() {
 	}
 	mongoTask.Init(mongodbmodule.Main.TakeSession(), config.Default.MongoCfg.Database)
 
+	taskpool.Global = taskpool.New("socialserver", 32, 4096)
+
 	if err := rankservice.InitGlobalManager(redis.Main, config.Default.MongoCfg.Database); err != nil {
 		zaplog.LoggerSugar.Fatalf("init rank manager failed: %v", err)
 	}
@@ -164,6 +169,13 @@ func (s *Server) OnClose() {
 
 	if manager := rankservice.GetGlobalManager(); manager != nil {
 		manager.Close()
+	}
+	if taskpool.Global != nil {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if e := taskpool.Global.Close(closeCtx); e != nil {
+			zaplog.LoggerSugar.Error("taskpool close err:", e)
+		}
+		cancel()
 	}
 	if e := queue.Shutdown(); e != nil {
 		zaplog.LoggerSugar.Error("queue shutdown err:", e)

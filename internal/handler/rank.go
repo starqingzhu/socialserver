@@ -445,6 +445,13 @@ func handleCreateRankConfig(ctx context.Context, meta libdispatch.Meta, req *pb.
 		}
 	}()
 
+	// CloseTime 与 GameEndTime 不能同时缺省：effectiveSettleAt() 会退化为 0，
+	// 导致 Tick 的 settledAt==settleAt 短路在第一次调用就命中，
+	// 活动从此既不再 tick 机器人也永不结算（docs/rank_optimization.md 待办 K）。
+	if req.CloseTime <= 0 && req.GameEndTime <= 0 {
+		return status.Error(codes.InvalidArgument, "closeTime and gameEndTime cannot both be unset")
+	}
+
 	manager := rankservice.GetGlobalManager()
 	if manager == nil {
 		return status.Error(codes.Internal, "rank manager not initialized")

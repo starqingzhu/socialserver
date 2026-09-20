@@ -10,10 +10,12 @@ replace pbcommon => ../pbcommon
 
 require (
 	common v0.0.0-00010101000000-000000000000
+	github.com/alicebob/miniredis/v2 v2.36.1
 	github.com/gin-gonic/gin v1.11.0
 	go.mongodb.org/mongo-driver v1.17.6
 	golib v0.0.0-00010101000000-000000000000
 	google.golang.org/grpc v1.78.0
+	google.golang.org/protobuf v1.36.10
 	pbcommon v0.0.0-00010101000000-000000000000
 )
 
@@ -67,6 +69,7 @@ require (
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.etcd.io/etcd/api/v3 v3.6.5 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.6.5 // indirect
 	go.etcd.io/etcd/client/v3 v3.6.5 // indirect
@@ -85,5 +88,4 @@ require (
 	golang.org/x/tools v0.38.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20251029180050-ab9386a59fda // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251029180050-ab9386a59fda // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
 )

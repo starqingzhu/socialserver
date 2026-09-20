@@ -73,11 +73,35 @@ func (s *Service) mergeGroupsLocked(fresh []*Group) {
 	}
 }
 
+// groupInstanceState 记录某实例上次向 Redis 确认"存在"的时间。
+// 只做正向缓存（只记录已确认存在），不做否定缓存，因此不会产生误判：
+// 标记缺失或已过期时 ensureGroupInstance 总是回源 GetInstance 重新确认（第 03 条）。
+type groupInstanceState struct {
+	verifiedAt int64
+}
+
+// instanceVerifyInterval 是 instanceStates 正向缓存的有效期（毫秒）。
+// 超过这个时长后重新向 Redis 确认，而不是永久信任内存标记——
+// 这样 CleanupLiveData 的 TTL 过期、Redis 被清空等场景都能在有效期内自愈，
+// 不需要穷举所有可能让实例失效的路径。
+const instanceVerifyInterval = 60 * 1000
+
+// ensureGroupInstance 确保 instanceID 对应的 rank 实例已存在（不存在则创建）。
+// 命中有效期内的正向缓存时跳过 GetInstance，避免每次 UpsertScore 都产生一次 Redis RTT
+// （第 03 条）。
 func (s *Service) ensureGroupInstance(ctx context.Context, instanceID string, groupID int32, now int64) error {
+	s.cacheMu.RLock()
+	st, ok := s.instanceStates[instanceID]
+	s.cacheMu.RUnlock()
+	if ok && now-st.verifiedAt < instanceVerifyInterval {
+		return nil
+	}
+
 	inst, err := s.rankService.GetInstance(ctx, instanceID)
 	if err == nil {
 		// rank:inst 已在 Redis 中；同步持久化到 MongoDB（幂等，若已存在则覆盖更新）。
 		_ = s.store.SaveRankInst(groupID, *inst)
+		s.markInstanceVerified(instanceID, now)
 		return nil
 	}
 	if err != rank.ErrInstanceNotFound {
@@ -99,7 +123,27 @@ func (s *Service) ensureGroupInstance(ctx context.Context, instanceID string, gr
 	}
 	// 持久化新创建的实例元数据到 MongoDB。
 	_ = s.store.SaveRankInst(groupID, newInst)
+	s.markInstanceVerified(instanceID, now)
 	return nil
+}
+
+// markInstanceVerified 记录 instanceID 已在 now 时刻向 Redis 确认存在。
+func (s *Service) markInstanceVerified(instanceID string, now int64) {
+	s.cacheMu.Lock()
+	if s.instanceStates == nil {
+		s.instanceStates = make(map[string]groupInstanceState)
+	}
+	s.instanceStates[instanceID] = groupInstanceState{verifiedAt: now}
+	s.cacheMu.Unlock()
+}
+
+// invalidateInstanceState 清除 instanceID 的正向缓存标记。
+// 用于实例被显式设置 TTL 后（CleanupLiveData）立即失效，不必等待 instanceVerifyInterval
+// 自然到期——Cleanup() 场景无需调用，因为 Service 本身会随之从内存摘除。
+func (s *Service) invalidateInstanceState(instanceID string) {
+	s.cacheMu.Lock()
+	delete(s.instanceStates, instanceID)
+	s.cacheMu.Unlock()
 }
 
 func (s *Service) groupInstanceID(groupID int32) string {

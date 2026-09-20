@@ -15,6 +15,7 @@ import (
 	goredis "golib/redis"
 	"golib/zaplog"
 	"socialserver/internal/rank/engine"
+	"socialserver/internal/taskpool"
 )
 
 // ServiceRegistrar 由 Manager 实现并注入给 Handler，用于注册新轮次子服务。
@@ -34,22 +35,25 @@ type PeriodicMeta struct {
 
 // Handler 封装周期排行榜的所有运行时逻辑，由 Manager 通过组合持有。
 type Handler struct {
-	mu        sync.RWMutex
-	states    map[string]*PeriodicState
-	rdb       *goredis.Redis
-	dao       *engine.DAO
-	registry  ServiceRegistrar
-	warmupSem chan struct{} // 限制并发 WarmUp 数量
+	mu       sync.RWMutex
+	states   map[string]*PeriodicState
+	rdb      *goredis.Redis
+	dao      *engine.DAO
+	registry ServiceRegistrar
+
+	// timers 追踪 advanceRound 中调度的延迟清理 timer，供 Clear() 优雅关闭时统一 Stop()，
+	// 防止 Server 关闭后 timer 到期仍对已关闭的 Redis 连接发 EXPIRE/DEL 命令
+	// （见 docs/rank_optimization.md 第 07 条）。
+	timers []*time.Timer
 }
 
 // NewHandler 创建 Handler。registry 由 Manager 实现并传入。
 func NewHandler(rdb *goredis.Redis, dao *engine.DAO, registry ServiceRegistrar) *Handler {
 	return &Handler{
-		states:    make(map[string]*PeriodicState),
-		rdb:       rdb,
-		dao:       dao,
-		registry:  registry,
-		warmupSem: make(chan struct{}, 8),
+		states:   make(map[string]*PeriodicState),
+		rdb:      rdb,
+		dao:      dao,
+		registry: registry,
 	}
 }
 
@@ -80,10 +84,35 @@ func (h *Handler) RemoveState(logicalKey string) {
 	}
 }
 
-// Clear 清空所有状态（用于关闭时清理）。
+// Clear 清空所有状态（用于关闭时清理），并 Stop() 所有仍在等待的延迟清理 timer，
+// 防止 Server 已关闭后 timer 到期仍调用 CleanupLiveData 操作已关闭的 Redis 连接。
 func (h *Handler) Clear() {
 	h.mu.Lock()
 	h.states = make(map[string]*PeriodicState)
+	timers := h.timers
+	h.timers = nil
+	h.mu.Unlock()
+	for _, t := range timers {
+		t.Stop()
+	}
+}
+
+// trackTimer 记录一个待触发的延迟清理 timer。
+func (h *Handler) trackTimer(t *time.Timer) {
+	h.mu.Lock()
+	h.timers = append(h.timers, t)
+	h.mu.Unlock()
+}
+
+// untrackTimer 在 timer 触发后将其从追踪列表中移除，避免列表无限增长。
+func (h *Handler) untrackTimer(t *time.Timer) {
+	h.mu.Lock()
+	for i, existing := range h.timers {
+		if existing == t {
+			h.timers = append(h.timers[:i], h.timers[i+1:]...)
+			break
+		}
+	}
 	h.mu.Unlock()
 }
 
@@ -213,10 +242,13 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 		h.setSettledTTLForRound(svc, state, currentRound)
 		cleanDelay := time.Duration(cycleDurationMs(state.CycleMinutes)) * time.Millisecond
 		svcToClean := svc
-		time.AfterFunc(cleanDelay, func() {
+		var timer *time.Timer
+		timer = time.AfterFunc(cleanDelay, func() {
+			h.untrackTimer(timer)
 			zaplog.LoggerSugar.Infof("rank periodic: cleanup live data logicalKey=%s round=%d", logicalKey, currentRound)
 			svcToClean.CleanupLiveData()
 		})
+		h.trackTimer(timer)
 	}
 
 	if state.isActivityFinished(now) {
@@ -253,14 +285,15 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 	h.setCurRoundInRedis(logicalKey, nextRound)
 
 	if newSvc := h.registry.GetEngineServiceByKey(logicalKey); newSvc != nil {
-		h.warmupSem <- struct{}{}
-		go func(svc *engine.Service) {
-			defer func() { <-h.warmupSem }()
-			svc.WarmUp(ctx)
-		}(newSvc)
+		svc := newSvc
+		// 单点 WarmUp 可丢弃：池满时由后续懒加载兜底，替代原局部 warmupSem（改由全局池统一约束）。
+		if err := taskpool.Global.Submit(func() { svc.WarmUp(ctx) }); err != nil {
+			zaplog.LoggerSugar.Warnf("rank periodic: warmup submit failed logicalKey=%s: %v", logicalKey, err)
+		}
 	}
 
 	if h.dao != nil {
+
 		if err := h.dao.SavePeriodicState(logicalKey, state.ToSavedState()); err != nil {
 			zaplog.LoggerSugar.Errorf("rank periodic: save state logicalKey=%s: %v", logicalKey, err)
 		}
@@ -331,7 +364,7 @@ func (h *Handler) GetHistoricalRoundList(ctx context.Context, bizType string, ac
 
 	// 优先从 Redis 查询（结算后 2 周内仍有效），
 	// 再降级到 MongoDB，避免因异步写入延迟导致历史查询短暂失败。
-	store := engine.NewStore(h.rdb, h.dao, bizId)
+	store := engine.NewStore(h.rdb, h.dao, bizId, nil)
 	groupID, found, err := store.GetMember(userID)
 	if err != nil || !found {
 		// member→group 索引（rank_member）读失败或未命中（Redis TTL 过期 / Mongo 异步写未落库 / Redis 短暂不可用）。
@@ -350,7 +383,10 @@ func (h *Handler) GetHistoricalRoundList(ctx context.Context, bizType string, ac
 		zaplog.LoggerSugar.Warnf("rank periodic: historical member index unavailable, recovered from settled bizType=%s actID=%d round=%d userID=%d groupID=%d",
 			bizType, actID, round, userID, groupID)
 	}
-	// 已定位用户分组：刷新成员索引 2 周 TTL（含 store.GetMember 经 Mongo 回写、未带 TTL 的情况）
+	// 已定位用户分组：命中即刷新成员索引 2 周 TTL。store.GetMember 经 Mongo 回写时现在自带
+	// backfill TTL（缺陷 3），此行对"回写"已冗余；保留是因为 Redis 命中路径不回写、也就不会刷新
+	// TTL，此行同时承担历史查询反复访问时的滑动续期。此处 store 的 activityEnd 为 nil ⇒
+	// backfillTTL 恰为 SettledCacheTTL，与下面的值相同，不会把既有 TTL 削短。
 	if h.rdb != nil {
 		_, _ = h.rdb.Expire(rediskeys.GetRankMembersKey(bizId), commonrank.SettledCacheTTL)
 	}
@@ -448,12 +484,14 @@ func (h *Handler) GetHistoricalRewardUsers(ctx context.Context, bizType string, 
 	bizId := roundBizId(bizType, actID, round)
 	rankCode := fmt.Sprintf("%s_score_%d", bizType, actID)
 	// Redis 优先、Mongo 兜底回写（2 周 TTL），避免历史查询反复打 Mongo。
-	store := engine.NewStore(h.rdb, h.dao, bizId)
+	store := engine.NewStore(h.rdb, h.dao, bizId, nil)
 	members, err := store.GetAllMembers()
 	if err != nil {
 		return nil, err
 	}
-	// 成员索引命中即刷新 2 周 TTL（含 store 经 Mongo 回写、未带 TTL 的情况）
+	// 成员索引命中即刷新 2 周 TTL。store.GetAllMembers 经 Mongo 回写时现在自带 backfill TTL
+	// （缺陷 3），此行对"回写"已冗余；保留是因为 Redis 命中路径不回写、也就不会刷新 TTL，
+	// 此行同时承担历史查询反复访问时的滑动续期。
 	if len(members) > 0 && h.rdb != nil {
 		_, _ = h.rdb.Expire(rediskeys.GetRankMembersKey(bizId), commonrank.SettledCacheTTL)
 	}
@@ -630,7 +668,7 @@ func (h *Handler) CleanupHistoricalRounds(state *PeriodicState) {
 	curRound := state.GetCurrentRound()
 	for r := int32(1); r < curRound; r++ {
 		bizId := state.roundBizId(r)
-		store := engine.NewStore(h.rdb, h.dao, bizId)
+		store := engine.NewStore(h.rdb, h.dao, bizId, nil)
 		store.CleanupLiveData(nil)
 	}
 }

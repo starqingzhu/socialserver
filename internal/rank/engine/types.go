@@ -1,6 +1,10 @@
 package engine
 
-import "fmt"
+import (
+	"fmt"
+
+	commonrank "common/rank"
+)
 
 // GroupState 业务层分组状态，独立于底层榜单实例状态。
 type GroupState string
@@ -49,6 +53,15 @@ type Option func(*Service)
 // WithOnMemberJoin 设置新成员首次加入分组时的回调。
 func WithOnMemberJoin(fn func(userID int64, groupID int32)) Option {
 	return func(s *Service) { s.onMemberJoin = fn }
+}
+
+// WithRankDef 由调用方注入该服务对应的 rank:def 原始定义（缺陷 1 的恢复来源）。
+//
+// 定义不能从 Config 重建：RankName / ScoreOrder / TieBreakPolicy / MaxQuerySize 这四个字段
+// 不在 Config 里，Redis 是它们唯一的住所，一旦 rank:def 到期，只有内存中这个副本能无损写回。
+// 所以它必须在构造期就捕获，而不是恢复时再拼——拼出来的必然与注册时写的不一致。
+func WithRankDef(def commonrank.Rank) Option {
+	return func(s *Service) { s.rankDef = def }
 }
 
 // Group 业务层分组信息。

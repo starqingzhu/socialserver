@@ -63,26 +63,6 @@ func TestMemberIndexLookupByBizType(t *testing.T) {
 	}
 }
 
-func TestMemberIndexRemoveByKey(t *testing.T) {
-	idx := NewMemberIndex(nil, 0)
-	e1 := MemberEntry{BizType: "balloon", ActID: 1, GroupID: 1}
-	e2 := MemberEntry{BizType: "charm", ActID: 2, GroupID: 2}
-	idx.Track(1001, e1)
-	idx.Track(1001, e2)
-	idx.Track(2001, e1)
-
-	idx.RemoveByKey(NewBizKey("balloon", 1).String())
-
-	entries1001 := idx.Lookup(1001)
-	if len(entries1001) != 1 || entries1001[0].BizType != "charm" {
-		t.Fatalf("expected only charm entry for 1001, got %+v", entries1001)
-	}
-	entries2001 := idx.Lookup(2001)
-	if len(entries2001) != 0 {
-		t.Fatalf("expected 0 entries for 2001 after remove, got %d", len(entries2001))
-	}
-}
-
 func TestMemberIndexLookupReturnsCopy(t *testing.T) {
 	idx := NewMemberIndex(nil, 0)
 	entry := MemberEntry{BizType: "balloon", ActID: 1, GroupID: 1}

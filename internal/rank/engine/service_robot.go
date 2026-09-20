@@ -3,10 +3,122 @@ package engine
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"common/rank"
 	"golib/zaplog"
 )
+
+// tickGroupsCacheTTL 是 tickAllRobots 专用软缓存（分组列表/机器人列表/榜一分数）的有效期。
+// 不能拉长：tickRobotScore 是有状态的逐 tick 随机游走，喂给它越陈旧的状态就越会算错增长节拍
+// （第 02 条）。
+const tickGroupsCacheTTL = 2 * time.Second
+
+// robotsCacheEntry 是某分组机器人列表的缓存条目。
+type robotsCacheEntry struct {
+	robots []*robotState
+	expiry time.Time
+}
+
+// groupScoreCacheEntry 是某分组榜一分数 / 真实玩家榜一分数的缓存条目。
+type groupScoreCacheEntry struct {
+	firstScore     int64
+	realFirstScore int64
+	expiry         time.Time
+}
+
+// tickGroups 返回本轮需要 tick 的分组列表：命中有效期内的缓存直接返回，
+// 未命中则回源 Redis 并回填缓存。仅服务 tickAllRobots——UpsertScore 路径的
+// ensureGroupLocked 必须实时读 Redis 以感知其他节点新建的分组，不得复用此缓存
+// （第 02 条 必改-2：缓存必须带有效期，否则本节点永远看不到其他节点新建的分组）。
+func (s *Service) tickGroups() ([]*Group, bool) {
+	now := time.Now()
+	s.cacheMu.RLock()
+	if s.groupsCache != nil && now.Before(s.groupsCacheExpiry) {
+		groups := s.groupsCache
+		s.cacheMu.RUnlock()
+		return groups, true
+	}
+	s.cacheMu.RUnlock()
+
+	groups, err := s.store.LoadGroups()
+	if err != nil {
+		return nil, false
+	}
+	s.cacheMu.Lock()
+	s.groupsCache = groups
+	s.groupsCacheExpiry = now.Add(tickGroupsCacheTTL)
+	s.cacheMu.Unlock()
+	return groups, true
+}
+
+// tickRobots 返回指定分组的机器人列表：命中有效期内的缓存直接返回，未命中则回源 Redis
+// 并回填缓存。缓存持有的是 *robotState 指针，tickGroupRobots 对字段的原地修改会
+// 直接反映到缓存里，因此不需要在 SaveRobots 之后显式回写（第 02 条）。
+func (s *Service) tickRobots(groupID int32) ([]*robotState, bool) {
+	now := time.Now()
+	s.cacheMu.RLock()
+	if e, ok := s.robotsCache[groupID]; ok && now.Before(e.expiry) {
+		robots := e.robots
+		s.cacheMu.RUnlock()
+		return robots, true
+	}
+	s.cacheMu.RUnlock()
+
+	robots, err := s.store.LoadRobots(groupID)
+	if err != nil {
+		return nil, false
+	}
+	s.cacheMu.Lock()
+	if s.robotsCache == nil {
+		s.robotsCache = make(map[int32]robotsCacheEntry)
+	}
+	s.robotsCache[groupID] = robotsCacheEntry{robots: robots, expiry: now.Add(tickGroupsCacheTTL)}
+	s.cacheMu.Unlock()
+	return robots, true
+}
+
+// invalidateRobotsCache 清除指定分组的机器人缓存。
+// 用于 spawnRobotsForGroup 新增机器人后让下一次 tick 立即感知新机器人，
+// 不必等待 tickGroupsCacheTTL 到期。
+func (s *Service) invalidateRobotsCache(groupID int32) {
+	s.cacheMu.Lock()
+	delete(s.robotsCache, groupID)
+	s.cacheMu.Unlock()
+}
+
+// tickGroupScores 返回分组的榜一分数与真实玩家榜一分数：命中有效期内的缓存直接返回，
+// 未命中则调用 Range(0,-1) 回源并回填缓存。把 tickGroupRobots 里唯一未被覆盖的全量读
+// 也纳入同一套 Cache-Aside（第 02 条「遗漏的最大一项」，采用"减少读次"方向）——
+// ≤2s 的陈旧度只影响 calcGrowTarget 万分比 clamp 的目标分细微扰动，可接受。
+func (s *Service) tickGroupScores(ctx context.Context, groupID int32, instanceID string) (groupScoreCacheEntry, bool) {
+	now := time.Now()
+	s.cacheMu.RLock()
+	if e, ok := s.scoreCache[groupID]; ok && now.Before(e.expiry) {
+		s.cacheMu.RUnlock()
+		return e, true
+	}
+	s.cacheMu.RUnlock()
+
+	allSnapshots, err := s.rankService.Range(ctx, instanceID, 0, -1)
+	if err != nil || len(allSnapshots) == 0 {
+		return groupScoreCacheEntry{}, false
+	}
+	entry := groupScoreCacheEntry{firstScore: allSnapshots[0].Score, expiry: now.Add(tickGroupsCacheTTL)}
+	for _, snap := range allSnapshots {
+		if !IsRobotMemberID(snap.MemberId) {
+			entry.realFirstScore = snap.Score
+			break
+		}
+	}
+	s.cacheMu.Lock()
+	if s.scoreCache == nil {
+		s.scoreCache = make(map[int32]groupScoreCacheEntry)
+	}
+	s.scoreCache[groupID] = entry
+	s.cacheMu.Unlock()
+	return entry, true
+}
 
 // spawnRobotsForGroup 为指定分组生成机器人并持久化到 Redis。
 // 若距玩法结束时间不足任意一档 LockTokenTime，则跳过该档机器人的生成。
@@ -96,17 +208,20 @@ func (s *Service) spawnRobotsForGroup(ctx context.Context, groupID int32, capaci
 
 	_ = s.store.SaveRobots(groupID, newRobots)
 	_ = s.store.SaveUsedInfoIDs(groupID, usedInfoIDs)
+	// 新机器人不在 tickRobots 的缓存快照里；立即失效该分组的缓存，
+	// 让下一次 tick 而不是等 tickGroupsCacheTTL 到期才感知它们（第 02 条）。
+	s.invalidateRobotsCache(groupID)
 
 	zaplog.LoggerSugar.Infof("rank engine: spawned %d robots for group %d (bizType=%s)", len(newRobots), groupID, s.config.BizType)
 	return nil
 }
 
 // tickAllRobots 推进所有活跃分组内机器人的积分增长。
-// 多节点：每次 tick 从 Redis 加载最新分组列表和机器人状态，避免内存缓存跨节点不一致。
+// 多节点：分布锁只保证同一秒内单节点执行，但持锁节点可能换手，因此分组列表/机器人状态
+// 都走带有效期的软缓存（TTL≈2s）而不是内存永久缓存，未命中时回源 Redis（第 02 条）。
 func (s *Service) tickAllRobots(ctx context.Context, nowMs int64) {
-	// 从 Redis 读取最新分组列表，确保能看到其他节点创建的分组。
-	groups, err := s.store.LoadGroups()
-	if err != nil || len(groups) == 0 {
+	groups, ok := s.tickGroups()
+	if !ok || len(groups) == 0 {
 		// Redis 不可用时回退到内存缓存
 		s.mu.Lock()
 		s.ensureLoaded()
@@ -128,9 +243,8 @@ func (s *Service) tickAllRobots(ctx context.Context, nowMs int64) {
 	}
 
 	for _, t := range targets {
-		// 每次 tick 从 Redis 加载最新机器人状态，确保多节点一致。
-		robots, err := s.store.LoadRobots(t.groupID)
-		if err != nil || len(robots) == 0 {
+		robots, ok := s.tickRobots(t.groupID)
+		if !ok || len(robots) == 0 {
 			continue
 		}
 		s.tickGroupRobots(ctx, t.groupID, t.instanceID, robots, nowMs)
@@ -139,21 +253,14 @@ func (s *Service) tickAllRobots(ctx context.Context, nowMs int64) {
 
 // tickGroupRobots 推进单个分组内所有机器人的积分并持久化变更。
 func (s *Service) tickGroupRobots(ctx context.Context, groupID int32, instanceID string, robots []*robotState, nowMs int64) {
-	// 取组内全员榜单（含机器人），用于计算增长目标分
-	allSnapshots, err := s.rankService.Range(ctx, instanceID, 0, -1)
-	if err != nil || len(allSnapshots) == 0 {
+	// 取组内全员榜单（含机器人）的榜一分数，用于计算增长目标分；走 2s Cache-Aside，
+	// 覆盖第 02 条中唯一未被 groups/robots 缓存覆盖的 Range(0,-1) 全量读。
+	scores, ok := s.tickGroupScores(ctx, groupID, instanceID)
+	if !ok {
 		return
 	}
-	firstScore := allSnapshots[0].Score
-
-	// 找出真实玩家第一名分值，作为 maxDifferenceToken 的约束基准
-	var realFirstScore int64
-	for _, snap := range allSnapshots {
-		if !IsRobotMemberID(snap.MemberId) {
-			realFirstScore = snap.Score
-			break
-		}
-	}
+	firstScore := scores.firstScore
+	realFirstScore := scores.realFirstScore
 
 	var updates []rank.RankScoreItem
 	var changed []*robotState
@@ -193,14 +300,12 @@ func (s *Service) tickGroupRobots(ctx context.Context, groupID int32, instanceID
 
 // robotAvatarInfo 根据机器人状态构造正确的 AvatarInfo：userId 使用负数 memberID。
 func (s *Service) robotAvatarInfo(robot *robotState) *rank.AvatarInfo {
-	for _, info := range s.config.RobotInfos {
-		if info.InfoID == robot.InfoID {
-			return &rank.AvatarInfo{
-				UserId: robot.MemberID,
-				Name:   info.Name,
-				Avatar: info.Avatar,
-				Frame:  info.Frame,
-			}
+	if info, ok := s.infoMap[robot.InfoID]; ok {
+		return &rank.AvatarInfo{
+			UserId: robot.MemberID,
+			Name:   info.Name,
+			Avatar: info.Avatar,
+			Frame:  info.Frame,
 		}
 	}
 	return &rank.AvatarInfo{UserId: robot.MemberID}
@@ -208,10 +313,5 @@ func (s *Service) robotAvatarInfo(robot *robotState) *rank.AvatarInfo {
 
 // findTier 在配置中查找指定档次，未找到时返回 nil。
 func (s *Service) findTier(tierID int32) *RobotTierCfg {
-	for i := range s.config.RobotTiers {
-		if s.config.RobotTiers[i].TierID == tierID {
-			return &s.config.RobotTiers[i]
-		}
-	}
-	return nil
+	return s.tierMap[tierID]
 }

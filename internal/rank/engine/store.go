@@ -1,9 +1,11 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	commonrank "common/rank"
@@ -12,6 +14,41 @@ import (
 	"golib/zaplog"
 )
 
+// storeMongo 是 Store 用到的 MongoDB 读写方法集合。
+// 存在的唯一目的是让 Store 的 Mongo 分支可注入替身——否则 dao 是具体类型 *DAO
+// （持有 *mongodbmodule.Session），懒加载回填路径无法在单测里被驱动，
+// 而「key 过期后重新回填不会重建成永久 key」正是缺陷 3 唯一重要的断言。
+// 生产代码只用 *DAO 实现此接口，不引入任何行为变化。
+type storeMongo interface {
+	available() bool
+
+	SaveGroup(bizId string, group *Group) error
+	LoadGroups(bizId string) ([]*Group, error)
+
+	SaveMember(bizId string, userID int64, groupID int32) error
+	GetMember(bizId string, userID int64) (int32, bool, error)
+	LoadAllMembers(bizId string) (map[int64]int32, error)
+
+	SaveRobots(bizId string, groupID int32, robots []*robotState) error
+	LoadRobots(bizId string, groupID int32) ([]*robotState, error)
+
+	SaveClaimIfNotExists(bizId string, userID int64, claimTime int64) (bool, int64, error)
+	SaveClaim(bizId string, userID int64, claimTime int64) error
+	GetClaim(bizId string, userID int64) (int64, bool, error)
+
+	SaveScore(bizId string, groupID int32, userID int64, score int64, enterTime int64, sequence int64, updateTime int64, avatarInfo *commonrank.AvatarInfo) error
+	LoadGroupScores(bizId string, groupID int32) ([]ScoreDoc, error)
+
+	SaveSettled(bizId string, groupID int32, snaps []commonrank.RankMemberSnapshot, settleTime int64) error
+	LoadGroupSettled(bizId string, groupID int32) ([]commonrank.RankMemberSnapshot, error)
+
+	SaveRankInst(bizId string, groupID int32, inst commonrank.RankInstance) error
+	LoadGroupInst(bizId string, groupID int32) (*commonrank.RankInstance, error)
+
+	DeleteAllByBizId(bizId string) error
+	QueueDeleteDocIDs(coll string, docIDs []string)
+}
+
 // Store 封装排行榜业务层的缓存和持久化操作。
 // 写操作：先写 Redis 缓存，再写 MongoDB 持久化。
 // 读操作：先读 Redis，miss 时从 MongoDB 加载并回填 Redis。
@@ -19,8 +56,16 @@ import (
 // rdb/dao 为 nil 时退化为 no-op（纯内存模式，用于测试）。
 type Store struct {
 	rdb   *goredis.Redis
-	dao   *DAO
+	dao   storeMongo
 	bizId string
+
+	// activityEnd 返回所属活动的结算时刻（Unix 毫秒），由 engine.NewService 注入
+	// （直接传 s.effectiveSettleAt，读的是原子副本）。用闭包而非快照值：GM 通过 UpdateConfig
+	// 改写 CloseTime/GameEndTime 后，这里立即读到新值，结构上不可能陈旧。
+	// 为 nil 表示该 Store 不属于任何活动实例（历史查询、孤儿清理、周期元数据读取、claim 兜底），
+	// 此时所有 TTL 计算退化为 backfillTTLFor(0) == SettledCacheTTL，恰好等于这些路径改造前
+	// 手工设的 2 周常量，因此对它们零行为变化。
+	activityEnd func() int64
 }
 
 // nullCacheEntry 负向缓存哨兵字符串。
@@ -38,16 +83,69 @@ func (st *Store) isMongoChecked() bool {
 }
 
 // setMongoChecked 设置哨兵：表示 MongoDB 已被查询过且为空（即全新活动，尚无数据）。
+//
+// 用 SetNX 而不是 SetEX：SET 会连带清掉 key 上已有的 TTL，而本 key 同时也在
+// CleanupLiveData / ExpireLiveData 的 key 集合里（被设成 2 周保留期）。若在这里用 SetEX，
+// 一次「重新判定 Mongo 为空」就会把那 2 周削成 10 分钟，等于在保留期结束前把哨兵删掉。
+// SetNX 只在 key 不存在时写入，永远不会缩短既有 TTL——本哨兵只表达「查过了且是空的」，
+// 完全没有必要覆盖一个已经存在的同义哨兵。
 func (st *Store) setMongoChecked() {
-	_ = st.rdb.SetEX(rediskeys.GetRankMongoCheckedKey(st.bizId), "1", mongoCheckedTTL)
+	_, _ = st.rdb.SetNX(rediskeys.GetRankMongoCheckedKey(st.bizId), "1", mongoCheckedTTL)
 }
 
-func NewStore(rdb *goredis.Redis, dao *DAO, bizId string) *Store {
-	return &Store{rdb: rdb, dao: dao, bizId: bizId}
+func NewStore(rdb *goredis.Redis, dao *DAO, bizId string, activityEnd func() int64) *Store {
+	return &Store{rdb: rdb, dao: dao, bizId: bizId, activityEnd: activityEnd}
+}
+
+// newStoreWithDAO 供包内测试以 storeMongo 替身构造 Store（生产代码一律走 NewStore）。
+func newStoreWithDAO(rdb *goredis.Redis, dao storeMongo, bizId string, activityEnd func() int64) *Store {
+	return &Store{rdb: rdb, dao: dao, bizId: bizId, activityEnd: activityEnd}
 }
 
 func (st *Store) available() bool { return st != nil && st.rdb != nil }
 func (st *Store) hasMongo() bool  { return st != nil && st.dao != nil && st.dao.available() }
+
+// activityEndMs 返回活动结算时刻，nil 闭包（非活动上下文的 Store）返回 0。
+func (st *Store) activityEndMs() int64 {
+	if st == nil || st.activityEnd == nil {
+		return 0
+	}
+	return st.activityEnd()
+}
+
+// writeTTL 是写路径的 TTL：活动数据 key 的绝对过期时刻 = activityEnd + SettledCacheTTL。
+func (st *Store) writeTTL() time.Duration { return ttlFor(st.activityEndMs()) }
+
+// backfillTTL 是读路径的 TTL：在 writeTTL 之上加 SettledCacheTTL 下限（见 backfillTTLFor）。
+func (st *Store) backfillTTL() time.Duration { return backfillTTLFor(st.activityEndMs()) }
+
+// backfill 把「先写数据、再 EXPIRE」固定成懒加载回填的唯一写法。
+// 顺序不能反：EXPIRE 作用在不存在的 key 上会被 Redis 静默丢弃（pipeline 内亦然），
+// 那样就等于把 key 留成永久的——正是缺陷 3。
+func (st *Store) backfill(key string, write func()) {
+	if !st.available() {
+		return
+	}
+	write()
+	if _, err := st.rdb.Expire(key, st.backfillTTL()); err != nil {
+		zaplog.LoggerSugar.Warnf("rank engine: backfill expire key=%s: %v", key, err)
+	}
+}
+
+// expireKey 是写路径设置活跃期 TTL 的唯一出口（第 02 条）。写路径全部走这里，
+// 「不允许存在永久 key」这条不变量就只有一份实现，不会有谁漏掉。
+//
+// 必须在写命令之后调用：EXPIRE 作用在不存在的 key 上会被 Redis 静默丢弃，
+// 顺序反了就等于把 key 留成永久的（与 backfill 同一条不变量，理由也相同）。
+// 返回值只在 key 不存在时为 false——那说明写没生效或 key 已到期，与 TTL 设置本身无关，故不告警。
+func (st *Store) expireKey(key string) {
+	if !st.available() {
+		return
+	}
+	if _, err := st.rdb.Expire(key, st.writeTTL()); err != nil {
+		zaplog.LoggerSugar.Warnf("rank engine: write expire key=%s bizId=%s: %v", key, st.bizId, err)
+	}
+}
 
 // --- 分组管理 ---
 
@@ -56,7 +154,9 @@ func (st *Store) SaveGroup(group *Group) error {
 		return nil
 	}
 	data, _ := json.Marshal(group)
-	st.rdb.HSet(rediskeys.GetRankGroupsKey(st.bizId), strconv.FormatInt(int64(group.GroupID), 10), string(data))
+	key := rediskeys.GetRankGroupsKey(st.bizId)
+	st.rdb.HSet(key, strconv.FormatInt(int64(group.GroupID), 10), string(data))
+	st.expireKey(key)
 
 	if st.hasMongo() {
 		st.dao.SaveGroup(st.bizId, group)
@@ -96,10 +196,13 @@ func (st *Store) LoadGroups() ([]*Group, error) {
 		st.setMongoChecked()
 		return nil, nil
 	}
-	for _, g := range groups {
-		data, _ := json.Marshal(g)
-		st.rdb.HSet(rediskeys.GetRankGroupsKey(st.bizId), strconv.FormatInt(int64(g.GroupID), 10), string(data))
-	}
+	key := rediskeys.GetRankGroupsKey(st.bizId)
+	st.backfill(key, func() {
+		for _, g := range groups {
+			data, _ := json.Marshal(g)
+			st.rdb.HSet(key, strconv.FormatInt(int64(g.GroupID), 10), string(data))
+		}
+	})
 	return groups, nil
 }
 
@@ -131,18 +234,22 @@ func (st *Store) IncrRealCount(group *Group) (int32, error) {
 	}
 	key := rediskeys.GetRankGroupsKey(st.bizId)
 	field := strconv.FormatInt(int64(group.GroupID), 10)
+	metaKey := rediskeys.GetRankMetaKey(st.bizId)
 
 	// 先用 HIncrBy 对 realCount 原子加 1，得到最新值。
 	// 由于 group 以整体 JSON 存储，需读出最新值更新 struct 再写回。
-	newCount, err := st.rdb.HIncrBy(rediskeys.GetRankMetaKey(st.bizId), fmt.Sprintf("realCount_%d", group.GroupID), 1)
+	newCount, err := st.rdb.HIncrBy(metaKey, fmt.Sprintf("realCount_%d", group.GroupID), 1)
 	if err != nil {
 		// Redis 失败时退化为内存递增
 		group.RealCount++
 		return group.RealCount, nil
 	}
+	// HIncrBy 会在 meta 不存在时创建它，所以 meta 的 TTL 也要在这里补。
+	st.expireKey(metaKey)
 	group.RealCount = int32(newCount)
 	data, _ := json.Marshal(group)
 	st.rdb.HSet(key, field, string(data))
+	st.expireKey(key)
 	if st.hasMongo() {
 		st.dao.SaveGroup(st.bizId, group)
 	}
@@ -157,10 +264,14 @@ func (st *Store) NextGroupID() (int32, error) {
 	if err != nil {
 		return 0, err
 	}
+	// 计数器所在的 meta key 可能刚被 HIncrBy 创建出来，同样要带上活跃期 TTL。
+	st.expireKey(rediskeys.GetRankMetaKey(st.bizId))
 	return int32(val), nil
 }
 
 // SaveActivityTimes 将活动的 openTime / closeTime / gameEndTime 写入 meta hash，用于重启后的 Redis 恢复。
+// 这是 meta key 的唯一创建入口（由 engine.NewService 构造时调用），因此也是全局活跃服务注册表
+// （rank:{active_services}，见 docs/rank_optimization.md 第 01 条）的唯一注册入口。
 func (st *Store) SaveActivityTimes(openTime, closeTime, gameEndTime int64) {
 	if !st.available() {
 		return
@@ -169,6 +280,116 @@ func (st *Store) SaveActivityTimes(openTime, closeTime, gameEndTime int64) {
 	st.rdb.HSet(key, "openTime", strconv.FormatInt(openTime, 10))
 	st.rdb.HSet(key, "closeTime", strconv.FormatInt(closeTime, 10))
 	st.rdb.HSet(key, "gameEndTime", strconv.FormatInt(gameEndTime, 10))
+
+	// 第 02 条：meta key 是活跃期数据，必须带 TTL。用本函数收到的活动时间而不是 writeTTL()，
+	// 是为了让 TTL 的来源与刚写进去的三个字段同源，不依赖 activityEnd 原子副本是否已刷新。
+	// 绝对时刻语义（activityEnd + SettledCacheTTL）⇒ 只需在这里设一次，tick 热路径不刷新；
+	// 重复调用是幂等的（设到同一个绝对时刻不改变剩余时间）。
+	activityEnd := settleAtOf(closeTime, gameEndTime)
+	if _, err := st.rdb.Expire(key, ttlFor(activityEnd)); err != nil {
+		zaplog.LoggerSugar.Warnf("rank engine: saveActivityTimes expire bizId=%s: %v", st.bizId, err)
+	}
+
+	st.registerActive(closeTime, gameEndTime)
+	st.logPlannedActiveTTL(closeTime, gameEndTime)
+}
+
+// ttlFor 按「距活动结束 + 结算保留期」公式计算活跃期数据 key 应设的绝对过期时长
+// （docs/rank_optimization.md 第 02 条）。实现在 common/rank，与 OpenInstance 写
+// rank:inst/mb/seq 时用的是同一份，避免两个模块各写一遍公式后漂移。
+func ttlFor(activityEnd int64) time.Duration {
+	return commonrank.TTLForActivityEnd(activityEnd)
+}
+
+// settleAtOf 收敛「结算时刻 = GameEndTime 优先，缺失时退化为 CloseTime」这同一个判断。
+// 此前该逻辑散在三处（logPlannedActiveTTL、registerActive、engine.effectiveSettleAt），
+// 三者若漂移会导致保留期算错（GameEndTime < CloseTime 的活动被提前过期）。
+func settleAtOf(closeTime, gameEndTime int64) int64 {
+	return commonrank.SettleAtOf(closeTime, gameEndTime)
+}
+
+// backfillTTLFor 是「读路径懒加载回填 / 已有 key 的 TTL 重设」专用规则：在 ttlFor 之上加一个
+// SettledCacheTTL 下限。写路径用 ttlFor，读路径用本函数——两个具名函数，调用方不需要挑分支。
+//
+// 下限是必需的，三个方向都成立：
+//   - 不产生永久 key：结果恒 >= SettledCacheTTL(14d) > 0（ttlFor 自身也保证非正数有兜底）。
+//   - 不在保留期结束前删除：活动仍在未来时 ttlFor 就是精确的剩余绝对时长，max 原样保留
+//     （与写入路径设的绝对时刻一致 ⇒ 幂等）；已过绝对到期时刻时下限给出「从此刻起 14d」，
+//     严格长于剩余保留期。
+//   - 不让读路径打 Mongo：裸用 ttlFor 对已过期的活动返回 1 分钟夹紧值，一次历史查询就会把 key
+//     写成 1 分钟后过期，下次再 miss 再打 Mongo，反复震荡。下限消除震荡——这正是
+//     LoadGroupSettledCached 今天刻意用固定 2 周的原因。
+//
+// 注意 backfillTTLFor(0) == SettledCacheTTL：所有不属于活动实例的 Store（历史查询、孤儿清理、
+// 周期元数据读取、claim 兜底，共 9 处传 nil activityEnd）行为与改造前逐位相同。
+func backfillTTLFor(activityEnd int64) time.Duration {
+	if ttl := ttlFor(activityEnd); ttl > commonrank.SettledCacheTTL {
+		return ttl
+	}
+	return commonrank.SettledCacheTTL
+}
+
+// logPlannedActiveTTL 记录活跃期数据 key 实际设置的绝对过期时刻（第 02 条）。TTL 已由
+// SaveActivityTimes 在同一 pipeline 内真实生效，这条日志保留用于线上核对 expireAt 是否等于
+// activityEnd+SettledCacheTTL，以及是否不早于 CleanupLiveData 设置的时刻。
+func (st *Store) logPlannedActiveTTL(closeTime, gameEndTime int64) {
+	activityEnd := settleAtOf(closeTime, gameEndTime)
+	ttl := ttlFor(activityEnd)
+	zaplog.LoggerSugar.Infof("rank ttl plan bizId=%s activityEnd=%d ttl=%s expireAt=%d",
+		st.bizId, activityEnd, ttl, time.Now().Add(ttl).UnixMilli())
+}
+
+// registerActive 把 bizId 以 "{bizId}:{deadlineMillis}" 的形式写入全局活跃服务注册表，
+// 并刷新注册表 key 自身的滑动 TTL。deadline 是服务的有效截止时间（settleAt + SettledCacheTTL），
+// Manager.syncFromRedis 据此做纯本地过滤，取代原先每 30 秒一次的全库 KEYS/SCAN。
+func (st *Store) registerActive(closeTime, gameEndTime int64) {
+	settleAt := settleAtOf(closeTime, gameEndTime)
+	var deadline int64
+	if settleAt <= 0 {
+		// 配置异常（CloseTime=0 且 GameEndTime=0，理论上会在 1 秒内被结算掉，见缺陷 7）：
+		// settleAt + SettledCacheTTL 无意义，退化为滑动窗口起点，避免成员一写入就被判定为 stale。
+		deadline = time.Now().Add(commonrank.ColdDataTTL).UnixMilli()
+	} else {
+		deadline = settleAt + commonrank.SettledCacheTTL.Milliseconds()
+	}
+
+	ctx := context.Background()
+	member := fmt.Sprintf("%s:%d", st.bizId, deadline)
+	pipe := st.rdb.Pipeline()
+	pipe.SAdd(ctx, rediskeys.RankActiveServicesKey, member)
+	pipe.Expire(ctx, rediskeys.RankActiveServicesKey, commonrank.ColdDataTTL)
+	if _, err := pipe.Exec(ctx); err != nil {
+		zaplog.LoggerSugar.Warnf("rank engine: registerActive bizId=%s: %v", st.bizId, err)
+	}
+}
+
+// unregisterActive 把该 bizId 对应的成员从活跃服务注册表中剔除。
+// 用真实值 SMEMBERS 后按 "{bizId}:" 前缀筛选而不是重建 deadline 后精确 SRem，
+// 是因为调用方（如 forceCleanupOrphan）可能只持有一个新建的临时 Store、不知道
+// registerActive 当初写入的确切 deadline，前缀筛选与调用方状态无关，始终正确。
+// 注册表大小有界（见文档「注册表规模」），SMEMBERS 成本可控，且只发生在服务删除这种低频路径上。
+func (st *Store) unregisterActive() {
+	members, err := st.rdb.SMembers(rediskeys.RankActiveServicesKey)
+	if err != nil || len(members) == 0 {
+		return
+	}
+	prefix := st.bizId + ":"
+	stale := make([]interface{}, 0, len(members))
+	for _, mem := range members {
+		if strings.HasPrefix(mem, prefix) {
+			stale = append(stale, mem)
+		}
+	}
+	if len(stale) == 0 {
+		return
+	}
+	ctx := context.Background()
+	pipe := st.rdb.Pipeline()
+	pipe.SRem(ctx, rediskeys.RankActiveServicesKey, stale...)
+	pipe.Expire(ctx, rediskeys.RankActiveServicesKey, commonrank.ColdDataTTL)
+	if _, err := pipe.Exec(ctx); err != nil {
+		zaplog.LoggerSugar.Warnf("rank engine: unregisterActive bizId=%s: %v", st.bizId, err)
+	}
 }
 
 // LoadActivityTimes 从 meta hash 读取活动的 openTime / closeTime / gameEndTime。
@@ -201,10 +422,16 @@ func (st *Store) RestoreNextGroupID(minID int32) {
 	if int32(curID) < minID {
 		st.rdb.HSet(key, "nextGroupID", strconv.FormatInt(int64(minID), 10))
 	}
+	// 无需写入的分支意味着 key 已存在，此时设 TTL 只是刷到同一个绝对时刻，不会缩短。
+	st.expireKey(key)
 }
 
 // RestoreSettled 将结算快照强制写入 Redis rank:settled 键（冷启动恢复用）。
 // 使 rankService.GetMemRank 在 Redis 恢复后能正确读取结算数据。
+//
+// 必须带 TTL（缺陷 4）：这里原本用裸 Set，是三个 rank:settled 写入方里唯一会留下永久 key 的。
+// 用 backfillTTL() 而非 SettledCacheTTL：这是"重设已有 key 生命周期"的路径，要带 14d 下限，
+// 否则恢复一个早已结束的活动时会把刚恢复的快照设成 1 分钟后过期。
 func (st *Store) RestoreSettled(instanceID string, snaps []commonrank.RankMemberSnapshot) {
 	if !st.available() || len(snaps) == 0 {
 		return
@@ -214,7 +441,7 @@ func (st *Store) RestoreSettled(instanceID string, snaps []commonrank.RankMember
 		zaplog.LoggerSugar.Warnf("rank engine: marshal settled for restore instanceID=%s: %v", instanceID, err)
 		return
 	}
-	_ = st.rdb.Set(rediskeys.GetRankSettledKey(instanceID), string(data))
+	_ = st.rdb.SetEX(rediskeys.GetRankSettledKey(instanceID), string(data), st.backfillTTL())
 }
 
 // --- 成员映射 ---
@@ -223,7 +450,9 @@ func (st *Store) SetMember(userID int64, groupID int32) error {
 	if !st.available() {
 		return nil
 	}
-	st.rdb.HSet(rediskeys.GetRankMembersKey(st.bizId), strconv.FormatInt(userID, 10), strconv.FormatInt(int64(groupID), 10))
+	key := rediskeys.GetRankMembersKey(st.bizId)
+	st.rdb.HSet(key, strconv.FormatInt(userID, 10), strconv.FormatInt(int64(groupID), 10))
+	st.expireKey(key)
 
 	if st.hasMongo() {
 		st.dao.SaveMember(st.bizId, userID, groupID)
@@ -255,7 +484,10 @@ func (st *Store) GetMember(userID int64) (int32, bool, error) {
 			return 0, false, err
 		}
 		if found {
-			st.rdb.HSet(rediskeys.GetRankMembersKey(st.bizId), uidStr, strconv.FormatInt(int64(gid), 10))
+			key := rediskeys.GetRankMembersKey(st.bizId)
+			st.backfill(key, func() {
+				st.rdb.HSet(key, uidStr, strconv.FormatInt(int64(gid), 10))
+			})
 			return gid, true, nil
 		}
 	}
@@ -298,9 +530,12 @@ func (st *Store) GetAllMembers() (map[int64]int32, error) {
 		st.setMongoChecked()
 		return nil, nil
 	}
-	for uid, gid := range members {
-		st.rdb.HSet(rediskeys.GetRankMembersKey(st.bizId), strconv.FormatInt(uid, 10), strconv.FormatInt(int64(gid), 10))
-	}
+	membersKey := rediskeys.GetRankMembersKey(st.bizId)
+	st.backfill(membersKey, func() {
+		for uid, gid := range members {
+			st.rdb.HSet(membersKey, strconv.FormatInt(uid, 10), strconv.FormatInt(int64(gid), 10))
+		}
+	})
 	return members, nil
 }
 
@@ -315,6 +550,7 @@ func (st *Store) SaveRobots(groupID int32, robots []*robotState) error {
 		data, _ := json.Marshal(r)
 		st.rdb.HSet(key, strconv.FormatInt(r.MemberID, 10), string(data))
 	}
+	st.expireKey(key)
 
 	if st.hasMongo() {
 		st.dao.SaveRobots(st.bizId, groupID, robots)
@@ -344,10 +580,12 @@ func (st *Store) LoadRobots(groupID int32) ([]*robotState, error) {
 		if err != nil {
 			return nil, err
 		}
-		for _, r := range robots {
-			data, _ := json.Marshal(r)
-			st.rdb.HSet(key, strconv.FormatInt(r.MemberID, 10), string(data))
-		}
+		st.backfill(key, func() {
+			for _, r := range robots {
+				data, _ := json.Marshal(r)
+				st.rdb.HSet(key, strconv.FormatInt(r.MemberID, 10), string(data))
+			}
+		})
 		return robots, nil
 	}
 	return nil, nil
@@ -362,6 +600,7 @@ func (st *Store) SaveUsedInfoIDs(groupID int32, ids map[int64]struct{}) error {
 		members = append(members, strconv.FormatInt(int64(id), 10))
 	}
 	st.rdb.SAdd(rediskeys.GetRankRobotInfosKey(st.bizId, groupID), members...)
+	st.expireKey(rediskeys.GetRankRobotInfosKey(st.bizId, groupID))
 	return nil
 }
 
@@ -388,10 +627,14 @@ func (st *Store) LoadUsedInfoIDs(groupID int32) (map[int64]struct{}, error) {
 // 轮次结束后热数据不立即清理，而是保留 2 周承接历史查询；到期后由 Redis 异步回收，避免大 key 阻塞。
 const settledDataRetentionTTL = commonrank.SettledCacheTTL
 
-// CleanupLiveData 为该轮次的 Redis 数据设置 2 周保留 TTL（meta/分组/成员/机器人/查询哨兵）。
-// 用于周期排行榜历史轮次的延迟清理（清理窗口 = 1 个周期，之后保留 2 周）。
-// 不删除 rank:settled（同样 2 周 TTL）和 MongoDB（永久保留）。
-func (st *Store) CleanupLiveData(groups []*Group) {
+// ExpireLiveData 为这批分组的活跃期 Redis 数据设置 TTL（meta/分组/成员/claim/查询哨兵 + 每分组
+// 机器人/机器人信息），与 CleanupLiveData 共用同一份 key 集合定义——TTL 值不同，key 集合必须相同，
+// 否则某条路径会漏掉一个 key，而漏掉的 key 就是永久 key。
+//
+// 调用方决定 TTL 语义：
+//   - 周期轮次的延迟清理用固定 settledDataRetentionTTL（见 CleanupLiveData 的说明）；
+//   - 结算（Settle）用 backfillTTLFor(settleAt)，让已结算分组的 key 与活动保留期对齐。
+func (st *Store) ExpireLiveData(groups []*Group, ttl time.Duration) {
 	if !st.available() {
 		return
 	}
@@ -400,18 +643,29 @@ func (st *Store) CleanupLiveData(groups []*Group) {
 			groups = loaded
 		}
 	}
-	st.rdb.Expire(rediskeys.GetRankMetaKey(st.bizId), settledDataRetentionTTL)
-	st.rdb.Expire(rediskeys.GetRankGroupsKey(st.bizId), settledDataRetentionTTL)
-	st.rdb.Expire(rediskeys.GetRankMembersKey(st.bizId), settledDataRetentionTTL)
-	st.rdb.Expire(rediskeys.GetRankClaimsKey(st.bizId), settledDataRetentionTTL)
-	st.rdb.Expire(rediskeys.GetRankMongoCheckedKey(st.bizId), settledDataRetentionTTL)
+	st.rdb.Expire(rediskeys.GetRankMetaKey(st.bizId), ttl)
+	st.rdb.Expire(rediskeys.GetRankGroupsKey(st.bizId), ttl)
+	st.rdb.Expire(rediskeys.GetRankMembersKey(st.bizId), ttl)
+	st.rdb.Expire(rediskeys.GetRankClaimsKey(st.bizId), ttl)
+	st.rdb.Expire(rediskeys.GetRankMongoCheckedKey(st.bizId), ttl)
 	for _, g := range groups {
 		if g == nil {
 			continue
 		}
-		st.rdb.Expire(rediskeys.GetRankRobotsKey(st.bizId, g.GroupID), settledDataRetentionTTL)
-		st.rdb.Expire(rediskeys.GetRankRobotInfosKey(st.bizId, g.GroupID), settledDataRetentionTTL)
+		st.rdb.Expire(rediskeys.GetRankRobotsKey(st.bizId, g.GroupID), ttl)
+		st.rdb.Expire(rediskeys.GetRankRobotInfosKey(st.bizId, g.GroupID), ttl)
 	}
+}
+
+// CleanupLiveData 为该轮次的 Redis 数据设置 2 周保留 TTL（meta/分组/成员/机器人/查询哨兵）。
+// 用于周期排行榜历史轮次的延迟清理（清理窗口 = 1 个周期，之后保留 2 周）。
+// 不删除 rank:settled（同样 2 周 TTL）和 MongoDB（永久保留）。
+//
+// 周期路径必须继续用固定的 2 周，不能改成按轮次关闭时刻算的绝对值：轮次清理发生在结算之后一个
+// 完整周期，改成 ttlFor(roundClose) 会让轮次数据的总保留期从「1 周期 + 2 周」缩到 2 周，
+// 是真实的功能退化。统一的是实现（ExpireLiveData），不是 TTL 值。
+func (st *Store) CleanupLiveData(groups []*Group) {
+	st.ExpireLiveData(groups, settledDataRetentionTTL)
 }
 
 func (st *Store) CleanupAll(groups []*Group) {
@@ -444,6 +698,7 @@ func (st *Store) CleanupAll(groups []*Group) {
 		st.rdb.Del(rediskeys.GetRankRobotsKey(st.bizId, g.GroupID))
 		st.rdb.Del(rediskeys.GetRankRobotInfosKey(st.bizId, g.GroupID))
 	}
+	st.unregisterActive()
 
 	// 同步 DeleteMany 清除调用时 MongoDB 中已存在的文档。
 	// 与 queueDeleteAllDocIDs 组合：前者覆盖写任务后写入的数据，后者覆盖当前已有数据。
@@ -577,6 +832,15 @@ func (st *Store) AtomicClaim(userID int64, now int64) (claimed bool, claimTime i
 		return true, ct, nil
 	}
 
+	// claimedInt==0 ⟺ Lua 脚本确实执行了 HSET（cur 为空或负缓存哨兵），即 key 刚被创建。
+	// 脚本本身不设过期，必须在这里补 TTL，否则 rank:claims 会成为永久 key（缺陷 3）。
+	// 只在这一处 Expire 即可覆盖下面全部三个写入分支：HSET 只改值、不会清除 key 上已有的 TTL
+	// （会清 TTL 的是不带 KEEPTTL 的 SET）。选 Go 侧 Expire 而非改 Lua，是为保持脚本 ARGV
+	// 契约不变，并让它能被 miniredis 断言。
+	if _, err := st.rdb.Expire(claimsKey, st.backfillTTL()); err != nil {
+		zaplog.LoggerSugar.Warnf("rank engine: claim expire bizId=%s: %v", st.bizId, err)
+	}
+
 	// Lua said first claim — verify against MongoDB to handle the Redis eviction case
 	// (Redis was flushed after a previous successful claim).
 	if st.hasMongo() {
@@ -640,9 +904,11 @@ func (st *Store) SetClaim(userID int64, claimTime int64) error {
 	if !st.available() {
 		return nil
 	}
-	st.rdb.HSet(rediskeys.GetRankClaimsKey(st.bizId),
+	key := rediskeys.GetRankClaimsKey(st.bizId)
+	st.rdb.HSet(key,
 		strconv.FormatInt(userID, 10),
 		strconv.FormatInt(claimTime, 10))
+	st.expireKey(key)
 
 	if st.hasMongo() {
 		st.dao.SaveClaim(st.bizId, userID, claimTime)
@@ -673,12 +939,19 @@ func (st *Store) GetClaim(userID int64) (int64, bool, error) {
 		if err != nil {
 			return 0, false, err
 		}
+		key := rediskeys.GetRankClaimsKey(st.bizId)
 		if found {
-			st.rdb.HSet(rediskeys.GetRankClaimsKey(st.bizId), uidStr, strconv.FormatInt(t, 10))
+			st.backfill(key, func() {
+				st.rdb.HSet(key, uidStr, strconv.FormatInt(t, 10))
+			})
 			return t, true, nil
 		}
-		// MongoDB 未找到：写入负向缓存，防止同一用户重复查 MongoDB
-		st.rdb.HSet(rediskeys.GetRankClaimsKey(st.bizId), uidStr, nullCacheEntry)
+		// MongoDB 未找到：写入负向缓存，防止同一用户重复查 MongoDB。
+		// 哨兵同样必须带 TTL——否则"Mongo 中没有该 claim"这个事实会永久驻留，
+		// 一旦之后真的产生了 claim（例如 Redis 被清空后从 Mongo 恢复），负缓存会一直压着它。
+		st.backfill(key, func() {
+			st.rdb.HSet(key, uidStr, nullCacheEntry)
+		})
 	}
 	return 0, false, nil
 }
@@ -729,15 +1002,20 @@ func (st *Store) LoadGroupSettled(groupID int32) ([]commonrank.RankMemberSnapsho
 }
 
 // LoadGroupSettledCached 读取指定分组结算快照：优先 Redis rank:settled，
-// miss 时从 MongoDB 加载并写回 Redis（2 周 TTL），避免历史查询反复打 Mongo。
+// miss 时从 MongoDB 加载并写回 Redis，避免历史查询反复打 Mongo。
 // instanceID 为对应分组实例 ID（rankCode:bizId:group_N），与 RestoreSettled 同 key。
+//
+// 两条路径都用 backfillTTL() 而不是固定的 SettledCacheTTL（缺陷 4）：它是 ttlFor 加上 14d 下限，
+// 因此 (a) 永远不会设出 0（不产生永久 key）、(b) 永远不短于 14d（不会提前删除历史数据）、
+// (c) 活动尚未结束时与活跃期数据用同一个绝对到期时刻（与写路径一致，幂等）。
+// 这里同时也是 rank:settled 丢失后的自愈点：Redis 被清掉后从 Mongo 重建。
 func (st *Store) LoadGroupSettledCached(instanceID string, groupID int32) ([]commonrank.RankMemberSnapshot, error) {
 	if st.available() {
 		key := rediskeys.GetRankSettledKey(instanceID)
 		if raw, err := st.rdb.Get(key); err == nil {
 			var snaps []commonrank.RankMemberSnapshot
 			if json.Unmarshal([]byte(raw), &snaps) == nil && len(snaps) > 0 {
-				_, _ = st.rdb.Expire(key, commonrank.SettledCacheTTL)
+				_, _ = st.rdb.Expire(key, st.backfillTTL())
 				return snaps, nil
 			}
 		} else if !st.rdb.IsNil(err) {
@@ -754,7 +1032,7 @@ func (st *Store) LoadGroupSettledCached(instanceID string, groupID int32) ([]com
 	if st.available() && len(snaps) > 0 {
 		key := rediskeys.GetRankSettledKey(instanceID)
 		if data, err := json.Marshal(snaps); err == nil {
-			_ = st.rdb.SetEX(key, string(data), commonrank.SettledCacheTTL)
+			_ = st.rdb.SetEX(key, string(data), st.backfillTTL())
 		}
 	}
 	return snaps, nil

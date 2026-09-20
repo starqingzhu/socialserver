@@ -1,6 +1,7 @@
 package rankservice
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	rediskeys "common/redis"
 	goredis "golib/redis"
+	"golib/zaplog"
 )
 
 type MemberIndex struct {
@@ -99,33 +101,43 @@ func (idx *MemberIndex) LookupByBizType(userID int64, bizType BizType) []MemberE
 	return result
 }
 
-func (idx *MemberIndex) RemoveByKey(key string) {
-	if idx.rdb != nil {
-		return
-	}
-	for userID, list := range idx.entries {
-		filtered := list[:0]
-		for _, e := range list {
-			if !(NewBizKey(e.BizType, e.ActID).String() == key) {
-				filtered = append(filtered, e)
-			}
-		}
-		if len(filtered) == 0 {
-			delete(idx.entries, userID)
-		} else {
-			idx.entries[userID] = filtered
-		}
-	}
-}
+// removeUserEntriesChunk 是 RemoveUserEntries 的 pipeline 分块大小。
+// 取 512：足够把往返次数压掉两个数量级，又不会让单次 pipeline 的命令数大到
+// 内存/网络包体积失控（每用户 key 不同，无法合并成一条 SRem，只能靠 pipeline 降往返）。
+const removeUserEntriesChunk = 512
 
 // RemoveUserEntries 从 Redis 中批量移除指定活动下所有成员的索引条目。
 // members 为 userID → groupID 映射，与 balloon.Service.GetAllMembers() 返回值对应。
+//
+// 每用户一个独立 key，因此无法合并成一条 SRem；改为按 removeUserEntriesChunk 分块走
+// pipeline，10 万成员从 10 万次往返降到约 200 次（待办 G-d2）。
+// 用 context.Background() 与 golib 包装方法内部一致：清理路径本就是 best-effort，
+// 不因调用方 ctx 取消而半途停下——分块之间停下来只会留下更难解释的中间态。
 func (idx *MemberIndex) RemoveUserEntries(bizType BizType, actID int32, members map[int64]int32) {
 	if idx.rdb == nil || len(members) == 0 {
 		return
 	}
+	ctx := context.Background()
+	pipe := idx.rdb.Pipeline()
+	pending := 0
+	flush := func() {
+		if pending == 0 {
+			return
+		}
+		if _, err := pipe.Exec(ctx); err != nil {
+			zaplog.LoggerSugar.Warnf("rank member index: remove %d entries bizType=%s actID=%d: %v",
+				pending, bizType, actID, err)
+		}
+		pipe = idx.rdb.Pipeline()
+		pending = 0
+	}
 	for userID, groupID := range members {
 		entry := encodeMemberEntry(MemberEntry{BizType: bizType, ActID: actID, GroupID: groupID})
-		idx.rdb.SRem(rediskeys.GetRankMemberIndexKey(userID), entry)
+		pipe.SRem(ctx, rediskeys.GetRankMemberIndexKey(userID), entry)
+		pending++
+		if pending >= removeUserEntriesChunk {
+			flush()
+		}
 	}
+	flush()
 }

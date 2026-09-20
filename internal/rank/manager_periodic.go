@@ -47,14 +47,8 @@ func (m *Manager) registerSubService(ctx context.Context, bizType BizType, logic
 	}
 	m.mu.RUnlock()
 
-	if err := m.rankService.RegisterRank(ctx, commonrank.Rank{
-		RankCode:       cfg.RankCode,
-		RankName:       fmt.Sprintf("%s_rank_%d", bizType, cfg.ActID),
-		ScoreOrder:     commonrank.ScoreOrderDesc,
-		TieBreakPolicy: commonrank.TieBreakPolicyFirstEnter,
-		CreateTime:     cfg.OpenTime,
-		UpdateTime:     cfg.OpenTime,
-	}); err != nil {
+	def := rankDefFor(bizType, cfg)
+	if err := m.rankService.RegisterRank(ctx, def); err != nil {
 		return nil, err
 	}
 
@@ -65,7 +59,8 @@ func (m *Manager) registerSubService(ctx context.Context, bizType BizType, logic
 			GroupID: groupID,
 		})
 	}
-	service, err := engine.NewService(m.rankService, cfg, m.rdb, m.dao, engine.WithOnMemberJoin(onMemberJoin))
+	service, err := engine.NewService(m.rankService, cfg, m.rdb, m.dao,
+		engine.WithOnMemberJoin(onMemberJoin), engine.WithRankDef(def))
 	if err != nil {
 		return nil, err
 	}
@@ -93,14 +88,8 @@ func (m *Manager) replaceSubService(ctx context.Context, bizType BizType, logica
 		cfg.CreateTime = time.Now().UnixMilli()
 	}
 
-	if err := m.rankService.RegisterRank(ctx, commonrank.Rank{
-		RankCode:       cfg.RankCode,
-		RankName:       fmt.Sprintf("%s_rank_%d", bizType, cfg.ActID),
-		ScoreOrder:     commonrank.ScoreOrderDesc,
-		TieBreakPolicy: commonrank.TieBreakPolicyFirstEnter,
-		CreateTime:     cfg.OpenTime,
-		UpdateTime:     cfg.OpenTime,
-	}); err != nil {
+	def := rankDefFor(bizType, cfg)
+	if err := m.rankService.RegisterRank(ctx, def); err != nil {
 		return nil, err
 	}
 
@@ -111,7 +100,8 @@ func (m *Manager) replaceSubService(ctx context.Context, bizType BizType, logica
 			GroupID: groupID,
 		})
 	}
-	service, err := engine.NewService(m.rankService, cfg, m.rdb, m.dao, engine.WithOnMemberJoin(onMemberJoin))
+	service, err := engine.NewService(m.rankService, cfg, m.rdb, m.dao,
+		engine.WithOnMemberJoin(onMemberJoin), engine.WithRankDef(def))
 	if err != nil {
 		return nil, err
 	}
@@ -249,14 +239,14 @@ func (m *Manager) ResolveEngineService(bizType BizType, actID int32, round int32
 // bizId 固定为 "{bizType}_{actID}"（无轮次后缀）。
 func (m *Manager) FallbackClaimReward(bizType BizType, actID int32, userID int64, now int64) (bool, int64, error) {
 	bizId := fmt.Sprintf("%s_%d", bizType, actID)
-	store := engine.NewStore(m.rdb, m.dao, bizId)
+	store := engine.NewStore(m.rdb, m.dao, bizId, nil)
 	return store.AtomicClaim(userID, now)
 }
 
 // FallbackGetClaimStatus 为一次性排行榜在服务不在内存时直接走 Store/DAO 路径查询领奖状态。
 func (m *Manager) FallbackGetClaimStatus(bizType BizType, actID int32, userID int64) (bool, int64, error) {
 	bizId := fmt.Sprintf("%s_%d", bizType, actID)
-	store := engine.NewStore(m.rdb, m.dao, bizId)
+	store := engine.NewStore(m.rdb, m.dao, bizId, nil)
 	ct, found, err := store.GetClaim(userID)
 	if err != nil {
 		return false, 0, err
