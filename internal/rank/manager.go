@@ -12,12 +12,12 @@ import (
 
 	commonrank "common/rank"
 	rediskeys "common/redis"
+	"golib/gpool"
 	goredis "golib/redis"
 	"golib/zaplog"
 	"socialserver/internal/rank/engine"
 	"socialserver/internal/rank/once"
 	"socialserver/internal/rank/periodic"
-	"socialserver/internal/taskpool"
 )
 
 const (
@@ -155,7 +155,7 @@ func (m *Manager) tickServices(ctx context.Context, now int64) {
 	for _, svc := range svcs {
 		s := svc
 		wg.Add(1)
-		if err := taskpool.Global.SubmitWaitTimeout(ctx, func() {
+		if err := gpool.Global.SubmitWaitTimeout(ctx, func() {
 			defer wg.Done()
 			if err := s.Tick(ctx, now); err != nil {
 				zaplog.LoggerSugar.Warnf("rank: tick service error: %v", err)
@@ -911,7 +911,7 @@ func (m *Manager) warmUpAllServices(ctx context.Context) {
 	for _, svc := range svcs {
 		s := svc
 		wg.Add(1)
-		if err := taskpool.Global.SubmitWait(ctx, func() {
+		if err := gpool.Global.SubmitWait(ctx, func() {
 			defer wg.Done()
 			s.WarmUp(ctx)
 		}); err != nil {
@@ -1087,7 +1087,7 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 							key, curIdx, doc.Periodic.CurrentRound)
 						localNewSvc := newSvc
 						// 单点 WarmUp 可丢弃：池满时由后续懒加载/下一轮 syncLoop 兜底。
-						if err := taskpool.Global.Submit(func() { localNewSvc.WarmUp(context.Background()) }); err != nil {
+						if err := gpool.Global.Submit(func() { localNewSvc.WarmUp(context.Background()) }); err != nil {
 							zaplog.LoggerSugar.Warnf("rank: syncFromMongo warmup submit failed key=%s: %v", key, err)
 						}
 					}

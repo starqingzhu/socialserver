@@ -7,9 +7,9 @@ import (
 	"time"
 
 	commonrank "common/rank"
+	"golib/gpool"
 	"socialserver/internal/rank/engine"
 	"socialserver/internal/rank/periodic"
-	"socialserver/internal/taskpool"
 )
 
 // fakeBizService is a minimal RankBizService for exercising tickServices'
@@ -35,16 +35,16 @@ func (f *fakeBizService) IsSettled() bool { return false }
 // (see engine/service.go ensureLoaded: "if s.loaded || !s.store.available() { return }").
 type fakeRankService struct{ commonrank.Service }
 
-// withTestPool installs a small taskpool.Global for the duration of the test
+// withTestPool installs a small gpool.Global for the duration of the test
 // (fewer workers than tasks), restoring whatever was there afterward.
 func withTestPool(t *testing.T, workers, queueLen int) {
 	t.Helper()
-	prev := taskpool.Global
-	pool := taskpool.New("test", workers, queueLen)
-	taskpool.Global = pool
+	prev := gpool.Global
+	pool := gpool.New("test", workers, queueLen)
+	gpool.Global = pool
 	t.Cleanup(func() {
 		_ = pool.Close(context.Background())
-		taskpool.Global = prev
+		gpool.Global = prev
 	})
 }
 
@@ -95,7 +95,7 @@ func TestTickServicesSkipsWhenPoolSaturatedPastTimeout(t *testing.T) {
 	// 用一个阻塞任务占满唯一的 worker，直到测试结束才释放。
 	blockCh := make(chan struct{})
 	defer close(blockCh)
-	if err := taskpool.Global.SubmitWait(context.Background(), func() { <-blockCh }); err != nil {
+	if err := gpool.Global.SubmitWait(context.Background(), func() { <-blockCh }); err != nil {
 		t.Fatalf("occupy sole worker: %v", err)
 	}
 

@@ -10,6 +10,7 @@ import (
 	"common/defines"
 	cetcd "common/etcd"
 	mongoTask "common/task/mongo"
+	"golib/gpool"
 	gohttp "golib/http"
 	mongodbmodule "golib/mongodb"
 	"golib/node"
@@ -23,7 +24,6 @@ import (
 	rankservice "socialserver/internal/rank"
 	hrouter "socialserver/internal/router/http"
 	rpcservice "socialserver/internal/router/rpc"
-	"socialserver/internal/taskpool"
 
 	"github.com/gin-gonic/gin"
 )
@@ -138,7 +138,7 @@ func (s *Server) OnInit() {
 	}
 	mongoTask.Init(mongodbmodule.Main.TakeSession(), config.Default.MongoCfg.Database)
 
-	taskpool.Global = taskpool.New("socialserver", 32, 4096)
+	gpool.Global = gpool.New("socialserver", 500, 5120)
 
 	if err := rankservice.InitGlobalManager(redis.Main, config.Default.MongoCfg.Database); err != nil {
 		zaplog.LoggerSugar.Fatalf("init rank manager failed: %v", err)
@@ -170,10 +170,10 @@ func (s *Server) OnClose() {
 	if manager := rankservice.GetGlobalManager(); manager != nil {
 		manager.Close()
 	}
-	if taskpool.Global != nil {
+	if gpool.Global != nil {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if e := taskpool.Global.Close(closeCtx); e != nil {
-			zaplog.LoggerSugar.Error("taskpool close err:", e)
+		if e := gpool.Global.Close(closeCtx); e != nil {
+			zaplog.LoggerSugar.Error("gpool close err:", e)
 		}
 		cancel()
 	}

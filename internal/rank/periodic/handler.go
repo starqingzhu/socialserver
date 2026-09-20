@@ -12,10 +12,10 @@ import (
 
 	commonrank "common/rank"
 	rediskeys "common/redis"
+	"golib/gpool"
 	goredis "golib/redis"
 	"golib/zaplog"
 	"socialserver/internal/rank/engine"
-	"socialserver/internal/taskpool"
 )
 
 // ServiceRegistrar 由 Manager 实现并注入给 Handler，用于注册新轮次子服务。
@@ -287,7 +287,7 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 	if newSvc := h.registry.GetEngineServiceByKey(logicalKey); newSvc != nil {
 		svc := newSvc
 		// 单点 WarmUp 可丢弃：池满时由后续懒加载兜底，替代原局部 warmupSem（改由全局池统一约束）。
-		if err := taskpool.Global.Submit(func() { svc.WarmUp(ctx) }); err != nil {
+		if err := gpool.Global.Submit(func() { svc.WarmUp(ctx) }); err != nil {
 			zaplog.LoggerSugar.Warnf("rank periodic: warmup submit failed logicalKey=%s: %v", logicalKey, err)
 		}
 	}
