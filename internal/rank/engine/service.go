@@ -1040,6 +1040,13 @@ func (s *Service) UpdateConfig(cfg Config) {
 	if cfg.GameEndTime > 0 {
 		s.config.GameEndTime = cfg.GameEndTime
 	}
+	// 刷新机器人配置（配置文件变更后当前轮即生效）
+	if len(cfg.RobotTiers) > 0 {
+		s.config.RobotTiers = cfg.RobotTiers
+	}
+	if len(cfg.RobotInfos) > 0 {
+		s.config.RobotInfos = cfg.RobotInfos
+	}
 	// 时间字段已被改写，同步 activityEnd 原子副本：Store 的 TTL 闭包读的就是它，
 	// 否则 GM 推后截止时间后，后续写入仍按旧的活动结束时刻算过期时间。
 	s.refreshActivityEndLocked()

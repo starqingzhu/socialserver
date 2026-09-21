@@ -139,6 +139,7 @@ func (m *Manager) syncLoop() {
 			m.syncFromMongo(ctx)
 			m.syncFromRedis(ctx)
 			m.warmUpAllServices(ctx)
+			m.refreshConfigFromFiles(ctx)
 		}
 	}
 }
@@ -929,6 +930,38 @@ func (m *Manager) warmUpAllServices(ctx context.Context) {
 	}
 	wg.Wait()
 	zaplog.LoggerSugar.Infof("rank: warmUpAllServices completed, services=%d", len(svcs))
+}
+
+// refreshConfigFromFiles 定期从配置文件刷新排行榜参数（RankPeopleNum/OpenToken/RobotTiers/RobotInfos等），
+// 使配置变更后当前轮次即生效。不影响OpenTime/CloseTime等运行时状态。
+func (m *Manager) refreshConfigFromFiles(ctx context.Context) {
+	m.mu.RLock()
+	svcs := make([]*engine.Service, 0, len(m.engineServices))
+	for _, svc := range m.engineServices {
+		svcs = append(svcs, svc)
+	}
+	m.mu.RUnlock()
+	if len(svcs) == 0 {
+		return
+	}
+	for _, svc := range svcs {
+		cfg := svc.GetConfig()
+		bizType := BizType(cfg.BizType)
+		if bizType == "" {
+			continue
+		}
+		newCfg := cfg
+		if err := FillConfigFromFiles(bizType, &newCfg); err != nil {
+			zaplog.LoggerSugar.Warnf("rank: refresh config from files failed bizType=%s: %v", bizType, err)
+			continue
+		}
+		// 只有当配置有变化时才更新，避免无意义的锁竞争
+		if newCfg.RankPeopleNum != cfg.RankPeopleNum || newCfg.OpenToken != cfg.OpenToken ||
+			len(newCfg.RobotTiers) != len(cfg.RobotTiers) || len(newCfg.RobotInfos) != len(cfg.RobotInfos) {
+			svc.UpdateConfig(newCfg)
+			zaplog.LoggerSugar.Infof("rank: config refreshed from files bizType=%s rankPeopleNum=%d openToken=%d", bizType, newCfg.RankPeopleNum, newCfg.OpenToken)
+		}
+	}
 }
 
 // subscribeDeleteEvents 订阅排行榜删除广播，收到消息后立即在本节点移除对应 Service。
