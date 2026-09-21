@@ -138,7 +138,7 @@ func (s *Server) OnInit() {
 	}
 	mongoTask.Init(mongodbmodule.Main.TakeSession(), config.Default.MongoCfg.Database)
 
-	gpool.Global = gpool.New("socialserver", 500, 5120)
+	gpool.Global = gpool.New("socialserver", 32, 5120)
 
 	if err := rankservice.InitGlobalManager(redis.Main, config.Default.MongoCfg.Database); err != nil {
 		zaplog.LoggerSugar.Fatalf("init rank manager failed: %v", err)
