@@ -104,7 +104,7 @@ func (s *Server) loadRedisConfig(cfg *yamlcfg.YamlCfg) error {
 	if len(config.Default.RedisCfg.RedisAddrs) == 0 {
 		return fmt.Errorf("no valid redis address after parsing")
 	}
-	zaplog.LoggerSugar.Infof("loadRedisConfig: loaded %d redis addresses", len(config.Default.RedisCfg.RedisAddrs))
+	zaplog.LoggerSugar.Infof("loadRedisConfig: loaded redis addresses %v", config.Default.RedisCfg.RedisAddrs)
 	return nil
 }
 
@@ -114,40 +114,51 @@ func (s *Server) loadMongoConfig(cfg *yamlcfg.YamlCfg) {
 }
 
 func (s *Server) OnInit() {
-	s.initServerNodeInfo()
 
-	cetcd.InitAndWatchServerType(false, defines.SocialServer.String())
+	// 加载config目录文件
+	if err := configmgr.LoadConfigs(config.Default.ConfigDir); err != nil {
+		zaplog.LoggerSugar.Fatalf("OnInit: load configs failed: %v", err)
+	}
+	// watch config目录下文件内容变化
+	if err := configmgr.Global.StartWatch(); err != nil {
+		zaplog.LoggerSugar.Warnf("OnInit: start config watcher failed: %v", err)
+	}
 
+	// redis初始化
 	redis.InitMainRedis(&config.Default.RedisCfg)
 	zaplog.LoggerSugar.Infof("OnInit: Redis initialized")
 
+	//mongodb初始化
 	if err := mongodbmodule.Init(&config.Default.MongoCfg); err != nil {
 		zaplog.LoggerSugar.Fatalf("OnInit: MongoDB init failed: %v", err)
 	}
 	zaplog.LoggerSugar.Infof("OnInit: MongoDB initialized")
 
-	if err := configmgr.LoadConfigs(config.Default.ConfigDir); err != nil {
-		zaplog.LoggerSugar.Fatalf("OnInit: load configs failed: %v", err)
-	}
-	if err := configmgr.Global.StartWatch(); err != nil {
-		zaplog.LoggerSugar.Warnf("OnInit: start config watcher failed: %v", err)
-	}
-
+	//队列初始化
 	if err := queue.InitQueues(); err != nil {
 		zaplog.LoggerSugar.Fatalf("OnInit: init queues failed: %v", err)
 	}
 	mongoTask.Init(mongodbmodule.Main.TakeSession(), config.Default.MongoCfg.Database)
 
-	gpool.Global = gpool.New("socialserver", 32, 5120)
-
+	// 协程池初始化
+	gpool.Global = gpool.New(defines.SocialServer.String(), 32, 5120)
 	if err := rankservice.InitGlobalManager(redis.Main, config.Default.MongoCfg.Database); err != nil {
 		zaplog.LoggerSugar.Fatalf("init rank manager failed: %v", err)
 	}
+
+	// 节点信息初始化+etcd注册
+	s.initServerNodeInfo()
+	cetcd.InitAndWatchServerType(false, defines.SocialServer.String())
+
+	// 接口注册
 	if err := handler.RegisterAll(dispatch.Main); err != nil {
 		zaplog.LoggerSugar.Fatalf("OnInit: register handlers failed: %v", err)
 	}
+
+	// rpc初始化
 	rpcservice.InitAllRPC()
 
+	// 初始化https
 	s.initHTTPServer()
 
 	cetcd.RefreshNodeStateInNormal()

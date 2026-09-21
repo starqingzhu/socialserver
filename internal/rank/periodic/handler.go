@@ -41,6 +41,10 @@ type Handler struct {
 	dao      *engine.DAO
 	registry ServiceRegistrar
 
+	// cycleProvider 提供动态读取配置文件的 cycleMinutes，用于支持配置变更后下一期生效。
+	// 返回 (cycleMinutes, ok)，ok=false 表示读取失败或配置不存在。
+	cycleProvider func(bizType string) (int32, bool)
+
 	// timers 追踪 advanceRound 中调度的延迟清理 timer，供 Clear() 优雅关闭时统一 Stop()，
 	// 防止 Server 关闭后 timer 到期仍对已关闭的 Redis 连接发 EXPIRE/DEL 命令
 	// （见 docs/rank_optimization.md 第 07 条）。
@@ -55,6 +59,11 @@ func NewHandler(rdb *goredis.Redis, dao *engine.DAO, registry ServiceRegistrar) 
 		dao:      dao,
 		registry: registry,
 	}
+}
+
+// SetCycleProvider 设置动态周期读取器，用于在轮次推进时检测配置变更。
+func (h *Handler) SetCycleProvider(fn func(bizType string) (int32, bool)) {
+	h.cycleProvider = fn
 }
 
 // GetState 线程安全地读取 PeriodicState。
@@ -199,13 +208,13 @@ func (h *Handler) TickAll(ctx context.Context, now int64) {
 	}
 }
 
-// advanceRound 结算当前轮，若活动未结束则注册下一轮。
+// advanceRound 结算当前轮，若活动未结束则推进到 now 所在轮（可能跨越多个被跳过的轮次）。
 // 使用 Redis SETNX 保证多节点只有一个节点执行推进。
 //
 // 修复说明：
 //   - BUG6: svc==nil 时提前 abort，避免用零值 Config 注册下一轮。
 //   - BUG2: Settle 失败时不调度 CleanupLiveData，保留热数据供下次重试。
-//   - BUG1: 先 RegisterRoundService 成功后再调用 advanceToNextRound()，
+//   - BUG1: 先 ReplaceRoundService 成功后再调用 advanceToRound()，
 //     注册失败时 state 保持不变，无脏状态。
 func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now int64) {
 	logicalKey := state.StateLogicalKey()
@@ -256,8 +265,28 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 		return
 	}
 
-	// BUG1: 先计算下一轮窗口，不修改 state
-	nextRound := currentRound + 1
+	// BUG1: 先计算目标轮窗口，不修改 state。
+	// 目标轮不是 currentRound+1，而是直接由 now 反推（见 nextAdvanceRound）：
+	// state 落后墙钟多轮时一跳到位，而不是每 tick 只走一轮。
+	nextRound := state.nextAdvanceRound(now)
+
+	// 动态更新 cycleMinutes：读取配置文件，如果不同则更新。
+	// 这样下一轮的 computeRoundWindow 会使用新值，而当前轮次不受影响。
+	if h.cycleProvider != nil {
+		if newCycle, ok := h.cycleProvider(state.BizType); ok && newCycle > 0 && newCycle != state.CycleMinutes {
+			oldCycle := state.CycleMinutes
+			state.CycleMinutes = newCycle
+			zaplog.LoggerSugar.Infof("rank periodic: cycleMinutes updated logicalKey=%s round=%d old=%d new=%d",
+				logicalKey, nextRound, oldCycle, newCycle)
+			// 持久化到 MongoDB，保证重启后仍使用新值
+			if h.dao != nil {
+				if err := h.dao.SavePeriodicState(logicalKey, state.ToSavedState()); err != nil {
+					zaplog.LoggerSugar.Warnf("rank periodic: save state after cycle update logicalKey=%s: %v", logicalKey, err)
+				}
+			}
+		}
+	}
+
 	nextOpen, nextClose := state.computeRoundWindow(nextRound)
 	if nextOpen >= state.TotalCloseTime {
 		zaplog.LoggerSugar.Infof("rank periodic: no more rounds logicalKey=%s", logicalKey)
@@ -279,7 +308,7 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 		return
 	}
 
-	state.advanceToNextRound()
+	state.advanceToRound(nextRound)
 
 	// 将新 currentRound 写入 Redis，使其他节点无需等待 syncFromMongo 即可读到最新轮次
 	h.setCurRoundInRedis(logicalKey, nextRound)
@@ -299,12 +328,12 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 		}
 	}
 
-	zaplog.LoggerSugar.Infof("rank periodic: advanced to round=%d logicalKey=%s [%d, %d)",
-		nextRound, logicalKey, nextOpen, nextClose)
+	zaplog.LoggerSugar.Infof("rank periodic: advanced to round=%d from=%d logicalKey=%s [%d, %d)",
+		nextRound, currentRound, logicalKey, nextOpen, nextClose)
 }
 
 // setSettledTTLForRound 对历史轮次的 Redis 结算快照键设置 TTL（2 周）。
-// round 参数为刚刚结算完成的轮次号，由调用方在 advanceToNextRound 前传入。
+// round 参数为刚刚结算完成的轮次号，由调用方在 advanceToRound 前传入。
 func (h *Handler) setSettledTTLForRound(svc *engine.Service, state *PeriodicState, round int32) {
 	if h.rdb == nil {
 		return

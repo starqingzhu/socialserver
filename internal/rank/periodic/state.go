@@ -164,19 +164,41 @@ func (p *PeriodicState) isActivityFinished(now int64) bool {
 	return now >= p.TotalCloseTime
 }
 
-// advanceToNextRound 推进到下一轮，更新 currentRound/RoundOpenTime/RoundCloseTime。
-// 若下一轮开始时间超出有效期则返回 false。
+// nextAdvanceRound 返回本轮过期后应推进到的目标轮次，而不是固定 currentRound+1。
+//
+// 轮次由墙钟时间唯一确定（computeRoundAt）：进程停机、tick 卡顿或时钟跳变后 state 可能
+// 落后任意多轮（如服务停跑 12 天、15 分钟一轮 ⇒ 落后 1100+ 轮）。固定 +1 时轮号会以 tick
+// 频率（1s）爬行十几分钟才追上墙钟，期间对外暴露的"当前轮"一直是早已结束的历史轮。
+// 跳过的轮次从未注册过服务、没有任何数据，无需补结算，直接定位到 now 所在轮即可。
+// 稳态下两者等价：本轮已过期（isRoundExpired）⇒ now 必落在下一轮或更后。
+//
+// 至少前进一轮是防御：computeRoundAt 会被 maxRound 截断，且恢复出来的历史 state 可能
+// 与 Total*/CycleMinutes 不自洽（如运行中改过周期），此时目标轮可能不大于当前轮。
+// 仅由 tick goroutine 调用。
+func (p *PeriodicState) nextAdvanceRound(now int64) int32 {
+	target := p.computeRoundAt(now)
+	if cur := p.GetCurrentRound(); target <= cur {
+		return cur + 1
+	}
+	return target
+}
+
+// advanceToRound 直接推进到指定轮次（可跨越多轮），更新 currentRound/RoundOpenTime/RoundCloseTime。
+// 目标轮不大于当前轮时返回 false：轮次只增不减，回退会重开已结算轮次的计分窗口。
+// 目标轮开始时间超出有效期时返回 false。
 // 仅由 tick goroutine 调用；先写时间窗口，再原子更新 currentRound，
 // 保证外部 goroutine 读到新 round 号时窗口已就绪。
-func (p *PeriodicState) advanceToNextRound() bool {
-	nextRound := p.GetCurrentRound() + 1
-	open, close := p.computeRoundWindow(nextRound)
+func (p *PeriodicState) advanceToRound(round int32) bool {
+	if round <= p.GetCurrentRound() {
+		return false
+	}
+	open, close := p.computeRoundWindow(round)
 	if open >= p.TotalCloseTime {
 		return false
 	}
 	p.RoundOpenTime = open
 	p.RoundCloseTime = close
-	p.setCurrentRound(nextRound)
+	p.setCurrentRound(round)
 	return true
 }
 

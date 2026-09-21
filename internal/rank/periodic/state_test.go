@@ -56,6 +56,73 @@ func TestMaxRound(t *testing.T) {
 	}
 }
 
+// TestNextAdvanceRoundJumpsToRoundAtNow 验证 state 落后墙钟多轮时一跳到位，
+// 而不是每 tick 只前进一轮（服务停跑 / tick 卡顿 / 时钟跳变场景）。
+func TestNextAdvanceRoundJumpsToRoundAtNow(t *testing.T) {
+	const cycleMin int32 = 15
+	cycleMs := int64(cycleMin) * 60 * 1000
+	// 活动开始后已过 294 轮，但 state 停在 79 轮（Epoch 落后 ~12 天）。
+	open := int64(1788855360000)
+	state := &PeriodicState{
+		BizType:        "camper_competition",
+		ActID:          1210,
+		CycleMinutes:   cycleMin,
+		TotalOpenTime:  open,
+		TotalCloseTime: open + 30*24*60*60*1000,
+	}
+	state.setCurrentRound(79)
+	state.RoundOpenTime, state.RoundCloseTime = state.computeRoundWindow(79)
+
+	now := open + 293*cycleMs + 1000 // 落在第 294 轮开头
+	if got := state.nextAdvanceRound(now); got != 294 {
+		t.Fatalf("nextAdvanceRound = %d, want 294（应直接跳到 now 所在轮，而不是 80）", got)
+	}
+
+	if !state.advanceToRound(294) {
+		t.Fatal("advanceToRound(294) = false, want true")
+	}
+	if r := state.GetCurrentRound(); r != 294 {
+		t.Fatalf("currentRound = %d, want 294", r)
+	}
+	wantOpen, wantClose := state.computeRoundWindow(294)
+	if state.RoundOpenTime != wantOpen || state.RoundCloseTime != wantClose {
+		t.Fatalf("window mismatch: got [%d,%d], want [%d,%d]",
+			state.RoundOpenTime, state.RoundCloseTime, wantOpen, wantClose)
+	}
+}
+
+// TestNextAdvanceRoundMonotonic 验证目标轮可能不大于当前轮（maxRound 截断 / 历史 state
+// 与周期配置不自洽）时仍至少前进一轮，避免原地打转或回退重开已结算轮。
+func TestNextAdvanceRoundMonotonic(t *testing.T) {
+	// 活动已结束：computeRoundAt 截断到 maxRound=4，而 state 已被一个更长的旧周期推到 9。
+	p := &PeriodicState{
+		CycleMinutes:   5,
+		TotalOpenTime:  0,
+		TotalCloseTime: 1_000_000,
+	}
+	p.setCurrentRound(9)
+	if got := p.nextAdvanceRound(5_000_000); got != 10 {
+		t.Fatalf("nextAdvanceRound = %d, want 10（目标轮被截断时仍须 > 当前轮）", got)
+	}
+	// 轮次只增不减：回退会重开已结算轮次的计分窗口。
+	if p.advanceToRound(4) {
+		t.Fatal("advanceToRound(4) = true, want false（不允许轮次回退）")
+	}
+	if r := p.GetCurrentRound(); r != 9 {
+		t.Fatalf("currentRound = %d, want 9（回退被拒绝后 state 不得改变）", r)
+	}
+
+	// 目标轮开始时间超出有效期（open(5)=1200000 >= TotalCloseTime=1000000）时拒绝推进。
+	p2 := &PeriodicState{CycleMinutes: 5, TotalOpenTime: 0, TotalCloseTime: 1_000_000}
+	p2.setCurrentRound(1)
+	if p2.advanceToRound(5) {
+		t.Fatal("advanceToRound(5) = true, want false（超出有效期）")
+	}
+	if r := p2.GetCurrentRound(); r != 1 {
+		t.Fatalf("currentRound = %d, want 1（拒绝推进后 state 不得改变）", r)
+	}
+}
+
 func TestNewPeriodicStatePositionsToCurrentRound(t *testing.T) {
 	const cycleMin int32 = 10
 	now := time.Now().UnixMilli()

@@ -490,7 +490,13 @@ func handleGetRankConfig(_ context.Context, _ libdispatch.Meta, req *pb.PBS2SGet
 	if manager != nil {
 		if state := manager.GetPeriodicState(rankservice.BizType(req.BizType), req.ActId); state != nil {
 			rankType = pb.RankType_RANK_TYPE_PERIODIC
-			cycleMinutes = state.CycleMinutes
+			// 优先从配置读取最新的 cycleMinutes，解决配置变更后持久化状态未更新的问题
+			_, cm, _ := rankservice.LoadRankTypeAndCycle(rankservice.BizType(req.BizType))
+			if cm > 0 {
+				cycleMinutes = cm
+			} else {
+				cycleMinutes = state.CycleMinutes
+			}
 			currentRound = state.GetCurrentRound()
 		}
 	}
@@ -585,7 +591,13 @@ func handleListRankConfigs(_ context.Context, _ libdispatch.Meta, req *pb.PBS2SL
 		createTime := info.CreateTime
 		if state := manager.GetPeriodicState(info.BizType, info.ActID); state != nil {
 			rankType = pb.RankType_RANK_TYPE_PERIODIC
-			cycleMinutes = state.CycleMinutes
+			// 优先从配置读取最新的 cycleMinutes，解决配置变更后持久化状态未更新的问题
+			_, cm, _ := rankservice.LoadRankTypeAndCycle(info.BizType)
+			if cm > 0 {
+				cycleMinutes = cm
+			} else {
+				cycleMinutes = state.CycleMinutes
+			}
 			currentRound = state.GetCurrentRound()
 			openTime = state.RoundOpenTime
 			closeTime = state.RoundCloseTime

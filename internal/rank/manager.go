@@ -68,6 +68,14 @@ func InitGlobalManager(rdb *goredis.Redis, dbName string) error {
 	// loadMembersWithDef 直接调 GetRank）会零 IO 重建，进程外的装饰器拦不住这条热路径（缺陷 1）。
 	rs.SetRankDefProvider(manager.rankDefFromMemory)
 	manager.periodicHandler = periodic.NewHandler(rdb, dao, manager)
+	// 注入动态周期读取器：配置文件变更后，下一期自动生效
+	manager.periodicHandler.SetCycleProvider(func(bizType string) (int32, bool) {
+		_, cm, err := LoadRankTypeAndCycle(BizType(bizType))
+		if err != nil {
+			return 0, false
+		}
+		return cm, true
+	})
 	if dao != nil {
 		dao.EnsureIndexes()
 		manager.syncFromMongo(context.Background())
