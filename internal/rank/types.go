@@ -20,8 +20,9 @@ type RoundInfo = periodic.RoundInfo
 // 支持的业务类型由 RankBase.json 配置文件动态定义，无需在代码中硬编码。
 type BizType string
 
-// BizKey 唯一标识一个业务排行榜服务实例（业务类型 + 活动ID）。
+// BizKey 唯一标识一个业务排行榜服务实例（游戏ID + 业务类型 + 活动ID）。
 type BizKey struct {
+	GameID  int32
 	BizType BizType
 	ActID   int32
 }
@@ -30,8 +31,34 @@ func NewBizKey(bizType BizType, actID int32) BizKey {
 	return BizKey{BizType: bizType, ActID: actID}
 }
 
+// NewGameBizKey 创建带 gameId 的业务排行榜标识，用于多游戏平台隔离。
+func NewGameBizKey(gameID int32, bizType BizType, actID int32) BizKey {
+	return BizKey{GameID: gameID, BizType: bizType, ActID: actID}
+}
+
 func (k BizKey) String() string {
-	return fmt.Sprintf("%s:%d", k.BizType, k.ActID)
+	if k.GameID == 0 {
+		return fmt.Sprintf("%s:%d", k.BizType, k.ActID)
+	}
+	return fmt.Sprintf("g%d_%s:%d", k.GameID, k.BizType, k.ActID)
+}
+
+// RankCode 生成榜单定义的唯一标识（rank:def 的 Redis Key 组成部分）。
+// 多游戏场景下自动内嵌 gameId，实现 Redis 数据隔离。
+func (k BizKey) RankCode() string {
+	if k.GameID == 0 {
+		return fmt.Sprintf("%s_score_%d", k.BizType, k.ActID)
+	}
+	return fmt.Sprintf("g%d_%s_score_%d", k.GameID, k.BizType, k.ActID)
+}
+
+// BizId 生成业务分组 ID（engine.Store 的 Redis Key 前缀组成部分）。
+// 多游戏场景下自动内嵌 gameId，实现 Redis 数据隔离。
+func (k BizKey) BizId() string {
+	if k.GameID == 0 {
+		return fmt.Sprintf("%s_%d", k.BizType, k.ActID)
+	}
+	return fmt.Sprintf("g%d_%s_%d", k.GameID, k.BizType, k.ActID)
 }
 
 // MemberEntry 记录一个用户在某个排行榜分组中的参与信息。

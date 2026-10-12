@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 
+	"common/rpc"
 	libdispatch "golib/dispatch"
 	"golib/zaplog"
 	pb "pbcommon/gen/ss/msg"
@@ -50,7 +51,10 @@ func grpcDispatch[Req, Resp proto.Message](ctx context.Context, cmd string, req 
 	if err != nil {
 		return zero, grpcstatus.Error(codes.Internal, err.Error())
 	}
-	meta := libdispatch.Meta{Protocol: libdispatch.ProtocolGRPC}
+	meta := libdispatch.Meta{
+		Protocol: libdispatch.ProtocolGRPC,
+		GameId:   rpc.GameIdFromContext(ctx).Int32(),
+	}
 	respBytes, dispatchErr := dispatch.Main.Dispatch(ctx, meta, cmd, payload)
 	if dispatchErr != nil {
 		return zero, dispatchToGRPCErr(dispatchErr)

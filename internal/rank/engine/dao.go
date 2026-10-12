@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"strconv"
 
 	commonrank "common/rank"
 	mongoTask "common/task/mongo"
@@ -19,20 +20,54 @@ import (
 // 批量删除（DeleteAllByBizId）因需要 DeleteMany 语义，暂通过 session 同步执行（队列目前仅支持 DeleteOne）。
 // 读操作保持同步。队列生命周期由外部通过 queue.InitQueues() / queue.Shutdown() 管理。
 type DAO struct {
-	dbName string
+	defaultDB  string
+	dbResolver func(gameId int32) string
 }
 
 func NewDAO(dbName string) *DAO {
 	if dbName == "" {
 		return nil
 	}
-	return &DAO{dbName: dbName}
+	return &DAO{defaultDB: dbName}
 }
 
-func (d *DAO) available() bool { return d != nil && d.dbName != "" }
+func (d *DAO) SetDBResolver(resolver func(gameId int32) string) {
+	d.dbResolver = resolver
+}
+
+func (d *DAO) available() bool { return d != nil && d.defaultDB != "" }
 
 func (d *DAO) session() *mongodbmodule.Session {
 	return mongodbmodule.Main.TakeSession()
+}
+
+// parseGameIdFromBizId 从 bizId 中解析 gameId。
+// bizId 格式: "{bizType}_{actID}" 或 "g{gameId}_{bizType}_{actID}"（可带 _r{round} 后缀）。
+func parseGameIdFromBizId(bizId string) int32 {
+	if len(bizId) < 2 || bizId[0] != 'g' {
+		return 0
+	}
+	i := 1
+	for i < len(bizId) && bizId[i] >= '0' && bizId[i] <= '9' {
+		i++
+	}
+	if i == 1 || i >= len(bizId) || bizId[i] != '_' {
+		return 0
+	}
+	gameId, _ := strconv.ParseInt(bizId[1:i], 10, 32)
+	return int32(gameId)
+}
+
+// dbName 返回指定 bizId 对应的数据库名。
+// 优先使用 dbResolver 按 gameId 路由；未配置时回退到 defaultDB。
+func (d *DAO) dbName(bizId string) string {
+	if d.dbResolver != nil {
+		gameId := parseGameIdFromBizId(bizId)
+		if db := d.dbResolver(gameId); db != "" {
+			return db
+		}
+	}
+	return d.defaultDB
 }
 
 // --- 活动注册表 ---
@@ -114,7 +149,7 @@ func (d *DAO) LoadAllRankConfigs() ([]RankConfigDoc, error) {
 	if !d.available() {
 		return nil, nil
 	}
-	cursor, err := d.session().Find(d.dbName, commonrank.CT_RANK_CONFIG, bson.M{})
+	cursor, err := d.session().Find(d.defaultDB, commonrank.CT_RANK_CONFIG, bson.M{})
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +169,7 @@ func (d *DAO) LoadRankConfig(bizKey string) (RankConfigDoc, bool, error) {
 		return RankConfigDoc{}, false, nil
 	}
 	var doc RankConfigDoc
-	err := d.session().FindOne(d.dbName, commonrank.CT_RANK_CONFIG,
+	err := d.session().FindOne(d.dbName(bizKey), commonrank.CT_RANK_CONFIG,
 		bson.M{"_id": bizKey}, &doc)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
@@ -195,7 +230,7 @@ func (d *DAO) LoadGroups(bizId string) ([]*Group, error) {
 	if !d.available() {
 		return nil, nil
 	}
-	cursor, err := d.session().Find(d.dbName, commonrank.CT_RANK_GROUP, bson.M{"bizId": bizId})
+	cursor, err := d.session().Find(d.dbName(bizId), commonrank.CT_RANK_GROUP, bson.M{"bizId": bizId})
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +284,7 @@ func (d *DAO) GetMember(bizId string, userID int64) (int32, bool, error) {
 		return 0, false, nil
 	}
 	var doc MemberDoc
-	err := d.session().FindOne(d.dbName, commonrank.CT_RANK_MEMBER,
+	err := d.session().FindOne(d.dbName(bizId), commonrank.CT_RANK_MEMBER,
 		bson.M{"_id": memberDocID(bizId, userID)}, &doc)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
@@ -264,7 +299,7 @@ func (d *DAO) LoadAllMembers(bizId string) (map[int64]int32, error) {
 	if !d.available() {
 		return nil, nil
 	}
-	cursor, err := d.session().Find(d.dbName, commonrank.CT_RANK_MEMBER, bson.M{"bizId": bizId})
+	cursor, err := d.session().Find(d.dbName(bizId), commonrank.CT_RANK_MEMBER, bson.M{"bizId": bizId})
 	if err != nil {
 		return nil, err
 	}
@@ -320,7 +355,7 @@ func (d *DAO) LoadRobots(bizId string, groupID int32) ([]*robotState, error) {
 	if !d.available() {
 		return nil, nil
 	}
-	cursor, err := d.session().Find(d.dbName, commonrank.CT_RANK_ROBOT,
+	cursor, err := d.session().Find(d.dbName(bizId), commonrank.CT_RANK_ROBOT,
 		bson.M{"bizId": bizId, "groupId": groupID})
 	if err != nil {
 		return nil, err
@@ -350,7 +385,7 @@ func (d *DAO) EnsureIndexes() {
 
 	// 清理旧版本遗留的错误唯一索引（这些集合文档无 userId 字段，唯一索引导致第二条插入失败）。
 	for _, coll := range []string{commonrank.CT_RANK_GROUP, commonrank.CT_RANK_INST} {
-		_, _ = session.Database(d.dbName).Collection(coll).Indexes().DropOne(ctx, "idx_userId_unique")
+		_, _ = session.Database(d.defaultDB).Collection(coll).Indexes().DropOne(ctx, "idx_userId_unique")
 	}
 
 	indexes := map[string][]mongo.IndexModel{
@@ -379,7 +414,7 @@ func (d *DAO) EnsureIndexes() {
 		},
 	}
 	for coll, idxs := range indexes {
-		if _, err := session.Database(d.dbName).Collection(coll).Indexes().CreateMany(ctx, idxs); err != nil {
+		if _, err := session.Database(d.defaultDB).Collection(coll).Indexes().CreateMany(ctx, idxs); err != nil {
 			zaplog.LoggerSugar.Warnf("rank engine: create indexes for %s: %v", coll, err)
 		}
 	}
@@ -407,7 +442,7 @@ func (d *DAO) SaveClaimIfNotExists(bizId string, userID int64, claimTime int64) 
 		return true, claimTime, nil
 	}
 	docID := claimDocID(bizId, userID)
-	result, upsertErr := d.session().UpsertOne(d.dbName, commonrank.CT_RANK_CLAIM,
+	result, upsertErr := d.session().UpsertOne(d.dbName(bizId), commonrank.CT_RANK_CLAIM,
 		bson.M{"_id": docID},
 		bson.M{"$setOnInsert": bson.M{
 			"_id":       docID,
@@ -456,7 +491,7 @@ func (d *DAO) GetClaim(bizId string, userID int64) (int64, bool, error) {
 		return 0, false, nil
 	}
 	var doc ClaimDoc
-	err := d.session().FindOne(d.dbName, commonrank.CT_RANK_CLAIM,
+	err := d.session().FindOne(d.dbName(bizId), commonrank.CT_RANK_CLAIM,
 		bson.M{"_id": claimDocID(bizId, userID)}, &doc)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
@@ -531,7 +566,7 @@ func (d *DAO) LoadGroupScores(bizId string, groupID int32) ([]ScoreDoc, error) {
 	if !d.available() {
 		return nil, nil
 	}
-	cursor, err := d.session().Find(d.dbName, commonrank.CT_RANK_SCORE,
+	cursor, err := d.session().Find(d.dbName(bizId), commonrank.CT_RANK_SCORE,
 		bson.M{"bizId": bizId, "groupId": groupID})
 	if err != nil {
 		return nil, err
@@ -584,7 +619,7 @@ func (d *DAO) LoadGroupSettled(bizId string, groupID int32) ([]commonrank.RankMe
 		return nil, nil
 	}
 	var doc SettledDoc
-	err := d.session().FindOne(d.dbName, commonrank.CT_RANK_SETTLED,
+	err := d.session().FindOne(d.dbName(bizId), commonrank.CT_RANK_SETTLED,
 		bson.M{"_id": settledDocID(bizId, groupID)}, &doc)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
@@ -601,7 +636,7 @@ func (d *DAO) LoadAllSettledByBizId(bizId string) (map[int32][]commonrank.RankMe
 	if !d.available() {
 		return nil, nil
 	}
-	cursor, err := d.session().Find(d.dbName, commonrank.CT_RANK_SETTLED, bson.M{"bizId": bizId})
+	cursor, err := d.session().Find(d.dbName(bizId), commonrank.CT_RANK_SETTLED, bson.M{"bizId": bizId})
 	if err != nil {
 		return nil, err
 	}
@@ -657,7 +692,7 @@ func (d *DAO) LoadGroupInst(bizId string, groupID int32) (*commonrank.RankInstan
 		return nil, nil
 	}
 	var doc RankInstDoc
-	err := d.session().FindOne(d.dbName, commonrank.CT_RANK_INST,
+	err := d.session().FindOne(d.dbName(bizId), commonrank.CT_RANK_INST,
 		bson.M{"_id": rankInstDocID(bizId, groupID)}, &doc)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
@@ -686,7 +721,7 @@ func (d *DAO) DeleteAllByBizId(bizId string) error {
 	}
 	session := d.session()
 	for _, coll := range colls {
-		if _, err := session.DeleteMany(d.dbName, coll, filter); err != nil {
+		if _, err := session.DeleteMany(d.dbName(bizId), coll, filter); err != nil {
 			zaplog.LoggerSugar.Errorf("rank engine dao: DeleteAllByBizId %s bizId=%s: %v", coll, bizId, err)
 		}
 	}

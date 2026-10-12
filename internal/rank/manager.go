@@ -240,12 +240,17 @@ func (m *Manager) snapshotServices() []*engine.Service {
 	return svcs
 }
 
-func (m *Manager) registerEngine(ctx context.Context, bizType BizType, cfg engine.Config) (*engine.Service, error) {
+func (m *Manager) registerEngine(ctx context.Context, gameId int32, bizType BizType, cfg engine.Config) (*engine.Service, error) {
+	cfg.GameID = gameId
 	if cfg.RankCode == "" {
-		cfg.RankCode = fmt.Sprintf("%s_score_%d", bizType, cfg.ActID)
+		if gameId != 0 {
+			cfg.RankCode = fmt.Sprintf("g%d_%s_score_%d", gameId, bizType, cfg.ActID)
+		} else {
+			cfg.RankCode = fmt.Sprintf("%s_score_%d", bizType, cfg.ActID)
+		}
 	}
 
-	key := NewBizKey(bizType, cfg.ActID).String()
+	key := NewGameBizKey(gameId, bizType, cfg.ActID).String()
 
 	// 快速路径：已存在则直接返回，不进任何 IO。
 	m.mu.RLock()
@@ -264,7 +269,7 @@ func (m *Manager) registerEngine(ctx context.Context, bizType BizType, cfg engin
 	}
 
 	onMemberJoin := func(userID int64, groupID int32) {
-		m.memberIndex.Track(userID, MemberEntry{
+		m.memberIndex.Track(cfg.GameID, userID, MemberEntry{
 			BizType: bizType,
 			ActID:   cfg.ActID,
 			GroupID: groupID,
@@ -301,27 +306,27 @@ func (m *Manager) registerEngine(ctx context.Context, bizType BizType, cfg engin
 }
 
 // GetService 返回指定业务类型和活动ID的通用服务接口。
-func (m *Manager) GetService(bizType BizType, actID int32) RankBizService {
+func (m *Manager) GetService(gameId int32, bizType BizType, actID int32) RankBizService {
 	if m == nil {
 		return nil
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.services[NewBizKey(bizType, actID).String()]
+	return m.services[NewGameBizKey(gameId, bizType, actID).String()]
 }
 
 // GetEngineService 返回底层引擎服务，供 handler 直接调用排行榜操作。
-func (m *Manager) GetEngineService(bizType BizType, actID int32) *engine.Service {
+func (m *Manager) GetEngineService(gameId int32, bizType BizType, actID int32) *engine.Service {
 	if m == nil {
 		return nil
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.engineServices[NewBizKey(bizType, actID).String()]
+	return m.engineServices[NewGameBizKey(gameId, bizType, actID).String()]
 }
 
 // Register 按业务类型注册排行榜服务，自动从配置文件加载参数。
-func (m *Manager) Register(ctx context.Context, bizType BizType, cfg engine.Config) error {
+func (m *Manager) Register(ctx context.Context, gameId int32, bizType BizType, cfg engine.Config) error {
 	if err := ValidateBizType(bizType); err != nil {
 		return err
 	}
@@ -335,7 +340,7 @@ func (m *Manager) Register(ctx context.Context, bizType BizType, cfg engine.Conf
 		return err
 	}
 
-	key := NewBizKey(bizType, cfg.ActID).String()
+	key := NewGameBizKey(gameId, bizType, cfg.ActID).String()
 
 	if rankType == RankTypePeriodic {
 		if err := m.periodicHandler.Register(ctx, string(bizType), key, cfg, cycleMinutes); err != nil {
@@ -350,7 +355,7 @@ func (m *Manager) Register(ctx context.Context, bizType BizType, cfg engine.Conf
 		return nil
 	}
 
-	_, err = m.registerEngine(ctx, bizType, cfg)
+	_, err = m.registerEngine(ctx, gameId, bizType, cfg)
 	if err != nil {
 		return err
 	}
@@ -359,11 +364,11 @@ func (m *Manager) Register(ctx context.Context, bizType BizType, cfg engine.Conf
 }
 
 // UpdateService 按业务类型更新排行榜配置。
-func (m *Manager) UpdateService(bizType BizType, actID int32, cfg engine.Config) error {
+func (m *Manager) UpdateService(gameId int32, bizType BizType, actID int32, cfg engine.Config) error {
 	if m == nil {
 		return fmt.Errorf("rank manager is nil")
 	}
-	key := NewBizKey(bizType, actID).String()
+	key := NewGameBizKey(gameId, bizType, actID).String()
 	m.mu.RLock()
 	svc, ok := m.engineServices[key]
 	m.mu.RUnlock()
@@ -383,11 +388,11 @@ func (m *Manager) UpdateService(bizType BizType, actID int32, cfg engine.Config)
 }
 
 // RemoveService 按业务类型移除排行榜服务并清理所有相关持久化数据。
-func (m *Manager) RemoveService(bizType BizType, actID int32) error {
+func (m *Manager) RemoveService(gameId int32, bizType BizType, actID int32) error {
 	if m == nil {
 		return fmt.Errorf("rank manager is nil")
 	}
-	key := NewBizKey(bizType, actID).String()
+	key := NewGameBizKey(gameId, bizType, actID).String()
 
 	m.mu.Lock()
 	svc, ok := m.engineServices[key]
@@ -402,7 +407,7 @@ func (m *Manager) RemoveService(bizType BizType, actID int32) error {
 	if ok {
 		m.cleanupServiceData(svc, bizType, actID)
 	} else {
-		m.forceCleanupOrphan(context.Background(), bizType, actID)
+		m.forceCleanupOrphan(context.Background(), gameId, bizType, actID)
 	}
 
 	if m.dao != nil {
@@ -421,24 +426,31 @@ func (m *Manager) RemoveService(bizType BizType, actID int32) error {
 // 顺序不可调换：RemoveUserEntries 依赖 rank:members 仍存在，必须先于 svc.Cleanup()
 // （其内部 CleanupAll 会 Del 掉 rank:members），否则索引清理静默失效。
 func (m *Manager) cleanupServiceData(svc *engine.Service, bizType BizType, actID int32) {
+	gameId := svc.GetConfig().GameID
 	switch members, err := svc.GetAllMembers(); {
 	case err != nil:
 		zaplog.LoggerSugar.Warnf("rank: get members for index cleanup bizType=%s actID=%d: %v (索引由 7 天 TTL 兜底)", bizType, actID, err)
 	case len(members) > 0:
-		m.memberIndex.RemoveUserEntries(bizType, actID, members)
+		m.memberIndex.RemoveUserEntries(gameId, bizType, actID, members)
 	}
 	svc.Cleanup()
 }
 
 // forceCleanupOrphan 清理不在内存中的排行榜服务的所有持久化数据（Redis + MongoDB）。
-func (m *Manager) forceCleanupOrphan(ctx context.Context, bizType BizType, actID int32) {
-	bizId := fmt.Sprintf("%s_%d", bizType, actID)
-	rankCode := fmt.Sprintf("%s_score_%d", bizType, actID)
+func (m *Manager) forceCleanupOrphan(ctx context.Context, gameId int32, bizType BizType, actID int32) {
+	var bizId, rankCode string
+	if gameId != 0 {
+		bizId = fmt.Sprintf("g%d_%s_%d", gameId, bizType, actID)
+		rankCode = fmt.Sprintf("g%d_%s_score_%d", gameId, bizType, actID)
+	} else {
+		bizId = fmt.Sprintf("%s_%d", bizType, actID)
+		rankCode = fmt.Sprintf("%s_score_%d", bizType, actID)
+	}
 
 	store := engine.NewStore(m.rdb, m.dao, bizId, nil)
 
 	if members, err := store.GetAllMembers(); err == nil && len(members) > 0 {
-		m.memberIndex.RemoveUserEntries(bizType, actID, members)
+		m.memberIndex.RemoveUserEntries(gameId, bizType, actID, members)
 	}
 
 	groups, _ := store.LoadGroups()
@@ -470,10 +482,11 @@ type ServiceInfo struct {
 }
 
 // ListServices 返回已注册的排行榜服务摘要，可按 bizType 过滤（空=全部）。
+// gameId=0 时返回所有游戏的服务（backward compatible）；非零时只返回指定游戏的服务。
 //
 // 遍历必须在锁外（待办 C）：IsSettled/GroupCount/MemberCount 各自带 IO
 // （GroupCount/MemberCount 会走 Redis），持锁调用会让注册表整体被一个慢节点堵住。
-func (m *Manager) ListServices(filterBizType BizType) []ServiceInfo {
+func (m *Manager) ListServices(gameId int32, filterBizType BizType) []ServiceInfo {
 	if m == nil {
 		return nil
 	}
@@ -484,6 +497,9 @@ func (m *Manager) ListServices(filterBizType BizType) []ServiceInfo {
 			continue
 		}
 		cfg := svc.GetConfig()
+		if gameId != 0 && cfg.GameID != 0 && cfg.GameID != gameId {
+			continue
+		}
 		bizType := BizType(cfg.BizType)
 		if filterBizType != "" && bizType != filterBizType {
 			continue
@@ -501,21 +517,23 @@ func (m *Manager) ListServices(filterBizType BizType) []ServiceInfo {
 	return result
 }
 
-// GetMemberEntries 返回用户参与的所有排行榜记录。
+// GetMemberEntries 返回用户在指定游戏参与的所有排行榜记录。
+// gameId=0 表示查询所有游戏（GM 接口兼容）。
 // Redis 索引键带 TTL，过期后首次查询会从内存中的 engine service 重建。
-func (m *Manager) GetMemberEntries(userID int64) []MemberEntry {
+func (m *Manager) GetMemberEntries(gameId int32, userID int64) []MemberEntry {
 	if m == nil {
 		return nil
 	}
-	if entries := m.memberIndex.Lookup(userID); len(entries) > 0 {
+	if entries := m.memberIndex.Lookup(gameId, userID); len(entries) > 0 {
 		return entries
 	}
-	return m.rebuildMemberIndex(userID)
+	return m.rebuildMemberIndex(gameId, userID)
 }
 
 // rebuildMemberIndex 扫描所有已加载的 engine service，重建指定用户的成员索引。
+// gameId=0 时扫描所有游戏；否则只扫描指定游戏。
 // engine.Service 的 memberGroup 常驻内存（WarmUp 时加载一次），不产生 Redis/MongoDB 访问。
-func (m *Manager) rebuildMemberIndex(userID int64) []MemberEntry {
+func (m *Manager) rebuildMemberIndex(gameId int32, userID int64) []MemberEntry {
 	svcs := m.snapshotServices()
 
 	var entries []MemberEntry
@@ -523,17 +541,20 @@ func (m *Manager) rebuildMemberIndex(userID int64) []MemberEntry {
 		if svc == nil {
 			continue
 		}
+		cfg := svc.GetConfig()
+		if gameId != 0 && cfg.GameID != gameId {
+			continue
+		}
 		groupID, ok := svc.GetMemberGroupID(userID)
 		if !ok {
 			continue
 		}
-		cfg := svc.GetConfig()
 		entry := MemberEntry{
 			BizType: BizType(cfg.BizType),
 			ActID:   cfg.ActID,
 			GroupID: groupID,
 		}
-		m.memberIndex.Track(userID, entry)
+		m.memberIndex.Track(cfg.GameID, userID, entry)
 		entries = append(entries, entry)
 	}
 	return entries
@@ -545,11 +566,11 @@ func (m *Manager) rebuildMemberIndex(userID int64) []MemberEntry {
 // 再在锁外逐个查名次。此前 svc.GetMemberRank 是持着 m.mu.RLock 做的，
 // 一个用户的 GM 查询会把 N 个服务的 Redis 往返全压在注册表的读锁上，
 // 而 UpsertScore 之外的写路径（注册/删除服务）都在等这把锁。
-func (m *Manager) GetMemberRankEntries(ctx context.Context, userID int64) ([]MemberRankEntry, error) {
+func (m *Manager) GetMemberRankEntries(ctx context.Context, gameId int32, userID int64) ([]MemberRankEntry, error) {
 	if m == nil {
 		return nil, nil
 	}
-	entries := m.GetMemberEntries(userID)
+	entries := m.GetMemberEntries(gameId, userID)
 	if len(entries) == 0 {
 		return nil, nil
 	}
@@ -652,29 +673,61 @@ func (m *Manager) syncFromRedis(ctx context.Context) {
 	}
 }
 
+// parseBizId 解析 bizId 字符串，支持多游戏前缀 "g{gameId}_" 和轮次后缀 "_r{N}"。
+// 格式示例："balloon_1001" / "g1_balloon_1001" / "balloon_1001_r2" / "g1_balloon_1001_r2"。
+func parseBizId(bizId string) (gameId int32, bizType BizType, actID int32, round int32, ok bool) {
+	s := bizId
+	round = 0
+
+	// 解析轮次后缀 _r{N}
+	if idx := strings.LastIndex(s, "_r"); idx > 0 {
+		r, err := strconv.ParseInt(s[idx+2:], 10, 32)
+		if err == nil {
+			round = int32(r)
+			s = s[:idx]
+		}
+	}
+
+	// 解析多游戏前缀 g{gameId}_
+	gameId = 0
+	if strings.HasPrefix(s, "g") {
+		idx := strings.Index(s, "_")
+		if idx > 1 {
+			g, err := strconv.ParseInt(s[1:idx], 10, 32)
+			if err == nil {
+				gameId = int32(g)
+				s = s[idx+1:]
+			}
+		}
+	}
+
+	sep := strings.LastIndex(s, "_")
+	if sep <= 0 {
+		return 0, "", 0, 0, false
+	}
+	actIDInt, err := strconv.ParseInt(s[sep+1:], 10, 32)
+	if err != nil {
+		return 0, "", 0, 0, false
+	}
+	return gameId, BizType(s[:sep]), int32(actIDInt), round, true
+}
+
 // registerFromBizId 尝试把注册表发现的单个 bizId 注册为内存中的 Service（若尚未注册）。
 // 周期排行榜子轮次 BizId 走 tryRecoverPeriodicFromRedis 的降级恢复路径。
 func (m *Manager) registerFromBizId(ctx context.Context, bizId string, now int64) bool {
-	sep := strings.LastIndex(bizId, "_")
-	if sep <= 0 {
-		return false
-	}
-
-	// 周期排行榜子轮次 BizId（格式 "{bizType}_{actID}_r{N}"）：
+	// 周期排行榜子轮次 BizId（格式 "{bizType}_{actID}_r{N}" 或 "g{gameId}_{bizType}_{actID}_r{N}"）：
 	// 尝试从 Redis 元数据降级恢复（主路径是 syncFromMongo），然后跳过常规注册流程。
 	if periodic.IsRoundBizId(bizId) {
 		m.tryRecoverPeriodicFromRedis(ctx, bizId)
 		return false
 	}
 
-	actIDInt, err := strconv.ParseInt(bizId[sep+1:], 10, 32)
-	if err != nil {
+	gameId, bizType, actID, _, ok := parseBizId(bizId)
+	if !ok {
 		return false
 	}
-	bizType := BizType(bizId[:sep])
-	actID := int32(actIDInt)
 
-	bizKey := NewBizKey(bizType, actID).String()
+	bizKey := NewGameBizKey(gameId, bizType, actID).String()
 	m.mu.RLock()
 	_, exists := m.engineServices[bizKey]
 	m.mu.RUnlock()
@@ -692,8 +745,14 @@ func (m *Manager) registerFromBizId(ctx context.Context, bizId string, now int64
 		return false
 	}
 
-	rankCode := fmt.Sprintf("%s_score_%d", bizType, actID)
+	var rankCode string
+	if gameId != 0 {
+		rankCode = fmt.Sprintf("g%d_%s_score_%d", gameId, bizType, actID)
+	} else {
+		rankCode = fmt.Sprintf("%s_score_%d", bizType, actID)
+	}
 	cfg := engine.Config{
+		GameID:      gameId,
 		BizType:     string(bizType),
 		ActID:       actID,
 		RankCode:    rankCode,
@@ -712,10 +771,11 @@ func (m *Manager) registerFromBizId(ctx context.Context, bizId string, now int64
 		return false
 	}
 
+	localGameId := gameId
 	localBizType := bizType
 	localActID := actID
 	onMemberJoin := func(userID int64, groupID int32) {
-		m.memberIndex.Track(userID, MemberEntry{
+		m.memberIndex.Track(localGameId, userID, MemberEntry{
 			BizType: localBizType,
 			ActID:   localActID,
 			GroupID: groupID,
@@ -806,7 +866,7 @@ func parseRegistryMember(mem string) (bizId string, deadline int64, ok bool) {
 	return mem[:idx], deadline, true
 }
 
-// tryRecoverPeriodicFromRedis 在 syncFromRedis 时遇到周期子轮次 BizId（格式 "{bizType}_{actID}_r{N}"），
+// tryRecoverPeriodicFromRedis 在 syncFromRedis 时遇到周期子轮次 BizId（格式 "{bizType}_{actID}_r{N}" 或 "g{gameId}_{bizType}_{actID}_r{N}"），
 // 尝试用 Redis 中的元数据恢复该活动——仅在 syncFromMongo 未能恢复时生效（即 MongoDB 写入在 SIGKILL 前未落盘）。
 // 若 Redis 已被清空则静默跳过，依赖 syncFromMongo 从 MongoDB 恢复。
 func (m *Manager) tryRecoverPeriodicFromRedis(ctx context.Context, roundBizId string) {
@@ -814,17 +874,11 @@ func (m *Manager) tryRecoverPeriodicFromRedis(ctx context.Context, roundBizId st
 	if !ok {
 		return
 	}
-	sep := strings.LastIndex(base, "_")
-	if sep <= 0 {
+	gameId, bizType, actID, _, ok := parseBizId(base)
+	if !ok {
 		return
 	}
-	actIDInt, err := strconv.ParseInt(base[sep+1:], 10, 32)
-	if err != nil {
-		return
-	}
-	bizType := BizType(base[:sep])
-	actID := int32(actIDInt)
-	logicalKey := NewBizKey(bizType, actID).String()
+	logicalKey := NewGameBizKey(gameId, bizType, actID).String()
 
 	m.mu.RLock()
 	_, exists := m.engineServices[logicalKey]
@@ -858,11 +912,12 @@ func (m *Manager) tryRecoverPeriodicFromRedis(ctx context.Context, roundBizId st
 		RoundOpenTime:  roundOpen,
 		RoundCloseTime: roundClose,
 	}
-	ps := periodic.StateFromSaved(string(bizType), actID, saved)
+	ps := periodic.StateFromSaved(gameId, string(bizType), actID, saved)
 	m.periodicHandler.SetState(logicalKey, ps)
 	m.periodicHandler.CleanupHistoricalRounds(ps)
 
 	cfg := engine.Config{
+		GameID:      gameId,
 		BizType:     string(bizType),
 		ActID:       actID,
 		OpenTime:    roundOpen,
@@ -887,6 +942,7 @@ func (m *Manager) tryRecoverPeriodicFromRedis(ctx context.Context, roundBizId st
 	if m.dao != nil {
 		if _, exists, err := m.dao.LoadRankConfig(logicalKey); err == nil && !exists {
 			overallCfg := engine.Config{
+				GameID:     gameId,
 				BizType:    string(bizType),
 				ActID:      actID,
 				OpenTime:   meta.TotalOpenTime,
@@ -1072,7 +1128,14 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 			bizType = "balloon"
 			cfg.BizType = string(bizType)
 		}
-		key := NewBizKey(bizType, cfg.ActID).String()
+		key := doc.BizKey
+		if key == "" {
+			if cfg.GameID != 0 {
+				key = NewGameBizKey(cfg.GameID, bizType, cfg.ActID).String()
+			} else {
+				key = NewBizKey(bizType, cfg.ActID).String()
+			}
+		}
 
 		// 超过 7 天的活动不再维护 in-memory 热服务（内存管理）。
 		// 其历史轮次查询由 ResolveEngineService 懒加载 MongoDB 周期元数据路由到历史路径，无需恢复状态。
@@ -1098,7 +1161,7 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 			if !exists || (existingSvc != nil && existingSvc.GetConfig().RoundIndex > 0) {
 				existing := m.periodicHandler.GetState(key)
 				if existing == nil || existing.GetCurrentRound() < doc.Periodic.CurrentRound {
-					ps := periodic.StateFromSaved(string(bizType), cfg.ActID, *doc.Periodic)
+					ps := periodic.StateFromSaved(cfg.GameID, string(bizType), cfg.ActID, *doc.Periodic)
 					m.periodicHandler.SetState(key, ps)
 					// 清理历史轮次残留的 Redis 热数据（重启后 in-memory timer 已丢失）。
 					m.periodicHandler.CleanupHistoricalRounds(ps)
@@ -1158,9 +1221,10 @@ func (m *Manager) syncFromMongo(ctx context.Context) {
 			continue
 		}
 
+		localGameId := cfg.GameID
 		localBizType := bizType
 		onMemberJoin := func(userID int64, groupID int32) {
-			m.memberIndex.Track(userID, MemberEntry{
+			m.memberIndex.Track(localGameId, userID, MemberEntry{
 				BizType: localBizType,
 				ActID:   cfg.ActID,
 				GroupID: groupID,
@@ -1288,12 +1352,17 @@ func (m *Manager) applyRankConfigDoc(ctx context.Context, doc engine.RankConfigD
 		bizType = "balloon"
 		cfg.BizType = string(bizType)
 	}
-	key := NewBizKey(bizType, cfg.ActID).String()
+	var key string
+	if cfg.GameID != 0 {
+		key = NewGameBizKey(cfg.GameID, bizType, cfg.ActID).String()
+	} else {
+		key = NewBizKey(bizType, cfg.ActID).String()
+	}
 
 	if doc.Periodic != nil {
 		existing := m.periodicHandler.GetState(key)
 		if existing == nil || existing.GetCurrentRound() < doc.Periodic.CurrentRound {
-			ps := periodic.StateFromSaved(string(bizType), cfg.ActID, *doc.Periodic)
+			ps := periodic.StateFromSaved(cfg.GameID, string(bizType), cfg.ActID, *doc.Periodic)
 			m.periodicHandler.SetState(key, ps)
 			m.periodicHandler.CleanupHistoricalRounds(ps)
 		}
@@ -1332,10 +1401,11 @@ func (m *Manager) applyRankConfigDoc(ctx context.Context, doc engine.RankConfigD
 		return false
 	}
 
+	localGameId := cfg.GameID
 	localBizType := bizType
 	localActID := cfg.ActID
 	onMemberJoin := func(userID int64, groupID int32) {
-		m.memberIndex.Track(userID, MemberEntry{
+		m.memberIndex.Track(localGameId, userID, MemberEntry{
 			BizType: localBizType,
 			ActID:   localActID,
 			GroupID: groupID,

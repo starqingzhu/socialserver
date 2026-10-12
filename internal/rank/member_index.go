@@ -50,9 +50,9 @@ func decodeMemberEntry(s string) (MemberEntry, bool) {
 	}, true
 }
 
-func (idx *MemberIndex) Track(userID int64, entry MemberEntry) {
+func (idx *MemberIndex) Track(gameId int32, userID int64, entry MemberEntry) {
 	if idx.rdb != nil {
-		key := rediskeys.GetRankMemberIndexKey(userID)
+		key := rediskeys.GetGameRankMemberIndexKey(gameId, userID)
 		idx.rdb.SAdd(key, encodeMemberEntry(entry))
 		if idx.ttl > 0 {
 			idx.rdb.Expire(key, idx.ttl)
@@ -67,9 +67,9 @@ func (idx *MemberIndex) Track(userID int64, entry MemberEntry) {
 	idx.entries[userID] = append(idx.entries[userID], entry)
 }
 
-func (idx *MemberIndex) Lookup(userID int64) []MemberEntry {
+func (idx *MemberIndex) Lookup(gameId int32, userID int64) []MemberEntry {
 	if idx.rdb != nil {
-		raw, err := idx.rdb.SMembers(rediskeys.GetRankMemberIndexKey(userID))
+		raw, err := idx.rdb.SMembers(rediskeys.GetGameRankMemberIndexKey(gameId, userID))
 		if err != nil || len(raw) == 0 {
 			return nil
 		}
@@ -90,8 +90,8 @@ func (idx *MemberIndex) Lookup(userID int64) []MemberEntry {
 	return dst
 }
 
-func (idx *MemberIndex) LookupByBizType(userID int64, bizType BizType) []MemberEntry {
-	all := idx.Lookup(userID)
+func (idx *MemberIndex) LookupByBizType(gameId int32, userID int64, bizType BizType) []MemberEntry {
+	all := idx.Lookup(gameId, userID)
 	var result []MemberEntry
 	for _, e := range all {
 		if e.BizType == bizType {
@@ -113,7 +113,7 @@ const removeUserEntriesChunk = 512
 // pipeline，10 万成员从 10 万次往返降到约 200 次（待办 G-d2）。
 // 用 context.Background() 与 golib 包装方法内部一致：清理路径本就是 best-effort，
 // 不因调用方 ctx 取消而半途停下——分块之间停下来只会留下更难解释的中间态。
-func (idx *MemberIndex) RemoveUserEntries(bizType BizType, actID int32, members map[int64]int32) {
+func (idx *MemberIndex) RemoveUserEntries(gameId int32, bizType BizType, actID int32, members map[int64]int32) {
 	if idx.rdb == nil || len(members) == 0 {
 		return
 	}
@@ -133,7 +133,7 @@ func (idx *MemberIndex) RemoveUserEntries(bizType BizType, actID int32, members 
 	}
 	for userID, groupID := range members {
 		entry := encodeMemberEntry(MemberEntry{BizType: bizType, ActID: actID, GroupID: groupID})
-		pipe.SRem(ctx, rediskeys.GetRankMemberIndexKey(userID), entry)
+		pipe.SRem(ctx, rediskeys.GetGameRankMemberIndexKey(gameId, userID), entry)
 		pending++
 		if pending >= removeUserEntriesChunk {
 			flush()

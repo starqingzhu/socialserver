@@ -54,13 +54,13 @@ func TestRemoveUserEntriesRemovesAllAcrossChunks(t *testing.T) {
 		userID := int64(10000 + i)
 		groupID := int32(i%10 + 1)
 		members[userID] = groupID
-		idx.Track(userID, MemberEntry{BizType: bizType, ActID: actID, GroupID: groupID})
+		idx.Track(0, userID, MemberEntry{BizType: bizType, ActID: actID, GroupID: groupID})
 	}
 	if len(members) <= 2*removeUserEntriesChunk {
 		t.Fatalf("前置失败：成员数 %d 未跨过 2 个分块（chunk=%d）", len(members), removeUserEntriesChunk)
 	}
 
-	idx.RemoveUserEntries(bizType, actID, members)
+	idx.RemoveUserEntries(0, bizType, actID, members)
 
 	for userID, groupID := range members {
 		want := encodeMemberEntry(MemberEntry{BizType: bizType, ActID: actID, GroupID: groupID})
@@ -77,11 +77,11 @@ func TestRemoveUserEntriesKeepsOtherActivities(t *testing.T) {
 	idx, mr := newMiniRedisMemberIndex(t)
 	const userID = int64(20001)
 
-	idx.Track(userID, MemberEntry{BizType: "target", ActID: 1, GroupID: 3})
-	idx.Track(userID, MemberEntry{BizType: "target", ActID: 2, GroupID: 4})  // 同 bizType 不同 actID
-	idx.Track(userID, MemberEntry{BizType: "keeper", ActID: 1, GroupID: 5}) // 同 actID 不同 bizType
+	idx.Track(0, userID, MemberEntry{BizType: "target", ActID: 1, GroupID: 3})
+	idx.Track(0, userID, MemberEntry{BizType: "target", ActID: 2, GroupID: 4})  // 同 bizType 不同 actID
+	idx.Track(0, userID, MemberEntry{BizType: "keeper", ActID: 1, GroupID: 5}) // 同 actID 不同 bizType
 
-	idx.RemoveUserEntries("target", 1, map[int64]int32{userID: 3})
+	idx.RemoveUserEntries(0, "target", 1, map[int64]int32{userID: 3})
 
 	got := indexMembers(t, mr, userID)
 	if got[encodeMemberEntry(MemberEntry{BizType: "target", ActID: 1, GroupID: 3})] {
@@ -101,8 +101,8 @@ func TestRemoveUserEntriesKeepsOtherActivities(t *testing.T) {
 // 调用方（cleanupServiceData / forceCleanupOrphan / syncFromMongo）经常拿到空成员表。
 func TestRemoveUserEntriesEmptyIsNoop(t *testing.T) {
 	idx, _ := newMiniRedisMemberIndex(t)
-	idx.RemoveUserEntries("g2", 1, nil)
-	idx.RemoveUserEntries("g2", 1, map[int64]int32{})
+	idx.RemoveUserEntries(0, "g2", 1, nil)
+	idx.RemoveUserEntries(0, "g2", 1, map[int64]int32{})
 }
 
 // TestRemoveUserEntriesMissingKeyIsHarmless 覆盖"索引 key 已被 TTL 回收"：
@@ -112,14 +112,14 @@ func TestRemoveUserEntriesMissingKeyIsHarmless(t *testing.T) {
 	idx, mr := newMiniRedisMemberIndex(t)
 	const present = int64(30001)
 
-	idx.Track(present, MemberEntry{BizType: "g2", ActID: 1, GroupID: 1})
+	idx.Track(0, present, MemberEntry{BizType: "g2", ActID: 1, GroupID: 1})
 
 	members := map[int64]int32{present: 1}
 	for i := 0; i < 10; i++ {
 		members[int64(40000+i)] = int32(i + 1) // 这些用户从未建过索引
 	}
 
-	idx.RemoveUserEntries("g2", 1, members)
+	idx.RemoveUserEntries(0, "g2", 1, members)
 
 	if indexMembers(t, mr, present)[encodeMemberEntry(MemberEntry{BizType: "g2", ActID: 1, GroupID: 1})] {
 		t.Fatalf("有索引的那一个也没被删掉")
@@ -134,7 +134,7 @@ func TestRemoveUserEntriesMissingKeyIsHarmless(t *testing.T) {
 func TestTrackRefreshesTTLEveryCall(t *testing.T) {
 	idx, mr := newMiniRedisMemberIndex(t)
 
-	idx.Track(50001, MemberEntry{BizType: "g2", ActID: 1, GroupID: 1})
+	idx.Track(0, 50001, MemberEntry{BizType: "g2", ActID: 1, GroupID: 1})
 	key := rediskeys.GetRankMemberIndexKey(50001)
 	if ttl := mr.TTL(key); ttl <= 0 {
 		t.Fatalf("%s 的 TTL=%v ⇒ 永久 key（缺陷 8）", key, ttl)
@@ -145,7 +145,7 @@ func TestTrackRefreshesTTLEveryCall(t *testing.T) {
 
 	// 仍属于同一活动、但换了分组时也必须续期，否则活跃用户的索引会莫名过期。
 	mr.FastForward(memberIndexTTL / 2)
-	idx.Track(50001, MemberEntry{BizType: "g2", ActID: 1, GroupID: 2})
+	idx.Track(0, 50001, MemberEntry{BizType: "g2", ActID: 1, GroupID: 2})
 	if ttl := mr.TTL(key); ttl != memberIndexTTL {
 		t.Fatalf("再次 Track 后 TTL=%v, want %v（未续期）", ttl, memberIndexTTL)
 	}

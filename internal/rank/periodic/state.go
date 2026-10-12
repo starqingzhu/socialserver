@@ -17,6 +17,7 @@ import (
 //   - currentRound 由 tick 单 goroutine 写，多 RPC goroutine 读：通过 atomic 保护。
 //   - RoundOpenTime/RoundCloseTime 仅由 tick goroutine 读写，无需额外同步。
 type PeriodicState struct {
+	GameID         int32
 	BizType        string
 	ActID          int32
 	CycleMinutes   int32
@@ -94,11 +95,17 @@ func ExtractRoundBizBase(roundBizId string) (base string, ok bool) {
 
 // StateLogicalKey 返回该状态的 map 键。
 func (p *PeriodicState) StateLogicalKey() string {
+	if p.GameID != 0 {
+		return fmt.Sprintf("g%d_%s:%d", p.GameID, p.BizType, p.ActID)
+	}
 	return LogicalKey(p.BizType, p.ActID)
 }
 
 // roundBizId 返回第 round 轮的 engine 内部 BizId（用于 Redis/MongoDB 键）。
 func (p *PeriodicState) roundBizId(round int32) string {
+	if p.GameID != 0 {
+		return fmt.Sprintf("g%d_%s_%d_r%d", p.GameID, p.BizType, p.ActID, round)
+	}
 	return fmt.Sprintf("%s_%d_r%d", p.BizType, p.ActID, round)
 }
 
@@ -215,8 +222,9 @@ func (p *PeriodicState) ToSavedState() engine.PeriodicSavedState {
 }
 
 // StateFromSaved 从持久化结构和逻辑活动信息恢复 PeriodicState。
-func StateFromSaved(bizType string, actID int32, s engine.PeriodicSavedState) *PeriodicState {
+func StateFromSaved(gameId int32, bizType string, actID int32, s engine.PeriodicSavedState) *PeriodicState {
 	p := &PeriodicState{
+		GameID:         gameId,
 		BizType:        bizType,
 		ActID:          actID,
 		CycleMinutes:   s.CycleMinutes,
@@ -232,11 +240,12 @@ func StateFromSaved(bizType string, actID int32, s engine.PeriodicSavedState) *P
 // NewPeriodicState 创建新的 PeriodicState（首次注册时使用）。
 // 创建时直接按当前时间定位到所在轮次，而不是从第 1 轮开始逐步 tick 推进。
 // cycleMinutes 必须 > 0，否则返回 error。
-func NewPeriodicState(bizType string, actID int32, cycleMinutes int32, totalOpenTime, totalCloseTime int64) (*PeriodicState, error) {
+func NewPeriodicState(gameId int32, bizType string, actID int32, cycleMinutes int32, totalOpenTime, totalCloseTime int64) (*PeriodicState, error) {
 	if cycleMinutes <= 0 {
 		return nil, fmt.Errorf("periodic: cycleMinutes must be > 0, got %d", cycleMinutes)
 	}
 	p := &PeriodicState{
+		GameID:         gameId,
 		BizType:        bizType,
 		ActID:          actID,
 		CycleMinutes:   cycleMinutes,

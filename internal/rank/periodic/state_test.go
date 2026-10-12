@@ -130,7 +130,7 @@ func TestNewPeriodicStatePositionsToCurrentRound(t *testing.T) {
 	// 轮窗口边界在 now 前后各 5 分钟，远离边界避免毫秒级抖动。
 	open := now - 25*60*1000
 	close := now + 35*60*1000
-	state, err := NewPeriodicState("balloon", 1, cycleMin, open, close)
+	state, err := NewPeriodicState(0, "balloon", 1, cycleMin, open, close)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestNewPeriodicStateClampsToLastRoundAfterClose(t *testing.T) {
 	now := time.Now().UnixMilli()
 	open := now - 60*60*1000 // 1 小时前开始
 	close := now - 30*60*1000 // 30 分钟前已结束
-	state, err := NewPeriodicState("balloon", 1, 10, open, close)
+	state, err := NewPeriodicState(0, "balloon", 1, 10, open, close)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -150,7 +150,7 @@ func (h *Handler) Register(ctx context.Context, bizType, logicalKey string, cfg 
 		return nil
 	}
 
-	state, err := NewPeriodicState(bizType, cfg.ActID, cycleMinutes, cfg.OpenTime, cfg.CloseTime)
+	state, err := NewPeriodicState(cfg.GameID, bizType, cfg.ActID, cycleMinutes, cfg.OpenTime, cfg.CloseTime)
 	if err != nil {
 		return fmt.Errorf("register periodic: %w", err)
 	}
@@ -374,22 +374,33 @@ func (h *Handler) resolveHistoricalRound(logicalKey, bizType string, actID, roun
 }
 
 // roundBizId 返回第 round 轮的 engine 内部 BizId（与 PeriodicState.roundBizId 一致，但不依赖状态）。
-func roundBizId(bizType string, actID, round int32) string {
+func roundBizId(gameId int32, bizType string, actID, round int32) string {
+	if gameId != 0 {
+		return fmt.Sprintf("g%d_%s_%d_r%d", gameId, bizType, actID, round)
+	}
 	return fmt.Sprintf("%s_%d_r%d", bizType, actID, round)
 }
 
 // GetHistoricalRoundList 查询历史轮次的排行榜（从 MongoDB/Redis 读取已结算数据）。
-func (h *Handler) GetHistoricalRoundList(ctx context.Context, bizType string, actID int32, round int32, userID int64, start, end int64) ([]commonrank.RankMemberSnapshot, *commonrank.RankMemberSnapshot, error) {
+func (h *Handler) GetHistoricalRoundList(ctx context.Context, gameId int32, bizType string, actID int32, round int32, userID int64, start, end int64) ([]commonrank.RankMemberSnapshot, *commonrank.RankMemberSnapshot, error) {
 	if h.dao == nil {
 		return nil, nil, fmt.Errorf("dao not available")
 	}
 	logicalKey := LogicalKey(bizType, actID)
+	if gameId != 0 {
+		logicalKey = fmt.Sprintf("g%d_%s:%d", gameId, bizType, actID)
+	}
 	round, err := h.resolveHistoricalRound(logicalKey, bizType, actID, round)
 	if err != nil {
 		return nil, nil, err
 	}
-	bizId := roundBizId(bizType, actID, round)
-	rankCode := fmt.Sprintf("%s_score_%d", bizType, actID)
+	bizId := roundBizId(gameId, bizType, actID, round)
+	var rankCode string
+	if gameId != 0 {
+		rankCode = fmt.Sprintf("g%d_%s_score_%d", gameId, bizType, actID)
+	} else {
+		rankCode = fmt.Sprintf("%s_score_%d", bizType, actID)
+	}
 
 	// 优先从 Redis 查询（结算后 2 周内仍有效），
 	// 再降级到 MongoDB，避免因异步写入延迟导致历史查询短暂失败。
@@ -501,17 +512,25 @@ func (h *Handler) warmRoundCacheFromSettled(bizId, rankCode string, settledByGro
 }
 
 // GetHistoricalRewardUsers 查询历史轮次的入榜真实玩家 ID 列表。
-func (h *Handler) GetHistoricalRewardUsers(ctx context.Context, bizType string, actID int32, round int32) ([]int64, error) {
+func (h *Handler) GetHistoricalRewardUsers(ctx context.Context, gameId int32, bizType string, actID int32, round int32) ([]int64, error) {
 	if h.dao == nil {
 		return nil, fmt.Errorf("dao not available")
 	}
 	logicalKey := LogicalKey(bizType, actID)
+	if gameId != 0 {
+		logicalKey = fmt.Sprintf("g%d_%s:%d", gameId, bizType, actID)
+	}
 	round, err := h.resolveHistoricalRound(logicalKey, bizType, actID, round)
 	if err != nil {
 		return nil, err
 	}
-	bizId := roundBizId(bizType, actID, round)
-	rankCode := fmt.Sprintf("%s_score_%d", bizType, actID)
+	bizId := roundBizId(gameId, bizType, actID, round)
+	var rankCode string
+	if gameId != 0 {
+		rankCode = fmt.Sprintf("g%d_%s_score_%d", gameId, bizType, actID)
+	} else {
+		rankCode = fmt.Sprintf("%s_score_%d", bizType, actID)
+	}
 	// Redis 优先、Mongo 兜底回写（2 周 TTL），避免历史查询反复打 Mongo。
 	store := engine.NewStore(h.rdb, h.dao, bizId, nil)
 	members, err := store.GetAllMembers()
@@ -573,16 +592,19 @@ func (h *Handler) realUsersFromSettled(bizId, rankCode string) ([]int64, error) 
 }
 
 // GetHistoricalClaimStatus 查询历史轮次的奖励领取状态（从 MongoDB 读取）。
-func (h *Handler) GetHistoricalClaimStatus(bizType string, actID int32, round int32, userID int64) (claimed bool, claimTime int64, err error) {
+func (h *Handler) GetHistoricalClaimStatus(gameId int32, bizType string, actID int32, round int32, userID int64) (claimed bool, claimTime int64, err error) {
 	if h.dao == nil {
 		return false, 0, fmt.Errorf("dao not available")
 	}
 	logicalKey := LogicalKey(bizType, actID)
+	if gameId != 0 {
+		logicalKey = fmt.Sprintf("g%d_%s:%d", gameId, bizType, actID)
+	}
 	round, err = h.resolveHistoricalRound(logicalKey, bizType, actID, round)
 	if err != nil {
 		return false, 0, err
 	}
-	bizId := roundBizId(bizType, actID, round)
+	bizId := roundBizId(gameId, bizType, actID, round)
 	ct, found, err := h.dao.GetClaim(bizId, userID)
 	if err != nil {
 		return false, 0, err
@@ -591,16 +613,19 @@ func (h *Handler) GetHistoricalClaimStatus(bizType string, actID int32, round in
 }
 
 // ClaimHistoricalReward 为历史轮次记录奖励领取（写入 MongoDB）。
-func (h *Handler) ClaimHistoricalReward(bizType string, actID int32, round int32, userID int64) (claimed bool, claimTime int64, err error) {
+func (h *Handler) ClaimHistoricalReward(gameId int32, bizType string, actID int32, round int32, userID int64) (claimed bool, claimTime int64, err error) {
 	if h.dao == nil {
 		return false, 0, fmt.Errorf("dao not available")
 	}
 	logicalKey := LogicalKey(bizType, actID)
+	if gameId != 0 {
+		logicalKey = fmt.Sprintf("g%d_%s:%d", gameId, bizType, actID)
+	}
 	round, err = h.resolveHistoricalRound(logicalKey, bizType, actID, round)
 	if err != nil {
 		return false, 0, err
 	}
-	bizId := roundBizId(bizType, actID, round)
+	bizId := roundBizId(gameId, bizType, actID, round)
 	isFirst, ct, upsertErr := h.dao.SaveClaimIfNotExists(bizId, userID, time.Now().UnixMilli())
 	if upsertErr != nil {
 		return false, 0, upsertErr

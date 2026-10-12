@@ -83,7 +83,7 @@ func newCleanupOrderFixture(t *testing.T, bizType BizType, actID int32) (*Manage
 	if _, err := rdb.HSet(rediskeys.GetRankMembersKey(bizID), fmt.Sprint(userID), fmt.Sprint(groupID)); err != nil {
 		t.Fatalf("HSet rank:members: %v", err)
 	}
-	m.memberIndex.Track(userID, MemberEntry{BizType: bizType, ActID: actID, GroupID: groupID})
+	m.memberIndex.Track(0, userID, MemberEntry{BizType: bizType, ActID: actID, GroupID: groupID})
 	return m, svc, rdb, mr, userID
 }
 
@@ -135,7 +135,7 @@ func TestForceCleanupOrphanRemovesIndexBeforeCleanup(t *testing.T) {
 	m, _, rdb, mr, userID := newCleanupOrderFixture(t, "eorphan", 1)
 	entry := encodeMemberEntry(MemberEntry{BizType: "eorphan", ActID: 1, GroupID: 2})
 
-	m.forceCleanupOrphan(context.Background(), "eorphan", 1)
+	m.forceCleanupOrphan(context.Background(), 0, "eorphan", 1)
 
 	if indexMembers(t, mr, userID)[entry] {
 		t.Fatalf("forceCleanupOrphan 之后索引条目 %s 仍存在 ⇒ 它与 cleanupServiceData 的顺序不一致", entry)

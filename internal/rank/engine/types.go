@@ -26,6 +26,10 @@ type Config struct {
 	CloseTime     int64 // 活动关闭时间（Unix 毫秒，UTC+0）：超过此时间停止接受积分
 	GameEndTime   int64 // 玩法结束时间（Unix 毫秒，UTC+0）：超过此时间触发结算（0 则退化为 CloseTime）
 	CreateTime    int64 // 配置创建时间（Unix 毫秒，$setOnInsert 写入 MongoDB，不随更新覆盖）
+	// GameID 游戏ID，用于多游戏平台数据隔离。
+	// 非零时 computeBizId() 和 rankCode 会自动嵌入 "g{gameId}_" 前缀。
+	GameID int32
+
 	// RoundIndex 周期排行榜轮次编号（0=一次性排行榜，>0=第 N 轮）。
 	// 影响底层 BizId 格式：一次性为 "{bizType}_{actID}"，周期第 N 轮为 "{bizType}_{actID}_r{N}"。
 	RoundIndex int32
@@ -41,10 +45,16 @@ func (c *Config) hasRobots() bool {
 }
 
 func (c *Config) computeBizId() string {
-	if c.RoundIndex > 0 {
-		return fmt.Sprintf("%s_%d_r%d", c.BizType, c.ActID, c.RoundIndex)
+	var prefix string
+	if c.GameID != 0 {
+		prefix = fmt.Sprintf("g%d_%s_%d", c.GameID, c.BizType, c.ActID)
+	} else {
+		prefix = fmt.Sprintf("%s_%d", c.BizType, c.ActID)
 	}
-	return fmt.Sprintf("%s_%d", c.BizType, c.ActID)
+	if c.RoundIndex > 0 {
+		return fmt.Sprintf("%s_r%d", prefix, c.RoundIndex)
+	}
+	return prefix
 }
 
 // Option 用于配置 Service 的可选参数。

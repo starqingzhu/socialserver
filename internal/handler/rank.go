@@ -53,6 +53,10 @@ func registerRank(d *dispatchproto.Dispatcher) error {
 // --- 排行榜玩家接口 ---
 
 func handleUpsertScore(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SUpsertScoreRequest, resp *pb.PBS2SUpsertScoreResponse) (retErr error) {
+	gameId := meta.GameId
+	if req.Context != nil && req.Context.GameId != 0 {
+		gameId = req.Context.GameId
+	}
 	zaplog.LoggerSugar.Infof("[rank] S2SUpsertScore req bizType=%s actId=%d userId=%d totalScore=%d ts=%d round=%d",
 		req.BizType, req.ActId, req.UserId, req.TotalScore, req.Timestamp, req.Round)
 	defer func() {
@@ -73,7 +77,7 @@ func handleUpsertScore(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 	currentRound := int32(1)
 	manager := rankservice.GetGlobalManager()
 	if manager != nil {
-		if ps := manager.GetPeriodicState(bizType, req.ActId); ps != nil {
+		if ps := manager.GetPeriodicState(gameId, bizType, req.ActId); ps != nil {
 			currentRound = ps.GetCurrentRound()
 			if req.Round > 0 && req.Round != ps.GetCurrentRound() {
 				resp.MsgCode = commonMsg.MsgCode_CODE_RANK_ROUND_CHANGED
@@ -83,7 +87,7 @@ func handleUpsertScore(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 		}
 	}
 
-	svc, err := lookupEngineService(bizType, req.ActId)
+	svc, err := lookupEngineService(gameId, bizType, req.ActId)
 	if err != nil {
 		return err
 	}
@@ -113,6 +117,10 @@ func handleUpsertScore(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 }
 
 func handleGetRankList(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SGetRankListRequest, resp *pb.PBS2SGetRankListResponse) (retErr error) {
+	gameId := meta.GameId
+	if req.Context != nil && req.Context.GameId != 0 {
+		gameId = req.Context.GameId
+	}
 	zaplog.LoggerSugar.Infof("[rank] S2SGetRankList req bizType=%s actId=%d userId=%d start=%d end=%d round=%d",
 		req.BizType, req.ActId, req.UserId, req.Start, req.End, req.Round)
 	defer func() {
@@ -130,15 +138,15 @@ func handleGetRankList(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 		return status.Error(codes.Internal, "rank manager not initialized")
 	}
 	bizType := rankservice.BizType(req.BizType)
-	svc, isHistorical := manager.ResolveEngineService(bizType, req.ActId, req.Round)
+	svc, isHistorical := manager.ResolveEngineService(gameId, bizType, req.ActId, req.Round)
 
 	currentRound := int32(1)
-	if ps := manager.GetPeriodicState(bizType, req.ActId); ps != nil {
+	if ps := manager.GetPeriodicState(gameId, bizType, req.ActId); ps != nil {
 		currentRound = ps.GetCurrentRound()
 	}
 
 	if isHistorical {
-		snapshots, mySnap, err := manager.GetHistoricalRoundList(ctx, bizType, req.ActId, req.Round, req.UserId, req.Start, req.End)
+		snapshots, mySnap, err := manager.GetHistoricalRoundList(ctx, gameId, bizType, req.ActId, req.Round, req.UserId, req.Start, req.End)
 		if err != nil {
 			return status.Error(codes.Internal, err.Error())
 		}
@@ -183,6 +191,10 @@ func handleGetRankList(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 }
 
 func handleGetMemberRank(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SGetMemberRankRequest, resp *pb.PBS2SGetMemberRankResponse) (retErr error) {
+	gameId := meta.GameId
+	if req.Context != nil && req.Context.GameId != 0 {
+		gameId = req.Context.GameId
+	}
 	zaplog.LoggerSugar.Infof("[rank] S2SGetMemberRank req bizType=%s actId=%d userId=%d round=%d",
 		req.BizType, req.ActId, req.UserId, req.Round)
 	defer func() {
@@ -205,11 +217,11 @@ func handleGetMemberRank(ctx context.Context, meta libdispatch.Meta, req *pb.PBS
 		return status.Error(codes.Internal, "rank manager not initialized")
 	}
 	bizType := rankservice.BizType(req.BizType)
-	svc, isHistorical := manager.ResolveEngineService(bizType, req.ActId, req.Round)
+	svc, isHistorical := manager.ResolveEngineService(gameId, bizType, req.ActId, req.Round)
 	if isHistorical {
 		zaplog.LoggerSugar.Infof("[rank] S2SGetMemberRank route=historical bizType=%s actId=%d userId=%d round=%d",
 			req.BizType, req.ActId, req.UserId, req.Round)
-		_, mySnap, err := manager.GetHistoricalRoundList(ctx, bizType, req.ActId, req.Round, req.UserId, 0, -1)
+		_, mySnap, err := manager.GetHistoricalRoundList(ctx, gameId, bizType, req.ActId, req.Round, req.UserId, 0, -1)
 		if err != nil {
 			return status.Error(codes.Internal, err.Error())
 		}
@@ -257,7 +269,7 @@ func handleSettle(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SSettl
 		}
 	}()
 
-	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
+	svc, err := lookupEngineService(meta.GameId, rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return err
 	}
@@ -274,6 +286,10 @@ func handleSettle(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SSettl
 }
 
 func handleGetRewardUsers(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SGetRewardUsersRequest, resp *pb.PBS2SGetRewardUsersResponse) (retErr error) {
+	gameId := meta.GameId
+	if req.Context != nil && req.Context.GameId != 0 {
+		gameId = req.Context.GameId
+	}
 	zaplog.LoggerSugar.Infof("[rank] S2SGetRewardUsers req bizType=%s actId=%d round=%d", req.BizType, req.ActId, req.Round)
 	defer func() {
 		if retErr != nil {
@@ -290,9 +306,9 @@ func handleGetRewardUsers(ctx context.Context, meta libdispatch.Meta, req *pb.PB
 		return status.Error(codes.Internal, "rank manager not initialized")
 	}
 	bizType := rankservice.BizType(req.BizType)
-	svc, isHistorical := manager.ResolveEngineService(bizType, req.ActId, req.Round)
+	svc, isHistorical := manager.ResolveEngineService(gameId, bizType, req.ActId, req.Round)
 	if isHistorical {
-		userIDs, err := manager.GetHistoricalRewardUsers(ctx, bizType, req.ActId, req.Round)
+		userIDs, err := manager.GetHistoricalRewardUsers(ctx, gameId, bizType, req.ActId, req.Round)
 		if err != nil {
 			return status.Error(codes.Internal, err.Error())
 		}
@@ -309,6 +325,10 @@ func handleGetRewardUsers(ctx context.Context, meta libdispatch.Meta, req *pb.PB
 // --- 奖励领取接口 ---
 
 func handleClaimReward(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SClaimRewardRequest, resp *pb.PBS2SClaimRewardResponse) (retErr error) {
+	gameId := meta.GameId
+	if req.Context != nil && req.Context.GameId != 0 {
+		gameId = req.Context.GameId
+	}
 	zaplog.LoggerSugar.Infof("[rank] S2SClaimReward req bizType=%s actId=%d userId=%d round=%d",
 		req.BizType, req.ActId, req.UserId, req.Round)
 	defer func() {
@@ -326,9 +346,9 @@ func handleClaimReward(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 		return status.Error(codes.Internal, "rank manager not initialized")
 	}
 	bizType := rankservice.BizType(req.BizType)
-	svc, isHistorical := manager.ResolveEngineService(bizType, req.ActId, req.Round)
+	svc, isHistorical := manager.ResolveEngineService(gameId, bizType, req.ActId, req.Round)
 	if isHistorical {
-		claimed, claimTime, err := manager.ClaimHistoricalReward(bizType, req.ActId, req.Round, req.UserId)
+		claimed, claimTime, err := manager.ClaimHistoricalReward(gameId, bizType, req.ActId, req.Round, req.UserId)
 		if err != nil {
 			return status.Error(codes.Internal, err.Error())
 		}
@@ -337,7 +357,7 @@ func handleClaimReward(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 		return nil
 	}
 	if svc == nil {
-		claimed, claimTime, err := manager.FallbackClaimReward(bizType, req.ActId, req.UserId, time.Now().UnixMilli())
+		claimed, claimTime, err := manager.FallbackClaimReward(gameId, bizType, req.ActId, req.UserId, time.Now().UnixMilli())
 		if err != nil {
 			return status.Error(codes.Internal, err.Error())
 		}
@@ -355,6 +375,10 @@ func handleClaimReward(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 }
 
 func handleGetClaimStatus(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SGetClaimStatusRequest, resp *pb.PBS2SGetClaimStatusResponse) (retErr error) {
+	gameId := meta.GameId
+	if req.Context != nil && req.Context.GameId != 0 {
+		gameId = req.Context.GameId
+	}
 	zaplog.LoggerSugar.Infof("[rank] S2SGetClaimStatus req bizType=%s actId=%d userId=%d round=%d",
 		req.BizType, req.ActId, req.UserId, req.Round)
 	defer func() {
@@ -372,9 +396,9 @@ func handleGetClaimStatus(ctx context.Context, meta libdispatch.Meta, req *pb.PB
 		return status.Error(codes.Internal, "rank manager not initialized")
 	}
 	bizType := rankservice.BizType(req.BizType)
-	svc, isHistorical := manager.ResolveEngineService(bizType, req.ActId, req.Round)
+	svc, isHistorical := manager.ResolveEngineService(gameId, bizType, req.ActId, req.Round)
 	if isHistorical {
-		claimed, claimTime, err := manager.GetHistoricalClaimStatus(bizType, req.ActId, req.Round, req.UserId)
+		claimed, claimTime, err := manager.GetHistoricalClaimStatus(gameId, bizType, req.ActId, req.Round, req.UserId)
 		if err != nil {
 			return status.Error(codes.Internal, err.Error())
 		}
@@ -383,7 +407,7 @@ func handleGetClaimStatus(ctx context.Context, meta libdispatch.Meta, req *pb.PB
 		return nil
 	}
 	if svc == nil {
-		claimed, claimTime, err := manager.FallbackGetClaimStatus(bizType, req.ActId, req.UserId)
+		claimed, claimTime, err := manager.FallbackGetClaimStatus(gameId, bizType, req.ActId, req.UserId)
 		if err != nil {
 			return status.Error(codes.Internal, err.Error())
 		}
@@ -435,6 +459,10 @@ func handleListRankBizTypes(_ context.Context, _ libdispatch.Meta, _ *pb.PBS2SLi
 }
 
 func handleCreateRankConfig(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SCreateRankConfigRequest, resp *pb.PBS2SCreateRankConfigResponse) (retErr error) {
+	gameId := meta.GameId
+	if req.Context != nil && req.Context.GameId != 0 {
+		gameId = req.Context.GameId
+	}
 	zaplog.LoggerSugar.Infof("[rank] S2SCreateRankConfig req bizType=%s actId=%d openTime=%d closeTime=%d gameEndTime=%d",
 		req.BizType, req.ActId, req.OpenTime, req.CloseTime, req.GameEndTime)
 	defer func() {
@@ -462,13 +490,17 @@ func handleCreateRankConfig(ctx context.Context, meta libdispatch.Meta, req *pb.
 		CloseTime:   req.CloseTime,
 		GameEndTime: req.GameEndTime,
 	}
-	if err := manager.Register(ctx, rankservice.BizType(req.BizType), cfg); err != nil {
+	if err := manager.Register(ctx, gameId, rankservice.BizType(req.BizType), cfg); err != nil {
 		return rankErrorToStatus(err)
 	}
 	return nil
 }
 
-func handleGetRankConfig(_ context.Context, _ libdispatch.Meta, req *pb.PBS2SGetRankConfigRequest, resp *pb.PBS2SGetRankConfigResponse) (retErr error) {
+func handleGetRankConfig(_ context.Context, meta libdispatch.Meta, req *pb.PBS2SGetRankConfigRequest, resp *pb.PBS2SGetRankConfigResponse) (retErr error) {
+	gameId := meta.GameId
+	if req.Context != nil && req.Context.GameId != 0 {
+		gameId = req.Context.GameId
+	}
 	zaplog.LoggerSugar.Infof("[rank] S2SGetRankConfig req bizType=%s actId=%d", req.BizType, req.ActId)
 	defer func() {
 		if retErr != nil {
@@ -479,7 +511,7 @@ func handleGetRankConfig(_ context.Context, _ libdispatch.Meta, req *pb.PBS2SGet
 		}
 	}()
 
-	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
+	svc, err := lookupEngineService(gameId, rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return err
 	}
@@ -488,7 +520,7 @@ func handleGetRankConfig(_ context.Context, _ libdispatch.Meta, req *pb.PBS2SGet
 	var rankType pb.RankType = pb.RankType_RANK_TYPE_ONCE
 	var cycleMinutes, currentRound int32
 	if manager != nil {
-		if state := manager.GetPeriodicState(rankservice.BizType(req.BizType), req.ActId); state != nil {
+		if state := manager.GetPeriodicState(gameId, rankservice.BizType(req.BizType), req.ActId); state != nil {
 			rankType = pb.RankType_RANK_TYPE_PERIODIC
 			// 优先从配置读取最新的 cycleMinutes，解决配置变更后持久化状态未更新的问题
 			_, cm, _ := rankservice.LoadRankTypeAndCycle(rankservice.BizType(req.BizType))
@@ -520,7 +552,11 @@ func handleGetRankConfig(_ context.Context, _ libdispatch.Meta, req *pb.PBS2SGet
 	return nil
 }
 
-func handleUpdateRankConfig(_ context.Context, _ libdispatch.Meta, req *pb.PBS2SUpdateRankConfigRequest, resp *pb.PBS2SUpdateRankConfigResponse) (retErr error) {
+func handleUpdateRankConfig(_ context.Context, meta libdispatch.Meta, req *pb.PBS2SUpdateRankConfigRequest, resp *pb.PBS2SUpdateRankConfigResponse) (retErr error) {
+	gameId := meta.GameId
+	if req.Context != nil && req.Context.GameId != 0 {
+		gameId = req.Context.GameId
+	}
 	zaplog.LoggerSugar.Infof("[rank] S2SUpdateRankConfig req bizType=%s actId=%d openTime=%d closeTime=%d gameEndTime=%d",
 		req.BizType, req.ActId, req.OpenTime, req.CloseTime, req.GameEndTime)
 	defer func() {
@@ -540,13 +576,17 @@ func handleUpdateRankConfig(_ context.Context, _ libdispatch.Meta, req *pb.PBS2S
 		CloseTime:   req.CloseTime,
 		GameEndTime: req.GameEndTime,
 	}
-	if err := manager.UpdateService(rankservice.BizType(req.BizType), req.ActId, cfg); err != nil {
+	if err := manager.UpdateService(gameId, rankservice.BizType(req.BizType), req.ActId, cfg); err != nil {
 		return status.Error(codes.NotFound, err.Error())
 	}
 	return nil
 }
 
-func handleDeleteRankConfig(_ context.Context, _ libdispatch.Meta, req *pb.PBS2SDeleteRankConfigRequest, resp *pb.PBS2SDeleteRankConfigResponse) (retErr error) {
+func handleDeleteRankConfig(_ context.Context, meta libdispatch.Meta, req *pb.PBS2SDeleteRankConfigRequest, resp *pb.PBS2SDeleteRankConfigResponse) (retErr error) {
+	gameId := meta.GameId
+	if req.Context != nil && req.Context.GameId != 0 {
+		gameId = req.Context.GameId
+	}
 	zaplog.LoggerSugar.Infof("[rank] S2SDeleteRankConfig req bizType=%s actId=%d", req.BizType, req.ActId)
 	defer func() {
 		if retErr != nil {
@@ -560,13 +600,17 @@ func handleDeleteRankConfig(_ context.Context, _ libdispatch.Meta, req *pb.PBS2S
 	if manager == nil {
 		return status.Error(codes.Internal, "rank manager not initialized")
 	}
-	if err := manager.RemoveService(rankservice.BizType(req.BizType), req.ActId); err != nil {
+	if err := manager.RemoveService(gameId, rankservice.BizType(req.BizType), req.ActId); err != nil {
 		return status.Error(codes.NotFound, err.Error())
 	}
 	return nil
 }
 
-func handleListRankConfigs(_ context.Context, _ libdispatch.Meta, req *pb.PBS2SListRankConfigsRequest, resp *pb.PBS2SListRankConfigsResponse) (retErr error) {
+func handleListRankConfigs(_ context.Context, meta libdispatch.Meta, req *pb.PBS2SListRankConfigsRequest, resp *pb.PBS2SListRankConfigsResponse) (retErr error) {
+	gameId := meta.GameId
+	if req.Context != nil && req.Context.GameId != 0 {
+		gameId = req.Context.GameId
+	}
 	zaplog.LoggerSugar.Infof("[rank] S2SListRankConfigs req bizType=%s", req.BizType)
 	defer func() {
 		if retErr != nil {
@@ -580,7 +624,7 @@ func handleListRankConfigs(_ context.Context, _ libdispatch.Meta, req *pb.PBS2SL
 	if manager == nil {
 		return status.Error(codes.Internal, "rank manager not initialized")
 	}
-	infos := manager.ListServices(rankservice.BizType(req.BizType))
+	infos := manager.ListServices(gameId, rankservice.BizType(req.BizType))
 	ranks := make([]*pb.PBRankConfigSummary, len(infos))
 	for i, info := range infos {
 		var rankType pb.RankType = pb.RankType_RANK_TYPE_ONCE
@@ -589,7 +633,7 @@ func handleListRankConfigs(_ context.Context, _ libdispatch.Meta, req *pb.PBS2SL
 		closeTime := info.Config.CloseTime
 		gameEndTime := effectiveGameEndTime(info.Config.GameEndTime, info.Config.CloseTime)
 		createTime := info.CreateTime
-		if state := manager.GetPeriodicState(info.BizType, info.ActID); state != nil {
+		if state := manager.GetPeriodicState(gameId, info.BizType, info.ActID); state != nil {
 			rankType = pb.RankType_RANK_TYPE_PERIODIC
 			// 优先从配置读取最新的 cycleMinutes，解决配置变更后持久化状态未更新的问题
 			_, cm, _ := rankservice.LoadRankTypeAndCycle(info.BizType)
@@ -625,7 +669,11 @@ func handleListRankConfigs(_ context.Context, _ libdispatch.Meta, req *pb.PBS2SL
 	return nil
 }
 
-func handleGetRankCurRound(_ context.Context, _ libdispatch.Meta, req *pb.PBS2SGetRankCurRoundRequest, resp *pb.PBS2SGetRankCurRoundResponse) (retErr error) {
+func handleGetRankCurRound(_ context.Context, meta libdispatch.Meta, req *pb.PBS2SGetRankCurRoundRequest, resp *pb.PBS2SGetRankCurRoundResponse) (retErr error) {
+	gameId := meta.GameId
+	if req.Context != nil && req.Context.GameId != 0 {
+		gameId = req.Context.GameId
+	}
 	zaplog.LoggerSugar.Infof("[rank] S2SGetRankCurRound req bizType=%s actId=%d", req.BizType, req.ActId)
 	defer func() {
 		if retErr != nil {
@@ -639,7 +687,7 @@ func handleGetRankCurRound(_ context.Context, _ libdispatch.Meta, req *pb.PBS2SG
 	if manager == nil {
 		return status.Error(codes.Internal, "rank manager not initialized")
 	}
-	info, err := manager.GetCurrentRoundInfo(rankservice.BizType(req.BizType), req.ActId)
+	info, err := manager.GetCurrentRoundInfo(gameId, rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return status.Error(codes.NotFound, err.Error())
 	}
@@ -657,6 +705,10 @@ func handleGetRankCurRound(_ context.Context, _ libdispatch.Meta, req *pb.PBS2SG
 // --- GM 查询接口 ---
 
 func handleGMGetUserRankList(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SGMGetUserRankListRequest, resp *pb.PBS2SGMGetUserRankListResponse) (retErr error) {
+	gameId := meta.GameId
+	if req.Context != nil && req.Context.GameId != 0 {
+		gameId = req.Context.GameId
+	}
 	zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetUserRankList req userId=%d", req.UserId)
 	defer func() {
 		if retErr != nil {
@@ -670,7 +722,7 @@ func handleGMGetUserRankList(ctx context.Context, meta libdispatch.Meta, req *pb
 	if manager == nil {
 		return status.Error(codes.Internal, "rank manager not initialized")
 	}
-	rankEntries, err := manager.GetMemberRankEntries(ctx, req.UserId)
+	rankEntries, err := manager.GetMemberRankEntries(ctx, gameId, req.UserId)
 	if err != nil {
 		return status.Error(codes.Internal, err.Error())
 	}
@@ -688,6 +740,10 @@ func handleGMGetUserRankList(ctx context.Context, meta libdispatch.Meta, req *pb
 }
 
 func handleGMGetGroupRankList(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SGMGetGroupRankListRequest, resp *pb.PBS2SGMGetGroupRankListResponse) (retErr error) {
+	gameId := meta.GameId
+	if req.Context != nil && req.Context.GameId != 0 {
+		gameId = req.Context.GameId
+	}
 	zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetGroupRankList req bizType=%s actId=%d groupId=%d",
 		req.BizType, req.ActId, req.GroupId)
 	defer func() {
@@ -698,7 +754,7 @@ func handleGMGetGroupRankList(ctx context.Context, meta libdispatch.Meta, req *p
 		}
 	}()
 
-	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
+	svc, err := lookupEngineService(gameId, rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return err
 	}
@@ -713,7 +769,11 @@ func handleGMGetGroupRankList(ctx context.Context, meta libdispatch.Meta, req *p
 	return nil
 }
 
-func handleGMGetRankInstanceList(_ context.Context, _ libdispatch.Meta, req *pb.PBS2SGMGetRankInstanceListRequest, resp *pb.PBS2SGMGetRankInstanceListResponse) (retErr error) {
+func handleGMGetRankInstanceList(_ context.Context, meta libdispatch.Meta, req *pb.PBS2SGMGetRankInstanceListRequest, resp *pb.PBS2SGMGetRankInstanceListResponse) (retErr error) {
+	gameId := meta.GameId
+	if req.Context != nil && req.Context.GameId != 0 {
+		gameId = req.Context.GameId
+	}
 	zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetRankInstanceList req bizType=%s actId=%d", req.BizType, req.ActId)
 	defer func() {
 		if retErr != nil {
@@ -723,7 +783,7 @@ func handleGMGetRankInstanceList(_ context.Context, _ libdispatch.Meta, req *pb.
 		}
 	}()
 
-	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
+	svc, err := lookupEngineService(gameId, rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return err
 	}
@@ -743,6 +803,10 @@ func handleGMGetRankInstanceList(_ context.Context, _ libdispatch.Meta, req *pb.
 }
 
 func handleGMGetInstanceRankList(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SGMGetInstanceRankListRequest, resp *pb.PBS2SGMGetInstanceRankListResponse) (retErr error) {
+	gameId := meta.GameId
+	if req.Context != nil && req.Context.GameId != 0 {
+		gameId = req.Context.GameId
+	}
 	zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetInstanceRankList req bizType=%s actId=%d groupId=%d",
 		req.BizType, req.ActId, req.GroupId)
 	defer func() {
@@ -753,7 +817,7 @@ func handleGMGetInstanceRankList(ctx context.Context, meta libdispatch.Meta, req
 		}
 	}()
 
-	svc, err := lookupEngineService(rankservice.BizType(req.BizType), req.ActId)
+	svc, err := lookupEngineService(gameId, rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return err
 	}
@@ -773,12 +837,12 @@ func handleGMGetInstanceRankList(ctx context.Context, meta libdispatch.Meta, req
 
 // --- 辅助函数 ---
 
-func lookupEngineService(bizType rankservice.BizType, actID int32) (*engine.Service, error) {
+func lookupEngineService(gameId int32, bizType rankservice.BizType, actID int32) (*engine.Service, error) {
 	manager := rankservice.GetGlobalManager()
 	if manager == nil {
 		return nil, status.Error(codes.Internal, "rank manager not initialized")
 	}
-	svc := manager.GetEngineService(bizType, actID)
+	svc := manager.GetEngineService(gameId, bizType, actID)
 	if svc == nil {
 		return nil, status.Errorf(codes.NotFound, "service not found: bizType=%s actId=%d", bizType, actID)
 	}

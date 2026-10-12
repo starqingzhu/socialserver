@@ -68,7 +68,7 @@ func TestGetMemberRankEntriesDoesNotHoldLockDuringIO(t *testing.T) {
 	blocking := newBlockingRankService()
 	idx := NewMemberIndex(nil, 0) // 内存模式：Lookup 不需要 Redis
 	const userID = int64(60001)
-	idx.Track(userID, MemberEntry{BizType: "blocking", ActID: 1, GroupID: 1})
+	idx.Track(0, userID, MemberEntry{BizType: "blocking", ActID: 1, GroupID: 1})
 
 	m := &Manager{
 		memberIndex:    idx,
@@ -79,7 +79,7 @@ func TestGetMemberRankEntriesDoesNotHoldLockDuringIO(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if _, err := m.GetMemberRankEntries(context.Background(), userID); err != nil {
+		if _, err := m.GetMemberRankEntries(context.Background(), 0, userID); err != nil {
 			t.Errorf("GetMemberRankEntries: %v", err)
 		}
 	}()
@@ -141,7 +141,7 @@ func TestConcurrentRegisterEngineReturnsSingleInstance(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			results[i], errs[i] = m.registerEngine(context.Background(), "concreg", cfg)
+			results[i], errs[i] = m.registerEngine(context.Background(), 0, "concreg", cfg)
 		}(i)
 	}
 	close(start)
@@ -188,14 +188,14 @@ func TestRegisterEngineSecondCallIsNoop(t *testing.T) {
 		OpenTime: now, CloseTime: now + int64(time.Hour/time.Millisecond),
 	}
 
-	first, err := m.registerEngine(context.Background(), "concreg2", cfg)
+	first, err := m.registerEngine(context.Background(), 0, "concreg2", cfg)
 	if err != nil {
 		t.Fatalf("首次 registerEngine: %v", err)
 	}
 	defKey := rediskeys.GetRankDefKey(cfg.RankCode)
 	mr.Del(defKey) // 若第二次调用真的重跑了注册，这个 key 会被重新写出来
 
-	second, err := m.registerEngine(context.Background(), "concreg2", cfg)
+	second, err := m.registerEngine(context.Background(), 0, "concreg2", cfg)
 	if err != nil {
 		t.Fatalf("第二次 registerEngine: %v", err)
 	}

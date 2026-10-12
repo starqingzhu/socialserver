@@ -53,7 +53,7 @@ func (m *Manager) registerSubService(ctx context.Context, bizType BizType, logic
 	}
 
 	onMemberJoin := func(userID int64, groupID int32) {
-		m.memberIndex.Track(userID, MemberEntry{
+		m.memberIndex.Track(cfg.GameID, userID, MemberEntry{
 			BizType: bizType,
 			ActID:   cfg.ActID,
 			GroupID: groupID,
@@ -94,7 +94,7 @@ func (m *Manager) replaceSubService(ctx context.Context, bizType BizType, logica
 	}
 
 	onMemberJoin := func(userID int64, groupID int32) {
-		m.memberIndex.Track(userID, MemberEntry{
+		m.memberIndex.Track(cfg.GameID, userID, MemberEntry{
 			BizType: bizType,
 			ActID:   cfg.ActID,
 			GroupID: groupID,
@@ -118,40 +118,40 @@ func (m *Manager) tickPeriodicActivities(ctx context.Context, now int64) {
 }
 
 // GetPeriodicState 线程安全地读取 PeriodicState（供外部包使用）。
-func (m *Manager) GetPeriodicState(bizType BizType, actID int32) *PeriodicState {
+func (m *Manager) GetPeriodicState(gameId int32, bizType BizType, actID int32) *PeriodicState {
 	if m == nil {
 		return nil
 	}
-	return m.periodicHandler.GetState(NewBizKey(bizType, actID).String())
+	return m.periodicHandler.GetState(NewGameBizKey(gameId, bizType, actID).String())
 }
 
 // GetHistoricalRoundList 查询历史轮次的排行榜。
-func (m *Manager) GetHistoricalRoundList(ctx context.Context, bizType BizType, actID int32, round int32, userID int64, start, end int64) ([]commonrank.RankMemberSnapshot, *commonrank.RankMemberSnapshot, error) {
-	return m.periodicHandler.GetHistoricalRoundList(ctx, string(bizType), actID, round, userID, start, end)
+func (m *Manager) GetHistoricalRoundList(ctx context.Context, gameId int32, bizType BizType, actID int32, round int32, userID int64, start, end int64) ([]commonrank.RankMemberSnapshot, *commonrank.RankMemberSnapshot, error) {
+	return m.periodicHandler.GetHistoricalRoundList(ctx, gameId, string(bizType), actID, round, userID, start, end)
 }
 
 // GetHistoricalRewardUsers 查询历史轮次的入榜真实玩家 ID 列表。
-func (m *Manager) GetHistoricalRewardUsers(ctx context.Context, bizType BizType, actID int32, round int32) ([]int64, error) {
-	return m.periodicHandler.GetHistoricalRewardUsers(ctx, string(bizType), actID, round)
+func (m *Manager) GetHistoricalRewardUsers(ctx context.Context, gameId int32, bizType BizType, actID int32, round int32) ([]int64, error) {
+	return m.periodicHandler.GetHistoricalRewardUsers(ctx, gameId, string(bizType), actID, round)
 }
 
 // GetHistoricalClaimStatus 查询历史轮次的奖励领取状态。
-func (m *Manager) GetHistoricalClaimStatus(bizType BizType, actID int32, round int32, userID int64) (claimed bool, claimTime int64, err error) {
-	return m.periodicHandler.GetHistoricalClaimStatus(string(bizType), actID, round, userID)
+func (m *Manager) GetHistoricalClaimStatus(gameId int32, bizType BizType, actID int32, round int32, userID int64) (claimed bool, claimTime int64, err error) {
+	return m.periodicHandler.GetHistoricalClaimStatus(gameId, string(bizType), actID, round, userID)
 }
 
 // ClaimHistoricalReward 为历史轮次记录奖励领取。
-func (m *Manager) ClaimHistoricalReward(bizType BizType, actID int32, round int32, userID int64) (claimed bool, claimTime int64, err error) {
-	return m.periodicHandler.ClaimHistoricalReward(string(bizType), actID, round, userID)
+func (m *Manager) ClaimHistoricalReward(gameId int32, bizType BizType, actID int32, round int32, userID int64) (claimed bool, claimTime int64, err error) {
+	return m.periodicHandler.ClaimHistoricalReward(gameId, string(bizType), actID, round, userID)
 }
 
 // GetRoundInfos 返回活动的轮次摘要列表（按轮次升序）。
 // 一次性排行榜返回虚拟单轮；周期排行榜委托给 periodicHandler。
-func (m *Manager) GetRoundInfos(bizType BizType, actID int32) (currentRound int32, rounds []periodic.RoundInfo, err error) {
-	key := NewBizKey(bizType, actID).String()
+func (m *Manager) GetRoundInfos(gameId int32, bizType BizType, actID int32) (currentRound int32, rounds []periodic.RoundInfo, err error) {
+	key := NewGameBizKey(gameId, bizType, actID).String()
 	state := m.periodicHandler.GetState(key)
 	if state == nil {
-		svc := m.GetEngineService(bizType, actID)
+		svc := m.GetEngineService(gameId, bizType, actID)
 		if svc == nil {
 			return 0, nil, fmt.Errorf("service not found: bizType=%s actID=%d", bizType, actID)
 		}
@@ -169,11 +169,11 @@ func (m *Manager) GetRoundInfos(bizType BizType, actID int32) (currentRound int3
 
 // GetCurrentRoundInfo 直接返回活动当前轮次信息，不枚举所有轮次。
 // 一次性排行榜返回虚拟单轮；周期排行榜从 Redis 读取权威轮号后计算时间窗口。
-func (m *Manager) GetCurrentRoundInfo(bizType BizType, actID int32) (periodic.RoundInfo, error) {
-	key := NewBizKey(bizType, actID).String()
+func (m *Manager) GetCurrentRoundInfo(gameId int32, bizType BizType, actID int32) (periodic.RoundInfo, error) {
+	key := NewGameBizKey(gameId, bizType, actID).String()
 	state := m.periodicHandler.GetState(key)
 	if state == nil {
-		svc := m.GetEngineService(bizType, actID)
+		svc := m.GetEngineService(gameId, bizType, actID)
 		if svc == nil {
 			return periodic.RoundInfo{}, fmt.Errorf("service not found: bizType=%s actID=%d", bizType, actID)
 		}
@@ -193,11 +193,11 @@ func (m *Manager) GetCurrentRoundInfo(bizType BizType, actID int32) (periodic.Ro
 // round=0 表示当前轮。
 // 一次性排行榜或请求当前轮（且服务活跃）：返回 (svc, false)；
 // 周期排行榜历史轮次（round < currentRound）或当前轮已结算/服务不可用：返回 (nil, true)。
-func (m *Manager) ResolveEngineService(bizType BizType, actID int32, round int32) (svc *engine.Service, isHistorical bool) {
-	key := NewBizKey(bizType, actID).String()
+func (m *Manager) ResolveEngineService(gameId int32, bizType BizType, actID int32, round int32) (svc *engine.Service, isHistorical bool) {
+	key := NewGameBizKey(gameId, bizType, actID).String()
 	state := m.periodicHandler.GetState(key)
 	if state == nil {
-		currentSvc := m.GetEngineService(bizType, actID)
+		currentSvc := m.GetEngineService(gameId, bizType, actID)
 		if currentSvc != nil {
 			return currentSvc, false
 		}
@@ -228,7 +228,7 @@ func (m *Manager) ResolveEngineService(bizType BizType, actID int32, round int32
 	// effectiveRound >= curRound：检查当前服务是否可用且未结算。
 	// 若服务不存在或已全部结算（活动最后一轮结束后、重启恢复后等场景），
 	// 路由到历史 MongoDB 路径以保证数据可靠返回，避免因 Redis 热数据已清理而出错。
-	currentSvc := m.GetEngineService(bizType, actID)
+	currentSvc := m.GetEngineService(gameId, bizType, actID)
 	if currentSvc == nil || currentSvc.IsSettled() {
 		return nil, true
 	}
@@ -236,16 +236,25 @@ func (m *Manager) ResolveEngineService(bizType BizType, actID int32, round int32
 }
 
 // FallbackClaimReward 为一次性排行榜在服务不在内存时（>7天后重启或GM删除前）直接走 Store/DAO 路径。
-// bizId 固定为 "{bizType}_{actID}"（无轮次后缀）。
-func (m *Manager) FallbackClaimReward(bizType BizType, actID int32, userID int64, now int64) (bool, int64, error) {
-	bizId := fmt.Sprintf("%s_%d", bizType, actID)
+func (m *Manager) FallbackClaimReward(gameId int32, bizType BizType, actID int32, userID int64, now int64) (bool, int64, error) {
+	var bizId string
+	if gameId != 0 {
+		bizId = fmt.Sprintf("g%d_%s_%d", gameId, bizType, actID)
+	} else {
+		bizId = fmt.Sprintf("%s_%d", bizType, actID)
+	}
 	store := engine.NewStore(m.rdb, m.dao, bizId, nil)
 	return store.AtomicClaim(userID, now)
 }
 
 // FallbackGetClaimStatus 为一次性排行榜在服务不在内存时直接走 Store/DAO 路径查询领奖状态。
-func (m *Manager) FallbackGetClaimStatus(bizType BizType, actID int32, userID int64) (bool, int64, error) {
-	bizId := fmt.Sprintf("%s_%d", bizType, actID)
+func (m *Manager) FallbackGetClaimStatus(gameId int32, bizType BizType, actID int32, userID int64) (bool, int64, error) {
+	var bizId string
+	if gameId != 0 {
+		bizId = fmt.Sprintf("g%d_%s_%d", gameId, bizType, actID)
+	} else {
+		bizId = fmt.Sprintf("%s_%d", bizType, actID)
+	}
 	store := engine.NewStore(m.rdb, m.dao, bizId, nil)
 	ct, found, err := store.GetClaim(userID)
 	if err != nil {
