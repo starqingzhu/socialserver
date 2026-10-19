@@ -28,9 +28,12 @@ type ServiceRegistrar interface {
 
 // PeriodicMeta 存储在 Redis 中的周期活动元数据，用于在 MongoDB 数据不可用时从 Redis 恢复活动。
 type PeriodicMeta struct {
-	TotalOpenTime  int64
-	TotalCloseTime int64
-	CycleMinutes   int32
+	TotalOpenTime    int64
+	TotalCloseTime   int64
+	CycleMinutes     int32
+	BaseCycleMinutes int32
+	RoundOpenTime    int64
+	RoundCloseTime   int64
 }
 
 // Handler 封装周期排行榜的所有运行时逻辑，由 Manager 通过组合持有。
@@ -276,7 +279,11 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 		if newCycle, ok := h.cycleProvider(state.BizType); ok && newCycle > 0 && newCycle != state.CycleMinutes {
 			oldCycle := state.CycleMinutes
 			state.CycleMinutes = newCycle
-			zaplog.LoggerSugar.Infof("rank periodic: cycleMinutes updated logicalKey=%s round=%d old=%d new=%d",
+			// 周期变更后，下一轮必须紧接当前轮（currentRound+1），避免：
+			// 1) 周期变长时 computeRoundWindow 按 TotalOpenTime 算出远未来时间，导致时间空白
+			// 2) 周期变短时 nextAdvanceRound 跳到远超 currentRound+1 的轮次，而该轮开始时间可能还在未来
+			nextRound = state.GetCurrentRound() + 1
+			zaplog.LoggerSugar.Infof("rank periodic: cycleMinutes updated logicalKey=%s nextRound=%d old=%d new=%d",
 				logicalKey, nextRound, oldCycle, newCycle)
 			// 持久化到 MongoDB，保证重启后仍使用新值
 			if h.dao != nil {
@@ -284,6 +291,8 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 					zaplog.LoggerSugar.Warnf("rank periodic: save state after cycle update logicalKey=%s: %v", logicalKey, err)
 				}
 			}
+			// 同步更新 Redis meta，使降级恢复路径也能拿到新周期
+			h.setPeriodicMetaInRedis(logicalKey, state)
 		}
 	}
 
@@ -713,18 +722,20 @@ func (h *Handler) GetCurRoundFromRedis(logicalKey string) int32 {
 }
 
 // setPeriodicMetaInRedis 将周期活动元数据同步写入 Redis。
-// 格式："TotalOpenTime,TotalCloseTime,CycleMinutes"，供重启后 MongoDB 不可用时降级恢复。
+// 格式："TotalOpenTime,TotalCloseTime,CycleMinutes,BaseCycleMinutes,RoundOpenTime,RoundCloseTime"
+// 供重启后 MongoDB 不可用时降级恢复。后三个字段为 v2 新增，使降级路径能准确恢复当前轮窗口。
 func (h *Handler) setPeriodicMetaInRedis(logicalKey string, state *PeriodicState) {
 	if h.rdb == nil {
 		return
 	}
-	val := fmt.Sprintf("%d,%d,%d", state.TotalOpenTime, state.TotalCloseTime, state.CycleMinutes)
+	val := fmt.Sprintf("%d,%d,%d,%d,%d,%d", state.TotalOpenTime, state.TotalCloseTime, state.CycleMinutes, state.BaseCycleMinutes, state.RoundOpenTime, state.RoundCloseTime)
 	if err := h.rdb.Set(periodicMetaRedisKey(logicalKey), val); err != nil {
 		zaplog.LoggerSugar.Warnf("rank periodic: set periodic_meta redis key logicalKey=%s: %v", logicalKey, err)
 	}
 }
 
 // GetPeriodicMetaFromRedis 从 Redis 读取周期活动元数据；不存在或解析失败时返回 (PeriodicMeta{}, false)。
+// 兼容旧格式 3/4 字段，新格式 6 字段可携带当前轮窗口。
 func (h *Handler) GetPeriodicMetaFromRedis(logicalKey string) (PeriodicMeta, bool) {
 	if h.rdb == nil {
 		return PeriodicMeta{}, false
@@ -734,7 +745,7 @@ func (h *Handler) GetPeriodicMetaFromRedis(logicalKey string) (PeriodicMeta, boo
 		return PeriodicMeta{}, false
 	}
 	parts := strings.Split(val, ",")
-	if len(parts) != 3 {
+	if len(parts) != 3 && len(parts) != 4 && len(parts) != 6 {
 		return PeriodicMeta{}, false
 	}
 	totalOpen, err1 := strconv.ParseInt(parts[0], 10, 64)
@@ -743,9 +754,29 @@ func (h *Handler) GetPeriodicMetaFromRedis(logicalKey string) (PeriodicMeta, boo
 	if err1 != nil || err2 != nil || err3 != nil {
 		return PeriodicMeta{}, false
 	}
-	return PeriodicMeta{
+	meta := PeriodicMeta{
 		TotalOpenTime:  totalOpen,
 		TotalCloseTime: totalClose,
 		CycleMinutes:   int32(cycleMin),
-	}, true
+	}
+	// 4 字段格式：BaseCycleMinutes
+	if len(parts) >= 4 {
+		if baseCycleMin, err := strconv.ParseInt(parts[3], 10, 32); err == nil {
+			meta.BaseCycleMinutes = int32(baseCycleMin)
+		}
+	}
+	// 6 字段格式：携带当前轮窗口
+	if len(parts) >= 6 {
+		if roundOpen, err := strconv.ParseInt(parts[4], 10, 64); err == nil {
+			meta.RoundOpenTime = roundOpen
+		}
+		if roundClose, err := strconv.ParseInt(parts[5], 10, 64); err == nil {
+			meta.RoundCloseTime = roundClose
+		}
+	}
+	// BaseCycleMinutes 缺失时退化为 CycleMinutes
+	if meta.BaseCycleMinutes == 0 {
+		meta.BaseCycleMinutes = meta.CycleMinutes
+	}
+	return meta, true
 }

@@ -842,20 +842,29 @@ func (m *Manager) tryRecoverPeriodicFromRedis(ctx context.Context, roundBizId st
 		curRound = 1
 	}
 
-	cycleDurMs := int64(meta.CycleMinutes) * 60 * 1000
-	roundOpen := meta.TotalOpenTime + int64(curRound-1)*cycleDurMs
-	roundClose := roundOpen + cycleDurMs
-	if roundClose > meta.TotalCloseTime {
-		roundClose = meta.TotalCloseTime
+	var roundOpen, roundClose int64
+	if meta.RoundOpenTime > 0 && meta.RoundCloseTime > 0 {
+		// 新格式：有准确的当前轮窗口（周期变更后也能正确恢复）
+		roundOpen = meta.RoundOpenTime
+		roundClose = meta.RoundCloseTime
+	} else {
+		// 旧格式降级：按原始周期从 TotalOpenTime 计算（仅对未变更周期的活动准确）
+		cycleDurMs := int64(meta.CycleMinutes) * 60 * 1000
+		roundOpen = meta.TotalOpenTime + int64(curRound-1)*cycleDurMs
+		roundClose = roundOpen + cycleDurMs
+		if roundClose > meta.TotalCloseTime {
+			roundClose = meta.TotalCloseTime
+		}
 	}
 
 	saved := engine.PeriodicSavedState{
-		CycleMinutes:   meta.CycleMinutes,
-		TotalOpenTime:  meta.TotalOpenTime,
-		TotalCloseTime: meta.TotalCloseTime,
-		CurrentRound:   curRound,
-		RoundOpenTime:  roundOpen,
-		RoundCloseTime: roundClose,
+		CycleMinutes:     meta.CycleMinutes,
+		BaseCycleMinutes: meta.BaseCycleMinutes,
+		TotalOpenTime:    meta.TotalOpenTime,
+		TotalCloseTime:   meta.TotalCloseTime,
+		CurrentRound:     curRound,
+		RoundOpenTime:    roundOpen,
+		RoundCloseTime:   roundClose,
 	}
 	ps := periodic.StateFromSaved(string(bizType), actID, saved)
 	m.periodicHandler.SetState(logicalKey, ps)

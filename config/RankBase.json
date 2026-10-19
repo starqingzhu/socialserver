@@ -22,7 +22,7 @@
   {
     "balloonRankOpenToken": "0",
     "bizType": "camper_competition",
-    "cycleMinutes": "10080",
+    "cycleMinutes": "5",
     "id": "3",
     "name": "camper_competition_title",
     "rankPeopleNum": "30",

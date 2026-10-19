@@ -39,12 +39,13 @@ func (d *DAO) session() *mongodbmodule.Session {
 
 // PeriodicSavedState 周期排行榜运行时状态，与逻辑活动的 RankConfigDoc 一同持久化。
 type PeriodicSavedState struct {
-	CycleMinutes   int32 `bson:"cycleMinutes"`
-	TotalOpenTime  int64 `bson:"totalOpenTime"`
-	TotalCloseTime int64 `bson:"totalCloseTime"`
-	CurrentRound   int32 `bson:"currentRound"`
-	RoundOpenTime  int64 `bson:"roundOpenTime"`
-	RoundCloseTime int64 `bson:"roundCloseTime"`
+	CycleMinutes     int32 `bson:"cycleMinutes"`
+	BaseCycleMinutes int32 `bson:"baseCycleMinutes"` // 初始周期，用于历史轮次时间窗口计算
+	TotalOpenTime    int64 `bson:"totalOpenTime"`
+	TotalCloseTime   int64 `bson:"totalCloseTime"`
+	CurrentRound     int32 `bson:"currentRound"`
+	RoundOpenTime    int64 `bson:"roundOpenTime"`
+	RoundCloseTime   int64 `bson:"roundCloseTime"`
 }
 
 // RankConfigDoc 排行榜配置文档，所有业务类型统一存储于 commonrank.CT_RANK_CONFIG 集合。
