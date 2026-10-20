@@ -299,6 +299,31 @@ func (m *Manager) registerEngine(ctx context.Context, bizType BizType, cfg engin
 	return service, nil
 }
 
+// IsRankTrulyNotFound 判断排行榜是否确实不存在（而非仅从 Redis/MongoDB 未加载到内存）。
+func (m *Manager) IsRankTrulyNotFound(bizType BizType, actID int32) bool {
+	if m == nil {
+		return false
+	}
+	key := NewBizKey(bizType, actID).String()
+
+	// 内存中存在活跃服务或周期状态
+	if m.GetEngineService(bizType, actID) != nil {
+		return false
+	}
+	if m.GetPeriodicState(bizType, actID) != nil {
+		return false
+	}
+
+	// MongoDB 中存在配置文档（无论一次性还是周期活动）
+	if m.dao != nil {
+		if _, exists, err := m.dao.LoadRankConfig(key); err == nil && exists {
+			return false
+		}
+	}
+
+	return true
+}
+
 // GetService 返回指定业务类型和活动ID的通用服务接口。
 func (m *Manager) GetService(bizType BizType, actID int32) RankBizService {
 	if m == nil {

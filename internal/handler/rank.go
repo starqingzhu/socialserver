@@ -83,9 +83,16 @@ func handleUpsertScore(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 		}
 	}
 
-	svc, err := lookupEngineService(bizType, req.ActId)
-	if err != nil {
-		return err
+	if manager == nil {
+		return status.Error(codes.Internal, "rank manager not initialized")
+	}
+	svc := manager.GetEngineService(bizType, req.ActId)
+	if svc == nil {
+		if manager.IsRankTrulyNotFound(bizType, req.ActId) {
+			resp.MsgCode = commonMsg.MsgCode_CODE_RANK_NOT_FOUND
+			return nil
+		}
+		return status.Errorf(codes.NotFound, "service not found: bizType=%s actId=%d", bizType, req.ActId)
 	}
 	if err := svc.UpsertScore(ctx, req.UserId, req.TotalScore, req.Timestamp, protoAvatarInfoToRank(req.AvatarInfo)); err != nil {
 		if errors.Is(err, rank.ErrInstanceClosed) {
@@ -150,6 +157,10 @@ func handleGetRankList(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 	}
 
 	if svc == nil {
+		if manager.IsRankTrulyNotFound(bizType, req.ActId) {
+			resp.MsgCode = commonMsg.MsgCode_CODE_RANK_NOT_FOUND
+			return nil
+		}
 		return status.Errorf(codes.NotFound, "service not found: bizType=%s actId=%d", req.BizType, req.ActId)
 	}
 	snapshot, groupID, err := svc.GetMemberRank(ctx, req.UserId)
@@ -217,11 +228,16 @@ func handleGetMemberRank(ctx context.Context, meta libdispatch.Meta, req *pb.PBS
 			zaplog.LoggerSugar.Infof("[rank] S2SGetMemberRank user not in historical rank bizType=%s actId=%d userId=%d round=%d",
 				req.BizType, req.ActId, req.UserId, req.Round)
 		}
+		resp.MsgCode = commonMsg.MsgCode_CODE_OK
 		resp.Snapshot = snapshotToProto(mySnap)
 		resp.SettleStage = 1
 		return nil
 	}
 	if svc == nil {
+		if manager.IsRankTrulyNotFound(bizType, req.ActId) {
+			resp.MsgCode = commonMsg.MsgCode_CODE_RANK_NOT_FOUND
+			return nil
+		}
 		return status.Errorf(codes.NotFound, "service not found: bizType=%s actId=%d", req.BizType, req.ActId)
 	}
 	snapshot, groupID, err := svc.GetMemberRank(ctx, req.UserId)
@@ -239,6 +255,7 @@ func handleGetMemberRank(ctx context.Context, meta libdispatch.Meta, req *pb.PBS
 			settleStage = 1
 		}
 	}
+	resp.MsgCode = commonMsg.MsgCode_CODE_OK
 	resp.Snapshot = snapshotToProto(snapshot)
 	resp.SettleStage = settleStage
 	return nil
@@ -296,12 +313,18 @@ func handleGetRewardUsers(ctx context.Context, meta libdispatch.Meta, req *pb.PB
 		if err != nil {
 			return status.Error(codes.Internal, err.Error())
 		}
+		resp.MsgCode = commonMsg.MsgCode_CODE_OK
 		resp.UserIds = userIDs
 		return nil
 	}
 	if svc == nil {
+		if manager.IsRankTrulyNotFound(bizType, req.ActId) {
+			resp.MsgCode = commonMsg.MsgCode_CODE_RANK_NOT_FOUND
+			return nil
+		}
 		return status.Errorf(codes.NotFound, "service not found: bizType=%s actId=%d", req.BizType, req.ActId)
 	}
+	resp.MsgCode = commonMsg.MsgCode_CODE_OK
 	resp.UserIds = svc.GetOpenRewardUserIDs()
 	return nil
 }
@@ -641,6 +664,10 @@ func handleGetRankCurRound(_ context.Context, _ libdispatch.Meta, req *pb.PBS2SG
 	}
 	info, err := manager.GetCurrentRoundInfo(rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
+		if manager.IsRankTrulyNotFound(rankservice.BizType(req.BizType), req.ActId) {
+			resp.MsgCode = commonMsg.MsgCode_CODE_RANK_NOT_FOUND
+			return nil
+		}
 		return status.Error(codes.NotFound, err.Error())
 	}
 	resp.MsgCode = commonMsg.MsgCode_CODE_OK
