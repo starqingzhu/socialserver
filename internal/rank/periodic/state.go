@@ -17,12 +17,13 @@ import (
 //   - currentRound 由 tick 单 goroutine 写，多 RPC goroutine 读：通过 atomic 保护。
 //   - RoundOpenTime/RoundCloseTime 仅由 tick goroutine 读写，无需额外同步。
 type PeriodicState struct {
-	GameID         int32
-	BizType        string
-	ActID          int32
-	CycleMinutes   int32
-	TotalOpenTime  int64
-	TotalCloseTime int64
+	GameID           int32
+	BizType          string
+	ActID            int32
+	CycleMinutes     int32
+	BaseCycleMinutes int32 // 初始周期，历史轮次时间窗口计算用（周期变更后保持不变）
+	TotalOpenTime    int64
+	TotalCloseTime   int64
 
 	currentRound   int32 // 仅通过 GetCurrentRound/setCurrentRound 访问
 	RoundOpenTime  int64
@@ -117,11 +118,40 @@ func (p *PeriodicState) currentBizId() string {
 // computeRoundWindow 根据总开始时间和周期分钟数计算第 round 轮的时间窗口。
 // 最后一轮的结束时间截断至 TotalCloseTime。
 // CycleMinutes<=0 时退化为整体活动窗口（防御性保护）。
+//
+// 周期变更后的计算规则：
+//   - 当前轮：直接返回保存的 RoundOpenTime/RoundCloseTime
+//   - 未来轮次：从当前轮结束时间 RoundCloseTime 开始按新周期递增，避免周期变长后出现时间空白
+//   - 历史轮次：用 BaseCycleMinutes（初始周期）计算，保证显示时间与实际运行时一致
 func (p *PeriodicState) computeRoundWindow(round int32) (openTime, closeTime int64) {
 	if p.CycleMinutes <= 0 {
 		return p.TotalOpenTime, p.TotalCloseTime
 	}
-	cycleDur := int64(p.CycleMinutes) * 60 * 1000
+
+	// 当前轮：返回保存的实际窗口（最准确）
+	if round == p.GetCurrentRound() && p.RoundOpenTime > 0 {
+		return p.RoundOpenTime, p.RoundCloseTime
+	}
+
+	// 未来轮次：从当前轮结束时间开始按新周期递增
+	// 周期变更后 TotalOpenTime 不再是正确基准，必须用 RoundCloseTime 衔接
+	if round > p.GetCurrentRound() && p.RoundCloseTime > 0 {
+		cycleDur := int64(p.CycleMinutes) * 60 * 1000
+		offset := round - p.GetCurrentRound() - 1
+		openTime = p.RoundCloseTime + int64(offset)*cycleDur
+		closeTime = openTime + cycleDur
+		if closeTime > p.TotalCloseTime {
+			closeTime = p.TotalCloseTime
+		}
+		return
+	}
+
+	// 历史轮次：用初始周期计算，避免周期变更后历史轮次显示时间漂移
+	cycleMinutes := p.CycleMinutes
+	if p.BaseCycleMinutes > 0 && round < p.GetCurrentRound() {
+		cycleMinutes = p.BaseCycleMinutes
+	}
+	cycleDur := int64(cycleMinutes) * 60 * 1000
 	openTime = p.TotalOpenTime + int64(round-1)*cycleDur
 	closeTime = openTime + cycleDur
 	if closeTime > p.TotalCloseTime {
@@ -212,28 +242,34 @@ func (p *PeriodicState) advanceToRound(round int32) bool {
 // ToSavedState 转换为用于持久化的 DAO 结构。
 func (p *PeriodicState) ToSavedState() engine.PeriodicSavedState {
 	return engine.PeriodicSavedState{
-		CycleMinutes:   p.CycleMinutes,
-		TotalOpenTime:  p.TotalOpenTime,
-		TotalCloseTime: p.TotalCloseTime,
-		CurrentRound:   p.GetCurrentRound(),
-		RoundOpenTime:  p.RoundOpenTime,
-		RoundCloseTime: p.RoundCloseTime,
+		CycleMinutes:     p.CycleMinutes,
+		BaseCycleMinutes: p.BaseCycleMinutes,
+		TotalOpenTime:    p.TotalOpenTime,
+		TotalCloseTime:   p.TotalCloseTime,
+		CurrentRound:     p.GetCurrentRound(),
+		RoundOpenTime:    p.RoundOpenTime,
+		RoundCloseTime:   p.RoundCloseTime,
 	}
 }
 
 // StateFromSaved 从持久化结构和逻辑活动信息恢复 PeriodicState。
 func StateFromSaved(gameId int32, bizType string, actID int32, s engine.PeriodicSavedState) *PeriodicState {
 	p := &PeriodicState{
-		GameID:         gameId,
-		BizType:        bizType,
-		ActID:          actID,
-		CycleMinutes:   s.CycleMinutes,
-		TotalOpenTime:  s.TotalOpenTime,
-		TotalCloseTime: s.TotalCloseTime,
-		RoundOpenTime:  s.RoundOpenTime,
-		RoundCloseTime: s.RoundCloseTime,
+		GameID:           gameId,
+		BizType:          bizType,
+		ActID:            actID,
+		CycleMinutes:     s.CycleMinutes,
+		BaseCycleMinutes: s.BaseCycleMinutes,
+		TotalOpenTime:    s.TotalOpenTime,
+		TotalCloseTime:   s.TotalCloseTime,
+		RoundOpenTime:    s.RoundOpenTime,
+		RoundCloseTime:   s.RoundCloseTime,
 	}
 	p.currentRound = s.CurrentRound // 创建阶段未共享，直接赋值
+	// 兼容旧数据：BaseCycleMinutes 缺失时退化为 CycleMinutes
+	if p.BaseCycleMinutes == 0 {
+		p.BaseCycleMinutes = p.CycleMinutes
+	}
 	return p
 }
 
@@ -245,12 +281,13 @@ func NewPeriodicState(gameId int32, bizType string, actID int32, cycleMinutes in
 		return nil, fmt.Errorf("periodic: cycleMinutes must be > 0, got %d", cycleMinutes)
 	}
 	p := &PeriodicState{
-		GameID:         gameId,
-		BizType:        bizType,
-		ActID:          actID,
-		CycleMinutes:   cycleMinutes,
-		TotalOpenTime:  totalOpenTime,
-		TotalCloseTime: totalCloseTime,
+		GameID:           gameId,
+		BizType:          bizType,
+		ActID:            actID,
+		CycleMinutes:     cycleMinutes,
+		BaseCycleMinutes: cycleMinutes,
+		TotalOpenTime:    totalOpenTime,
+		TotalCloseTime:   totalCloseTime,
 	}
 	curRound := p.computeRoundAt(time.Now().UnixMilli())
 	p.currentRound = curRound

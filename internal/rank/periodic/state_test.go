@@ -3,6 +3,8 @@ package periodic
 import (
 	"testing"
 	"time"
+
+	"socialserver/internal/rank/engine"
 )
 
 func TestComputeRoundAt(t *testing.T) {
@@ -161,5 +163,112 @@ func TestNewPeriodicStateClampsToLastRoundAfterClose(t *testing.T) {
 	}
 	if state.RoundCloseTime != state.TotalCloseTime {
 		t.Fatalf("last round close = %d, want TotalCloseTime %d", state.RoundCloseTime, state.TotalCloseTime)
+	}
+}
+
+// TestComputeRoundWindowAfterCycleChange 验证周期变更后，未来轮次从历史轮次结束时间开始推算，
+// 而不是始终从 TotalOpenTime 计算。
+func TestComputeRoundWindowAfterCycleChange(t *testing.T) {
+	// 场景：周期从 30 分钟变到 60 分钟，当前第 2 轮结束于 60 分钟
+	state := &PeriodicState{
+		BizType:          "test",
+		ActID:            1,
+		CycleMinutes:     60, // 新周期
+		BaseCycleMinutes: 30, // 初始周期
+		TotalOpenTime:    0,
+		TotalCloseTime:   240 * 60 * 1000, // 4 小时
+	}
+	state.setCurrentRound(2)
+	state.RoundOpenTime = 30 * 60 * 1000  // 第 2 轮实际 30-60（旧周期）
+	state.RoundCloseTime = 60 * 60 * 1000 //
+
+	// 当前轮应返回保存的窗口
+	open, close := state.computeRoundWindow(2)
+	if open != state.RoundOpenTime || close != state.RoundCloseTime {
+		t.Fatalf("current round window = [%d,%d], want [%d,%d]", open, close, state.RoundOpenTime, state.RoundCloseTime)
+	}
+
+	// 未来轮次：第 3 轮应从当前轮结束时间 60 开始，持续 60 分钟
+	open, close = state.computeRoundWindow(3)
+	wantOpen := int64(60 * 60 * 1000)
+	wantClose := int64(120 * 60 * 1000)
+	if open != wantOpen || close != wantClose {
+		t.Fatalf("future round 3 window = [%d,%d], want [%d,%d]", open, close, wantOpen, wantClose)
+	}
+
+	// 历史轮次：第 1 轮应用初始周期 30 分钟计算
+	open, close = state.computeRoundWindow(1)
+	wantOpen = 0
+	wantClose = 30 * 60 * 1000
+	if open != wantOpen || close != wantClose {
+		t.Fatalf("historical round 1 window = [%d,%d], want [%d,%d]", open, close, wantOpen, wantClose)
+	}
+}
+
+// TestComputeRoundWindowShortenCycle 验证周期从长变短后，下一轮紧接当前轮结束。
+func TestComputeRoundWindowShortenCycle(t *testing.T) {
+	// 场景：周期从 60 分钟变到 30 分钟，当前第 2 轮结束于 120 分钟
+	state := &PeriodicState{
+		BizType:          "test",
+		ActID:            1,
+		CycleMinutes:     30, // 新周期
+		BaseCycleMinutes: 60, // 初始周期
+		TotalOpenTime:    0,
+		TotalCloseTime:   300 * 60 * 1000,
+	}
+	state.setCurrentRound(2)
+	state.RoundOpenTime = 60 * 60 * 1000   // 第 2 轮实际 60-120（旧周期）
+	state.RoundCloseTime = 120 * 60 * 1000 //
+
+	// 未来轮次：第 3 轮应从 120 开始，持续 30 分钟
+	open, close := state.computeRoundWindow(3)
+	wantOpen := int64(120 * 60 * 1000)
+	wantClose := int64(150 * 60 * 1000)
+	if open != wantOpen || close != wantClose {
+		t.Fatalf("future round 3 window = [%d,%d], want [%d,%d]", open, close, wantOpen, wantClose)
+	}
+}
+
+// TestBaseCycleMinutesCompat 验证 BaseCycleMinutes 缺失（旧数据）时退化为 CycleMinutes。
+func TestBaseCycleMinutesCompat(t *testing.T) {
+	saved := engine.PeriodicSavedState{
+		CycleMinutes:   15,
+		TotalOpenTime:  0,
+		TotalCloseTime: 1000000,
+		CurrentRound:   2,
+		RoundOpenTime:  300000,
+		RoundCloseTime: 600000,
+	}
+	ps := StateFromSaved(0, "balloon", 1, saved)
+	if ps.BaseCycleMinutes != 15 {
+		t.Fatalf("BaseCycleMinutes = %d, want 15 (fallback to CycleMinutes)", ps.BaseCycleMinutes)
+	}
+}
+
+// TestAdvanceRoundAfterCycleChange 验证周期变更后 advanceToRound 使用正确窗口。
+func TestAdvanceRoundAfterCycleChange(t *testing.T) {
+	state := &PeriodicState{
+		BizType:          "test",
+		ActID:            1,
+		CycleMinutes:     60,
+		BaseCycleMinutes: 30,
+		TotalOpenTime:    0,
+		TotalCloseTime:   240 * 60 * 1000,
+	}
+	state.setCurrentRound(2)
+	state.RoundOpenTime = 30 * 60 * 1000
+	state.RoundCloseTime = 60 * 60 * 1000
+
+	// 推进到第 3 轮
+	if !state.advanceToRound(3) {
+		t.Fatal("advanceToRound(3) = false, want true")
+	}
+	if state.GetCurrentRound() != 3 {
+		t.Fatalf("currentRound = %d, want 3", state.GetCurrentRound())
+	}
+	wantOpen := int64(60 * 60 * 1000)
+	wantClose := int64(120 * 60 * 1000)
+	if state.RoundOpenTime != wantOpen || state.RoundCloseTime != wantClose {
+		t.Fatalf("round 3 window = [%d,%d], want [%d,%d]", state.RoundOpenTime, state.RoundCloseTime, wantOpen, wantClose)
 	}
 }

@@ -139,7 +139,6 @@ func (m *Manager) syncLoop() {
 			m.syncFromMongo(ctx)
 			m.syncFromRedis(ctx)
 			m.warmUpAllServices(ctx)
-			m.refreshConfigFromFiles(ctx)
 		}
 	}
 }
@@ -303,6 +302,31 @@ func (m *Manager) registerEngine(ctx context.Context, gameId int32, bizType BizT
 	}
 
 	return service, nil
+}
+
+// IsRankTrulyNotFound 判断排行榜是否确实不存在（而非仅从 Redis/MongoDB 未加载到内存）。
+func (m *Manager) IsRankTrulyNotFound(gameId int32, bizType BizType, actID int32) bool {
+	if m == nil {
+		return false
+	}
+
+	// 内存中存在活跃服务或周期状态
+	if m.GetEngineService(gameId, bizType, actID) != nil {
+		return false
+	}
+	if m.GetPeriodicState(gameId, bizType, actID) != nil {
+		return false
+	}
+
+	// MongoDB 中存在配置文档（无论一次性还是周期活动）
+	if m.dao != nil {
+		key := NewGameBizKey(gameId, bizType, actID).String()
+		if _, exists, err := m.dao.LoadRankConfig(key); err == nil && exists {
+			return false
+		}
+	}
+
+	return true
 }
 
 // GetService 返回指定业务类型和活动ID的通用服务接口。
@@ -897,20 +921,29 @@ func (m *Manager) tryRecoverPeriodicFromRedis(ctx context.Context, roundBizId st
 		curRound = 1
 	}
 
-	cycleDurMs := int64(meta.CycleMinutes) * 60 * 1000
-	roundOpen := meta.TotalOpenTime + int64(curRound-1)*cycleDurMs
-	roundClose := roundOpen + cycleDurMs
-	if roundClose > meta.TotalCloseTime {
-		roundClose = meta.TotalCloseTime
+	var roundOpen, roundClose int64
+	if meta.RoundOpenTime > 0 && meta.RoundCloseTime > 0 {
+		// 新格式：有准确的当前轮窗口（周期变更后也能正确恢复）
+		roundOpen = meta.RoundOpenTime
+		roundClose = meta.RoundCloseTime
+	} else {
+		// 旧格式降级：按原始周期从 TotalOpenTime 计算（仅对未变更周期的活动准确）
+		cycleDurMs := int64(meta.CycleMinutes) * 60 * 1000
+		roundOpen = meta.TotalOpenTime + int64(curRound-1)*cycleDurMs
+		roundClose = roundOpen + cycleDurMs
+		if roundClose > meta.TotalCloseTime {
+			roundClose = meta.TotalCloseTime
+		}
 	}
 
 	saved := engine.PeriodicSavedState{
-		CycleMinutes:   meta.CycleMinutes,
-		TotalOpenTime:  meta.TotalOpenTime,
-		TotalCloseTime: meta.TotalCloseTime,
-		CurrentRound:   curRound,
-		RoundOpenTime:  roundOpen,
-		RoundCloseTime: roundClose,
+		CycleMinutes:     meta.CycleMinutes,
+		BaseCycleMinutes: meta.BaseCycleMinutes,
+		TotalOpenTime:    meta.TotalOpenTime,
+		TotalCloseTime:   meta.TotalCloseTime,
+		CurrentRound:     curRound,
+		RoundOpenTime:    roundOpen,
+		RoundCloseTime:   roundClose,
 	}
 	ps := periodic.StateFromSaved(gameId, string(bizType), actID, saved)
 	m.periodicHandler.SetState(logicalKey, ps)
@@ -986,38 +1019,6 @@ func (m *Manager) warmUpAllServices(ctx context.Context) {
 	}
 	wg.Wait()
 	zaplog.LoggerSugar.Infof("rank: warmUpAllServices completed, services=%d", len(svcs))
-}
-
-// refreshConfigFromFiles 定期从配置文件刷新排行榜参数（RankPeopleNum/OpenToken/RobotTiers/RobotInfos等），
-// 使配置变更后当前轮次即生效。不影响OpenTime/CloseTime等运行时状态。
-func (m *Manager) refreshConfigFromFiles(ctx context.Context) {
-	m.mu.RLock()
-	svcs := make([]*engine.Service, 0, len(m.engineServices))
-	for _, svc := range m.engineServices {
-		svcs = append(svcs, svc)
-	}
-	m.mu.RUnlock()
-	if len(svcs) == 0 {
-		return
-	}
-	for _, svc := range svcs {
-		cfg := svc.GetConfig()
-		bizType := BizType(cfg.BizType)
-		if bizType == "" {
-			continue
-		}
-		newCfg := cfg
-		if err := FillConfigFromFiles(bizType, &newCfg); err != nil {
-			zaplog.LoggerSugar.Warnf("rank: refresh config from files failed bizType=%s: %v", bizType, err)
-			continue
-		}
-		// 只有当配置有变化时才更新，避免无意义的锁竞争
-		if newCfg.RankPeopleNum != cfg.RankPeopleNum || newCfg.OpenToken != cfg.OpenToken ||
-			len(newCfg.RobotTiers) != len(cfg.RobotTiers) || len(newCfg.RobotInfos) != len(cfg.RobotInfos) {
-			svc.UpdateConfig(newCfg)
-			zaplog.LoggerSugar.Infof("rank: config refreshed from files bizType=%s rankPeopleNum=%d openToken=%d", bizType, newCfg.RankPeopleNum, newCfg.OpenToken)
-		}
-	}
 }
 
 // subscribeDeleteEvents 订阅排行榜删除广播，收到消息后立即在本节点移除对应 Service。
