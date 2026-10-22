@@ -70,6 +70,17 @@ func (d *DAO) dbName(bizId string) string {
 	return d.defaultDB
 }
 
+// DbNameForGameId 返回指定 gameId 对应的数据库名。
+// 供外部（如 Manager.EnsureIndexesForGames）按游戏列表批量初始化索引。
+func (d *DAO) DbNameForGameId(gameId int32) string {
+	if d.dbResolver != nil {
+		if db := d.dbResolver(gameId); db != "" {
+			return db
+		}
+	}
+	return d.defaultDB
+}
+
 // --- 活动注册表 ---
 
 // PeriodicSavedState 周期排行榜运行时状态，与逻辑活动的 RankConfigDoc 一同持久化。
@@ -97,9 +108,11 @@ func (d *DAO) SaveRankConfig(bizKey string, cfg Config) error {
 	persisted := cfg
 	persisted.RobotTiers = nil
 	persisted.RobotInfos = nil
-	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
+	db := d.dbName(bizKey)
+	task := mongoTask.GWriteTaskBuilder.BuildUpsertTaskWithDB(
 		commonrank.CT_RANK_CONFIG,
 		bizKey,
+		db,
 		bson.M{"_id": bizKey},
 		bson.M{"$set": bson.M{"config": persisted}},
 	)
@@ -114,9 +127,11 @@ func (d *DAO) SavePeriodicState(bizKey string, state PeriodicSavedState) error {
 	if !d.available() {
 		return nil
 	}
-	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
+	db := d.dbName(bizKey)
+	task := mongoTask.GWriteTaskBuilder.BuildUpsertTaskWithDB(
 		commonrank.CT_RANK_CONFIG,
 		bizKey,
+		db,
 		bson.M{"_id": bizKey},
 		bson.M{"$set": bson.M{"periodic": state}},
 	)
@@ -134,9 +149,11 @@ func (d *DAO) SaveRankConfigWithPeriodic(bizKey string, cfg Config, state Period
 	persisted := cfg
 	persisted.RobotTiers = nil
 	persisted.RobotInfos = nil
-	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
+	db := d.dbName(bizKey)
+	task := mongoTask.GWriteTaskBuilder.BuildUpsertTaskWithDB(
 		commonrank.CT_RANK_CONFIG,
 		bizKey,
+		db,
 		bson.M{"_id": bizKey},
 		bson.M{"$set": bson.M{"config": persisted, "periodic": state}},
 	)
@@ -181,12 +198,15 @@ func (d *DAO) LoadRankConfig(bizKey string) (RankConfigDoc, bool, error) {
 	return doc, true, nil
 }
 
-func (d *DAO) DeleteRankConfig(bizKey string) error {	if !d.available() {
+func (d *DAO) DeleteRankConfig(bizKey string) error {
+	if !d.available() {
 		return nil
 	}
-	task := mongoTask.GWriteTaskBuilder.BuildDeleteTask(
+	db := d.dbName(bizKey)
+	task := mongoTask.GWriteTaskBuilder.BuildDeleteTaskWithDB(
 		commonrank.CT_RANK_CONFIG,
 		bizKey,
+		db,
 		bson.M{"_id": bizKey},
 	)
 	if err := queue.PushMongoTask(task); err != nil {
@@ -215,9 +235,11 @@ func (d *DAO) SaveGroup(bizId string, group *Group) error {
 	}
 	g := *group // copy to avoid aliasing
 	docID := groupDocID(bizId, g.GroupID)
-	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
+	db := d.dbName(bizId)
+	task := mongoTask.GWriteTaskBuilder.BuildUpsertTaskWithDB(
 		commonrank.CT_RANK_GROUP,
 		docID,
+		db,
 		bson.M{"_id": docID},
 		bson.M{"$set": bson.M{"bizId": bizId, "groupId": g.GroupID, "group": g}},
 	)
@@ -268,9 +290,11 @@ func (d *DAO) SaveMember(bizId string, userID int64, groupID int32) error {
 		return nil
 	}
 	docID := memberDocID(bizId, userID)
-	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
+	db := d.dbName(bizId)
+	task := mongoTask.GWriteTaskBuilder.BuildUpsertTaskWithDB(
 		commonrank.CT_RANK_MEMBER,
 		docID,
+		db,
 		bson.M{"_id": docID},
 		bson.M{"$set": bson.M{"bizId": bizId, "userId": userID, "groupId": groupID}},
 	)
@@ -336,12 +360,14 @@ func (d *DAO) SaveRobots(bizId string, groupID int32, robots []*robotState) erro
 	if !d.available() || len(robots) == 0 {
 		return nil
 	}
+	db := d.dbName(bizId)
 	for _, r := range robots {
 		rCopy := *r
 		docID := robotDocID(bizId, groupID, rCopy.MemberID)
-		task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
+		task := mongoTask.GWriteTaskBuilder.BuildUpsertTaskWithDB(
 			commonrank.CT_RANK_ROBOT,
 			docID,
+			db,
 			bson.M{"_id": docID},
 			bson.M{"$set": bson.M{"bizId": bizId, "groupId": groupID, "memberId": rCopy.MemberID, "state": rCopy}},
 		)
@@ -375,10 +401,14 @@ func (d *DAO) LoadRobots(bizId string, groupID int32) ([]*robotState, error) {
 	return robots, nil
 }
 
-// EnsureIndexes 创建 MongoDB 索引，并清理历史遗留的错误索引。
-func (d *DAO) EnsureIndexes() {
+// EnsureIndexes 在指定数据库上创建 MongoDB 索引，并清理历史遗留的错误索引。
+// 若 dbName 为空则回退到 defaultDB。
+func (d *DAO) EnsureIndexes(dbName string) {
 	if !d.available() {
 		return
+	}
+	if dbName == "" {
+		dbName = d.defaultDB
 	}
 	session := d.session()
 	ctx, cancel := session.GetDefaultContext()
@@ -386,7 +416,7 @@ func (d *DAO) EnsureIndexes() {
 
 	// 清理旧版本遗留的错误唯一索引（这些集合文档无 userId 字段，唯一索引导致第二条插入失败）。
 	for _, coll := range []string{commonrank.CT_RANK_GROUP, commonrank.CT_RANK_INST} {
-		_, _ = session.Database(d.defaultDB).Collection(coll).Indexes().DropOne(ctx, "idx_userId_unique")
+		_, _ = session.Database(dbName).Collection(coll).Indexes().DropOne(ctx, "idx_userId_unique")
 	}
 
 	indexes := map[string][]mongo.IndexModel{
@@ -415,10 +445,28 @@ func (d *DAO) EnsureIndexes() {
 		},
 	}
 	for coll, idxs := range indexes {
-		if _, err := session.Database(d.defaultDB).Collection(coll).Indexes().CreateMany(ctx, idxs); err != nil {
-			zaplog.LoggerSugar.Warnf("rank engine: create indexes for %s: %v", coll, err)
+		if _, err := session.Database(dbName).Collection(coll).Indexes().CreateMany(ctx, idxs); err != nil {
+			zaplog.LoggerSugar.Warnf("rank engine: create indexes for %s in db %s: %v", coll, dbName, err)
 		}
 	}
+}
+
+// LoadAllRankConfigsFromDB 从指定数据库加载所有排行榜配置文档。
+func (d *DAO) LoadAllRankConfigsFromDB(dbName string) ([]RankConfigDoc, error) {
+	if !d.available() || dbName == "" {
+		return nil, nil
+	}
+	cursor, err := d.session().Find(dbName, commonrank.CT_RANK_CONFIG, bson.M{})
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := d.session().GetDefaultContext()
+	defer cancel()
+	var docs []RankConfigDoc
+	if err := cursor.All(ctx, &docs); err != nil {
+		return nil, err
+	}
+	return docs, nil
 }
 
 // --- 奖励领取记录 ---
@@ -475,9 +523,11 @@ func (d *DAO) SaveClaim(bizId string, userID int64, claimTime int64) error {
 		return nil
 	}
 	docID := claimDocID(bizId, userID)
-	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
+	db := d.dbName(bizId)
+	task := mongoTask.GWriteTaskBuilder.BuildUpsertTaskWithDB(
 		commonrank.CT_RANK_CLAIM,
 		docID,
+		db,
 		bson.M{"_id": docID},
 		bson.M{"$set": bson.M{"bizId": bizId, "userId": userID, "claimTime": claimTime}},
 	)
@@ -548,9 +598,11 @@ func (d *DAO) SaveScore(bizId string, groupID int32, userID int64, score int64, 
 	if sequence > 0 {
 		setOnInsert["sequence"] = sequence
 	}
-	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
+	db := d.dbName(bizId)
+	task := mongoTask.GWriteTaskBuilder.BuildUpsertTaskWithDB(
 		commonrank.CT_RANK_SCORE,
 		docID,
+		db,
 		bson.M{"_id": docID},
 		bson.M{
 			"$set":         setFields,
@@ -603,9 +655,11 @@ func (d *DAO) SaveSettled(bizId string, groupID int32, snaps []commonrank.RankMe
 	snapsCopy := make([]commonrank.RankMemberSnapshot, len(snaps))
 	copy(snapsCopy, snaps)
 	docID := settledDocID(bizId, groupID)
-	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
+	db := d.dbName(bizId)
+	task := mongoTask.GWriteTaskBuilder.BuildUpsertTaskWithDB(
 		commonrank.CT_RANK_SETTLED,
 		docID,
+		db,
 		bson.M{"_id": docID},
 		bson.M{"$set": bson.M{"bizId": bizId, "groupId": groupID, "snapshots": snapsCopy, "settleTime": settleTime}},
 	)
@@ -675,9 +729,11 @@ func (d *DAO) SaveRankInst(bizId string, groupID int32, inst commonrank.RankInst
 		return nil
 	}
 	docID := rankInstDocID(bizId, groupID)
-	task := mongoTask.GWriteTaskBuilder.BuildUpsertTask(
+	db := d.dbName(bizId)
+	task := mongoTask.GWriteTaskBuilder.BuildUpsertTaskWithDB(
 		commonrank.CT_RANK_INST,
 		docID,
+		db,
 		bson.M{"_id": docID},
 		bson.M{"$set": bson.M{"bizId": bizId, "groupId": groupID, "instanceId": inst.InstanceId, "instance": inst}},
 	)
@@ -730,13 +786,14 @@ func (d *DAO) DeleteAllByBizId(bizId string) error {
 }
 
 // QueueDeleteDocIDs 通过异步队列为已知 docID 列表逐条推送 DeleteOne 任务。
-func (d *DAO) QueueDeleteDocIDs(coll string, docIDs []string) {
+func (d *DAO) QueueDeleteDocIDs(bizId string, coll string, docIDs []string) {
 	if !d.available() || len(docIDs) == 0 {
 		return
 	}
+	db := d.dbName(bizId)
 	for _, docID := range docIDs {
 		id := docID
-		task := mongoTask.GWriteTaskBuilder.BuildDeleteTask(coll, id, bson.M{"_id": id})
+		task := mongoTask.GWriteTaskBuilder.BuildDeleteTaskWithDB(coll, id, db, bson.M{"_id": id})
 		if err := queue.PushMongoTask(task); err != nil {
 			zaplog.LoggerSugar.Errorf("rank engine dao: QueueDeleteDocIDs %s id=%s: %v", coll, id, err)
 		}

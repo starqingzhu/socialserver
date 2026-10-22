@@ -93,18 +93,47 @@ var classes = []ttlClass{
 // 顺序敏感：rank:settle: 必须先于 rank:settled: 判定是不可能的（两者互不为前缀，见 classes
 // 注释），但为了让「跳过」桶一定赢过「改 TTL」桶，这里按 skip 优先做两轮匹配——万一将来有人
 // 往表里加了一个既是锁又和数据 key 同前缀的项，也不会被静默改掉。
+//
+// 多游戏隔离后，key 可能带 "g{gameId}:" 前缀（如 "g1:rank:def:{...}"）。
+// classify 会先把该前缀剥掉，再用核心部分匹配 classes 表，因此 classes 本身无需改动。
 func classify(key string) (ttlClass, bool) {
+	// 去掉可能的 g{gameId}: 前缀，得到核心 key 用于前缀匹配
+	core := stripGameIdPrefix(key)
+
+	// matchExact 同时匹配全局 exact 和带 g{gameId}: 前缀的 exact（如 "g1:rank:{active_services}"）
+	matchExact := func(k, exact string) bool {
+		if k == exact {
+			return true
+		}
+		if exact == "" || len(k) <= len(exact) {
+			return false
+		}
+		// 尾部必须完全等于 exact，且前面必须是 "g{gameId}:"
+		if k[len(k)-len(exact):] != exact || k[len(k)-len(exact)-1] != ':' {
+			return false
+		}
+		prefix := k[:len(k)-len(exact)-1]
+		if len(prefix) < 2 || prefix[0] != 'g' {
+			return false
+		}
+		j := 1
+		for j < len(prefix) && prefix[j] >= '0' && prefix[j] <= '9' {
+			j++
+		}
+		return j == len(prefix) && j > 1
+	}
+
 	for _, c := range classes {
 		if !c.skip {
 			continue
 		}
 		if c.exact != "" {
-			if key == c.exact {
+			if matchExact(key, c.exact) {
 				return c, true
 			}
 			continue
 		}
-		if len(key) > len(c.prefix) && key[:len(c.prefix)] == c.prefix {
+		if len(core) > len(c.prefix) && core[:len(c.prefix)] == c.prefix {
 			return c, true
 		}
 	}
@@ -113,16 +142,31 @@ func classify(key string) (ttlClass, bool) {
 			continue
 		}
 		if c.exact != "" {
-			if key == c.exact {
+			if matchExact(key, c.exact) {
 				return c, true
 			}
 			continue
 		}
-		if len(key) > len(c.prefix) && key[:len(c.prefix)] == c.prefix {
+		if len(core) > len(c.prefix) && core[:len(c.prefix)] == c.prefix {
 			return c, true
 		}
 	}
 	return ttlClass{}, false
+}
+
+// stripGameIdPrefix 去掉 key 前端的 "g{gameId}:" 前缀（如有）。
+func stripGameIdPrefix(s string) string {
+	if len(s) < 2 || s[0] != 'g' {
+		return s
+	}
+	i := 1
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i > 1 && i+1 < len(s) && s[i] == ':' {
+		return s[i+1:]
+	}
+	return s
 }
 
 // classStat 是单个分类的统计。
@@ -208,9 +252,12 @@ func main() {
 }
 
 // unknownPrefix 把未识别的 key 归到一个可读的桶名上，避免打印成千上万条 key。
-// rank key 的形态是 "rank:<段>..." 或 "rank:{<段>}..."，取到第二个分隔符为止。
+// rank key 的形态是 "[g{gameId}:]rank:<段>..." 或 "[g{gameId}:]rank:{<段>}..."，取到第二个分隔符为止。
 func unknownPrefix(key string) string {
-	rest := key[len("rank:"):]
+	rest := stripGameIdPrefix(key)
+	if len(rest) >= len("rank:") && rest[:len("rank:")] == "rank:" {
+		rest = rest[len("rank:"):]
+	}
 	for i := 0; i < len(rest); i++ {
 		if rest[i] == ':' || rest[i] == '}' {
 			return "rank:" + rest[:i+1]

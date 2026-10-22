@@ -145,7 +145,7 @@ func (h *Handler) Register(ctx context.Context, bizType, logicalKey string, cfg 
 	}
 
 	// 多节点分布式锁：防止两个节点同时注册同一活动
-	registerLock := fmt.Sprintf("rank:periodic_register:{%s}", logicalKey)
+	registerLock := rediskeys.GetRankPeriodicRegisterKey(logicalKey)
 	locked, lockErr := h.rdb.SetNX(registerLock, "1", 30*time.Second)
 	if lockErr != nil || !locked {
 		// 其他节点正在注册，syncFromMongo 会在 30s 内同步状态到本节点
@@ -223,7 +223,7 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 	logicalKey := state.StateLogicalKey()
 	currentRound := state.GetCurrentRound()
 
-	advanceLock := fmt.Sprintf("rank:periodic_advance:{%s}:r%d", logicalKey, currentRound)
+	advanceLock := rediskeys.GetRankPeriodicAdvanceKey(logicalKey, currentRound)
 	locked, err := h.rdb.SetNX(advanceLock, "1", time.Minute)
 	if err != nil || !locked {
 		return
@@ -348,7 +348,12 @@ func (h *Handler) setSettledTTLForRound(svc *engine.Service, state *PeriodicStat
 		return
 	}
 	groups := svc.ListGroups()
-	rankCode := fmt.Sprintf("%s_score_%d", state.BizType, state.ActID)
+	var rankCode string
+	if state.GameID != 0 {
+		rankCode = fmt.Sprintf("g%d_%s_score_%d", state.GameID, state.BizType, state.ActID)
+	} else {
+		rankCode = fmt.Sprintf("%s_score_%d", state.BizType, state.ActID)
+	}
 	bizId := state.roundBizId(round)
 	for _, g := range groups {
 		instanceID := commonrank.NewInstanceID(rankCode, bizId, fmt.Sprintf("group_%d", g.GroupID))
@@ -696,7 +701,7 @@ func cycleDurationMs(minutes int32) int64 {
 // curRoundRedisKey 返回存储周期活动当前轮号的 Redis 键。
 // 使用 hash tag {logicalKey} 保证在 Redis Cluster 下与其他该活动的键落在同一 slot。
 func curRoundRedisKey(logicalKey string) string {
-	return fmt.Sprintf("rank:periodic_cur_round:{%s}", logicalKey)
+	return rediskeys.GetRankPeriodicCurRoundKey(logicalKey)
 }
 
 // setCurRoundInRedis 将当前轮号写入 Redis，供多节点同步读取。
@@ -738,7 +743,7 @@ func (h *Handler) CleanupHistoricalRounds(state *PeriodicState) {
 
 // periodicMetaRedisKey 返回存储周期活动元数据的 Redis 键。
 func periodicMetaRedisKey(logicalKey string) string {
-	return fmt.Sprintf("rank:periodic_meta:{%s}", logicalKey)
+	return rediskeys.GetRankPeriodicMetaKey(logicalKey)
 }
 
 // GetCurRoundFromRedis 导出 readCurRoundFromRedis，供 manager 在恢复时调用。

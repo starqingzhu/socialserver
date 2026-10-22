@@ -7,6 +7,7 @@ import (
 
 	"common/configmgr"
 	cfgtypes "common/configmgr/types"
+	"common/gameid"
 	"common/rank"
 	libdispatch "golib/dispatch"
 	dispatchproto "golib/dispatch/proto"
@@ -274,6 +275,10 @@ func handleGetMemberRank(ctx context.Context, meta libdispatch.Meta, req *pb.PBS
 }
 
 func handleSettle(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SSettleRequest, resp *pb.PBS2SSettleResponse) (retErr error) {
+	gameId := meta.GameId
+	if req.Context != nil && req.Context.GameId != 0 {
+		gameId = req.Context.GameId
+	}
 	zaplog.LoggerSugar.Infof("[rank] S2SSettle req bizType=%s actId=%d timestamp=%d",
 		req.BizType, req.ActId, req.Timestamp)
 	defer func() {
@@ -286,7 +291,7 @@ func handleSettle(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SSettl
 		}
 	}()
 
-	svc, err := lookupEngineService(meta.GameId, rankservice.BizType(req.BizType), req.ActId)
+	svc, err := lookupEngineService(gameId, rankservice.BizType(req.BizType), req.ActId)
 	if err != nil {
 		return err
 	}
@@ -375,6 +380,7 @@ func handleClaimReward(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 		if err != nil {
 			return status.Error(codes.Internal, err.Error())
 		}
+		resp.MsgCode = commonMsg.MsgCode_CODE_OK
 		resp.Claimed = claimed
 		resp.ClaimTime = claimTime
 		return nil
@@ -384,6 +390,7 @@ func handleClaimReward(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 		if err != nil {
 			return status.Error(codes.Internal, err.Error())
 		}
+		resp.MsgCode = commonMsg.MsgCode_CODE_OK
 		resp.Claimed = claimed
 		resp.ClaimTime = claimTime
 		return nil
@@ -392,6 +399,7 @@ func handleClaimReward(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 	if err != nil {
 		return status.Error(codes.Internal, err.Error())
 	}
+	resp.MsgCode = commonMsg.MsgCode_CODE_OK
 	resp.Claimed = claimed
 	resp.ClaimTime = claimTime
 	return nil
@@ -425,6 +433,7 @@ func handleGetClaimStatus(ctx context.Context, meta libdispatch.Meta, req *pb.PB
 		if err != nil {
 			return status.Error(codes.Internal, err.Error())
 		}
+		resp.MsgCode = commonMsg.MsgCode_CODE_OK
 		resp.Claimed = claimed
 		resp.ClaimTime = claimTime
 		return nil
@@ -434,6 +443,7 @@ func handleGetClaimStatus(ctx context.Context, meta libdispatch.Meta, req *pb.PB
 		if err != nil {
 			return status.Error(codes.Internal, err.Error())
 		}
+		resp.MsgCode = commonMsg.MsgCode_CODE_OK
 		resp.Claimed = claimed
 		resp.ClaimTime = claimTime
 		return nil
@@ -442,6 +452,7 @@ func handleGetClaimStatus(ctx context.Context, meta libdispatch.Meta, req *pb.PB
 	if err != nil {
 		return status.Error(codes.Internal, err.Error())
 	}
+	resp.MsgCode = commonMsg.MsgCode_CODE_OK
 	resp.Claimed = claimed
 	resp.ClaimTime = claimTime
 	return nil
@@ -546,7 +557,7 @@ func handleGetRankConfig(_ context.Context, meta libdispatch.Meta, req *pb.PBS2S
 		if state := manager.GetPeriodicState(gameId, rankservice.BizType(req.BizType), req.ActId); state != nil {
 			rankType = pb.RankType_RANK_TYPE_PERIODIC
 			// 优先从配置读取最新的 cycleMinutes，解决配置变更后持久化状态未更新的问题
-			_, cm, _ := rankservice.LoadRankTypeAndCycle(rankservice.BizType(req.BizType))
+			_, cm, _ := rankservice.LoadRankTypeAndCycle(gameid.GameId(gameId), rankservice.BizType(req.BizType))
 			if cm > 0 {
 				cycleMinutes = cm
 			} else {
@@ -659,7 +670,7 @@ func handleListRankConfigs(_ context.Context, meta libdispatch.Meta, req *pb.PBS
 		if state := manager.GetPeriodicState(gameId, info.BizType, info.ActID); state != nil {
 			rankType = pb.RankType_RANK_TYPE_PERIODIC
 			// 优先从配置读取最新的 cycleMinutes，解决配置变更后持久化状态未更新的问题
-			_, cm, _ := rankservice.LoadRankTypeAndCycle(info.BizType)
+			_, cm, _ := rankservice.LoadRankTypeAndCycle(gameid.GameId(gameId), info.BizType)
 			if cm > 0 {
 				cycleMinutes = cm
 			} else {
@@ -685,7 +696,7 @@ func handleListRankConfigs(_ context.Context, meta libdispatch.Meta, req *pb.PBS
 			RankType:         rankType,
 			CycleMinutes:     cycleMinutes,
 			CurrentRound:     currentRound,
-			ActivityTypeName: rankservice.GetRankBaseName(info.BizType),
+			ActivityTypeName: rankservice.GetRankBaseName(gameid.GameId(gameId), info.BizType),
 		}
 	}
 	resp.Ranks = ranks

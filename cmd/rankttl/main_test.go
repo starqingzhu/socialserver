@@ -31,6 +31,15 @@ func TestClassifyCoversEveryRealKey(t *testing.T) {
 		{rediskeys.GetRankRobotInfosKey("balloon_1001", 3), "rank:robot_infos", commonrank.SettledCacheTTL},
 		{rediskeys.GetRankClaimsKey("balloon_1001"), "rank:claims", commonrank.SettledCacheTTL},
 		{rediskeys.GetRankMongoCheckedKey("balloon_1001"), "rank:mongo_chk", commonrank.SettledCacheTTL},
+
+		// 多游戏隔离 key（g{gameId}: 前缀）必须同样被识别
+		{rediskeys.GetRankDefKey("g1_balloon_score_1001"), "rank:def", commonrank.ColdDataTTL},
+		{rediskeys.GetGameRankMemberIndexKey(1, 20001), "rank:member_index", commonrank.ColdDataTTL},
+		{rediskeys.GetGameRankActiveServicesKey(1), "rank:{active_services}", commonrank.ColdDataTTL},
+		{rediskeys.GetRankMetaKey("g1_balloon_1001"), "rank:meta", commonrank.SettledCacheTTL},
+		{rediskeys.GetRankGroupsKey("g1_balloon_1001"), "rank:groups", commonrank.SettledCacheTTL},
+		{rediskeys.GetRankMembersKey("g1_balloon_1001"), "rank:members", commonrank.SettledCacheTTL},
+		{rediskeys.GetRankClaimsKey("g1_balloon_1001"), "rank:claims", commonrank.SettledCacheTTL},
 	}
 
 	for _, tc := range cases {
@@ -59,8 +68,11 @@ func TestClassifyCoversEveryRealKey(t *testing.T) {
 // 没有导出常量可引用，所以这里只能照抄格式）。
 func TestClassifyLocksAreSkipped(t *testing.T) {
 	for _, key := range []string{
-		"rank:settle:{balloon_1001}:3",      // store.go TryLockSettle
-		"rank:robot_tick:{balloon_1001}:17", // store.go TryLockRobotTick
+		rediskeys.GetRankSettleKey("balloon_1001", 3),      // store.go TryLockSettle
+		rediskeys.GetRankRobotTickKey("balloon_1001", 17), // store.go TryLockRobotTick
+		// 多游戏隔离后的锁 key 同样必须被识别为 skip
+		rediskeys.GetRankSettleKey("g1_balloon_1001", 3),
+		rediskeys.GetRankRobotTickKey("g1_balloon_1001", 17),
 	} {
 		c, ok := classify(key)
 		if !ok {
@@ -80,7 +92,7 @@ func TestClassifyNearMissPrefixes(t *testing.T) {
 	if !ok || settled.skip {
 		t.Fatalf("rank:settled: 被当成了锁（skip=%v, ok=%v）", settled.skip, ok)
 	}
-	lock, ok := classify("rank:settle:{balloon_1001}:3")
+	lock, ok := classify(rediskeys.GetRankSettleKey("balloon_1001", 3))
 	if !ok || !lock.skip {
 		t.Fatalf("rank:settle: 没有被当成锁（skip=%v, ok=%v）", lock.skip, ok)
 	}
@@ -93,7 +105,7 @@ func TestClassifyNearMissPrefixes(t *testing.T) {
 	if !ok || robots.name != "rank:robots" {
 		t.Fatalf("rank:robots: 归到了 %q（ok=%v）", robots.name, ok)
 	}
-	tick, ok := classify("rank:robot_tick:{balloon_1001}:17")
+	tick, ok := classify(rediskeys.GetRankRobotTickKey("balloon_1001", 17))
 	if !ok || !tick.skip {
 		t.Fatalf("rank:robot_tick: 没有被当成锁（skip=%v, ok=%v）", tick.skip, ok)
 	}

@@ -3,12 +3,14 @@ package internal
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"common/config"
 	"common/configmgr"
 	"common/defines"
 	cetcd "common/etcd"
+	"common/gameid"
 	mongoTask "common/task/mongo"
 	"golib/gpool"
 	gohttp "golib/http"
@@ -115,11 +117,29 @@ func (s *Server) loadMongoConfig(cfg *yamlcfg.YamlCfg) {
 
 func (s *Server) OnInit() {
 
-	// 加载config目录文件
+	// 加载公共配置（向后兼容）
 	if err := configmgr.LoadConfigs(config.Default.ConfigDir); err != nil {
-		zaplog.LoggerSugar.Fatalf("OnInit: load configs failed: %v", err)
+		zaplog.LoggerSugar.Warnf("OnInit: load base configs failed: %v", err)
+	} else {
+		zaplog.LoggerSugar.Infof("OnInit: base configs loaded from %s", config.Default.ConfigDir)
 	}
-	// watch config目录下文件内容变化
+
+	// 加载游戏注册表（与 GameServer 统一）：只有已注册的游戏才初始化对应排行榜库。
+	config.LoadRegistryWithCache(mongodbmodule.Main.TakeSession(), redis.Main, config.Default.MongoCfg.Database)
+
+	// 为每个已注册的游戏加载专属配置目录
+	if registry := config.GetGameRegistry(); registry != nil {
+		for _, def := range registry.All() {
+			gameConfigDir := filepath.Join(config.Default.ConfigDir, def.GameId.String())
+			if err := configmgr.LoadGameConfigs(def.GameId, gameConfigDir); err != nil {
+				zaplog.LoggerSugar.Warnf("OnInit: load game configs failed for gameId=%d, err=%v", def.GameId, err)
+			} else {
+				zaplog.LoggerSugar.Infof("OnInit: loaded game configs for gameId=%d from %s", def.GameId, gameConfigDir)
+			}
+		}
+	}
+
+	// watch 公共配置目录下文件内容变化
 	if err := configmgr.Global.StartWatch(); err != nil {
 		zaplog.LoggerSugar.Warnf("OnInit: start config watcher failed: %v", err)
 	}
@@ -142,9 +162,29 @@ func (s *Server) OnInit() {
 
 	// 协程池初始化
 	gpool.Global = gpool.New(defines.SocialServer.String(), 32, 5120)
+
 	if err := rankservice.InitGlobalManager(redis.Main, config.Default.MongoCfg.Database); err != nil {
 		zaplog.LoggerSugar.Fatalf("init rank manager failed: %v", err)
 	}
+	// 排行榜 MongoDB 按 gameId 分库：统一规则 Database+gameId（与 GameServer 的 GameDatabaseName 一致）。
+	rankservice.GetGlobalManager().SetDBResolver(func(gameId int32) string {
+		return config.GameDatabaseName(gameid.GameId(gameId))
+	})
+
+	// 只为已注册的游戏创建对应数据库索引，避免在全局默认库中生成排行榜集合。
+	var gameIds []int32
+	if registry := config.GetGameRegistry(); registry != nil {
+		for _, def := range registry.All() {
+			gameIds = append(gameIds, def.GameId.Int32())
+		}
+	}
+	if len(gameIds) > 0 {
+		rankservice.GetGlobalManager().EnsureIndexesForGames(gameIds)
+	}
+
+	// 在注入 dbResolver 之后再启动首次同步和后台循环，防止默认库中的旧配置被误恢复，
+	// 并在 warmUp backfill 路径中把积分数据写入错误的数据库。
+	rankservice.GetGlobalManager().Start()
 
 	// 节点信息初始化+etcd注册
 	s.initServerNodeInfo()
@@ -176,7 +216,11 @@ func (s *Server) OnClose() {
 	}
 	rpcservice.Close()
 
-	configmgr.StopWatch()
+	// 停止所有游戏的配置文件监控，再停止公共监控
+	configmgr.StopAllGameWatches()
+	if configmgr.IsWatching() {
+		configmgr.StopWatch()
+	}
 
 	if manager := rankservice.GetGlobalManager(); manager != nil {
 		manager.Close()

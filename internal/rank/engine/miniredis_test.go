@@ -138,4 +138,4 @@ func (f *fakeMongo) LoadGroupInst(_ string, gid int32) (*commonrank.RankInstance
 
 func (f *fakeMongo) DeleteAllByBizId(string) error { return nil }
 
-func (f *fakeMongo) QueueDeleteDocIDs(string, []string) {}
+func (f *fakeMongo) QueueDeleteDocIDs(string, string, []string) {}

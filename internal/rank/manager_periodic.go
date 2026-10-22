@@ -33,7 +33,11 @@ func (m *Manager) GetEngineServiceByKey(logicalKey string) *engine.Service {
 // BUG5 fix: 双重检查锁，保证并发注册时不覆盖已有服务。
 func (m *Manager) registerSubService(ctx context.Context, bizType BizType, logicalKey string, cfg engine.Config) (*engine.Service, error) {
 	if cfg.RankCode == "" {
-		cfg.RankCode = fmt.Sprintf("%s_score_%d", bizType, cfg.ActID)
+		if cfg.GameID != 0 {
+			cfg.RankCode = fmt.Sprintf("g%d_%s_score_%d", cfg.GameID, bizType, cfg.ActID)
+		} else {
+			cfg.RankCode = fmt.Sprintf("%s_score_%d", bizType, cfg.ActID)
+		}
 	}
 	if cfg.CreateTime == 0 {
 		cfg.CreateTime = time.Now().UnixMilli()
@@ -82,7 +86,11 @@ func (m *Manager) registerSubService(ctx context.Context, bizType BizType, logic
 // 用于轮次推进时将 logicalKey 指向新一轮的 engine.Service。
 func (m *Manager) replaceSubService(ctx context.Context, bizType BizType, logicalKey string, cfg engine.Config) (*engine.Service, error) {
 	if cfg.RankCode == "" {
-		cfg.RankCode = fmt.Sprintf("%s_score_%d", bizType, cfg.ActID)
+		if cfg.GameID != 0 {
+			cfg.RankCode = fmt.Sprintf("g%d_%s_score_%d", cfg.GameID, bizType, cfg.ActID)
+		} else {
+			cfg.RankCode = fmt.Sprintf("%s_score_%d", bizType, cfg.ActID)
+		}
 	}
 	if cfg.CreateTime == 0 {
 		cfg.CreateTime = time.Now().UnixMilli()

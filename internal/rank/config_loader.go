@@ -7,14 +7,15 @@ import (
 
 	"common/configmgr"
 	cfgtypes "common/configmgr/types"
+	"common/gameid"
 	"golib/zaplog"
 	"socialserver/internal/rank/engine"
 )
 
-func LoadRobotTiers(bizType BizType) []engine.RobotTierCfg {
-	cf, err := configmgr.GetConfigByFileName("RobotRank")
+func LoadRobotTiers(gameId gameid.GameId, bizType BizType) []engine.RobotTierCfg {
+	cf, err := configmgr.GetGameConfigByFileName(gameId, "RobotRank")
 	if err != nil {
-		zaplog.LoggerSugar.Warnf("rank: load RobotRank config: %v", err)
+		zaplog.LoggerSugar.Warnf("rank: load RobotRank config for gameId=%d: %v", gameId, err)
 		return nil
 	}
 
@@ -49,10 +50,10 @@ func LoadRobotTiers(bizType BizType) []engine.RobotTierCfg {
 	return tiers
 }
 
-func LoadRobotInfos() []engine.RobotInfoEntry {
-	cf, err := configmgr.GetConfigByFileName("RobotName")
+func LoadRobotInfos(gameId gameid.GameId) []engine.RobotInfoEntry {
+	cf, err := configmgr.GetGameConfigByFileName(gameId, "RobotName")
 	if err != nil {
-		zaplog.LoggerSugar.Warnf("rank: load RobotName config: %v", err)
+		zaplog.LoggerSugar.Warnf("rank: load RobotName config for gameId=%d: %v", gameId, err)
 		return nil
 	}
 
@@ -97,44 +98,44 @@ func parseRange(s string) (int64, int64) {
 	return a, b
 }
 
-func LoadRobotConfig(bizType BizType) ([]engine.RobotTierCfg, []engine.RobotInfoEntry) {
-	tiers := LoadRobotTiers(bizType)
+func LoadRobotConfig(gameId gameid.GameId, bizType BizType) ([]engine.RobotTierCfg, []engine.RobotInfoEntry) {
+	tiers := LoadRobotTiers(gameId, bizType)
 	if len(tiers) == 0 {
 		return nil, nil
 	}
-	infos := LoadRobotInfos()
+	infos := LoadRobotInfos(gameId)
 	if len(infos) == 0 {
-		zaplog.LoggerSugar.Warnf("rank: no robot infos found for bizType=%s, tiers will be ignored", bizType)
+		zaplog.LoggerSugar.Warnf("rank: no robot infos found for gameId=%d, bizType=%s, tiers will be ignored", gameId, bizType)
 		return nil, nil
 	}
-	zaplog.LoggerSugar.Infof("rank: loaded %d robot tiers and %d robot infos for bizType=%s", len(tiers), len(infos), bizType)
+	zaplog.LoggerSugar.Infof("rank: loaded %d robot tiers and %d robot infos for gameId=%d, bizType=%s", len(tiers), len(infos), gameId, bizType)
 	return tiers, infos
 }
 
-// FillConfigFromFiles 根据 biz_type 从配置文件加载排行榜基础参数和机器人参数，填充到 Config 中。
-func FillConfigFromFiles(bizType BizType, cfg *engine.Config) error {
+// FillConfigFromFiles 根据 gameId 和 biz_type 从配置文件加载排行榜基础参数和机器人参数，填充到 Config 中。
+func FillConfigFromFiles(gameId gameid.GameId, bizType BizType, cfg *engine.Config) error {
 	if cfg == nil {
 		return fmt.Errorf("config is nil")
 	}
 
-	base, err := loadRankBase(bizType)
+	base, err := loadRankBase(gameId, bizType)
 	if err != nil {
 		return err
 	}
 	cfg.RankPeopleNum = base.RankPeopleNum
 	cfg.OpenToken = int64(base.BalloonRankOpenToken)
 
-	tiers, infos := LoadRobotConfig(bizType)
+	tiers, infos := LoadRobotConfig(gameId, bizType)
 	cfg.RobotTiers = tiers
 	cfg.RobotInfos = infos
 
 	return nil
 }
 
-func loadRankBase(bizType BizType) (*cfgtypes.RankBaseConfig, error) {
-	cf, err := configmgr.GetConfigByFileName("RankBase")
+func loadRankBase(gameId gameid.GameId, bizType BizType) (*cfgtypes.RankBaseConfig, error) {
+	cf, err := configmgr.GetGameConfigByFileName(gameId, "RankBase")
 	if err != nil {
-		return nil, fmt.Errorf("load RankBase config: %w", err)
+		return nil, fmt.Errorf("load RankBase config for gameId=%d: %w", gameId, err)
 	}
 	for _, item := range cf.GetData() {
 		cfg, ok := item.(cfgtypes.RankBaseConfig)
@@ -145,13 +146,13 @@ func loadRankBase(bizType BizType) (*cfgtypes.RankBaseConfig, error) {
 			return &cfg, nil
 		}
 	}
-	return nil, fmt.Errorf("RankBase config not found for bizType=%s", bizType)
+	return nil, fmt.Errorf("RankBase config not found for gameId=%d, bizType=%s", gameId, bizType)
 }
 
-// GetRankBaseName 返回指定业务类型在 RankBase 配置中的名称（活动类型名）。
+// GetRankBaseName 返回指定游戏和业务类型在 RankBase 配置中的名称（活动类型名）。
 // 若未找到配置则返回空字符串。
-func GetRankBaseName(bizType BizType) string {
-	base, err := loadRankBase(bizType)
+func GetRankBaseName(gameId gameid.GameId, bizType BizType) string {
+	base, err := loadRankBase(gameId, bizType)
 	if err != nil {
 		return ""
 	}
@@ -160,8 +161,9 @@ func GetRankBaseName(bizType BizType) string {
 
 // ValidateBizType 验证业务类型是否支持。
 // 通过检查 RankBase.json 配置文件中是否存在该业务类型的配置。
+// 使用 gameId=0 的公共配置做验证（向后兼容）。
 func ValidateBizType(bizType BizType) error {
-	_, err := loadRankBase(bizType)
+	_, err := loadRankBase(0, bizType)
 	if err != nil {
 		return fmt.Errorf("unsupported biz type: %s - %w", bizType, err)
 	}
@@ -170,8 +172,8 @@ func ValidateBizType(bizType BizType) error {
 
 // LoadRankTypeAndCycle 从 RankBase.json 配置读取排行榜类型和周期分钟数。
 // rankType=1 一次性排行榜，rankType=2 周期排行榜；cycleMinutes 仅在 rankType=2 时有效。
-func LoadRankTypeAndCycle(bizType BizType) (rankType int32, cycleMinutes int32, err error) {
-	base, err := loadRankBase(bizType)
+func LoadRankTypeAndCycle(gameId gameid.GameId, bizType BizType) (rankType int32, cycleMinutes int32, err error) {
+	base, err := loadRankBase(gameId, bizType)
 	if err != nil {
 		return 0, 0, err
 	}

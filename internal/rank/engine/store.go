@@ -46,7 +46,7 @@ type storeMongo interface {
 	LoadGroupInst(bizId string, groupID int32) (*commonrank.RankInstance, error)
 
 	DeleteAllByBizId(bizId string) error
-	QueueDeleteDocIDs(coll string, docIDs []string)
+	QueueDeleteDocIDs(bizId string, coll string, docIDs []string)
 }
 
 // Store 封装排行榜业务层的缓存和持久化操作。
@@ -355,9 +355,10 @@ func (st *Store) registerActive(closeTime, gameEndTime int64) {
 
 	ctx := context.Background()
 	member := fmt.Sprintf("%s:%d", st.bizId, deadline)
+	registryKey := rediskeys.GetGameRankActiveServicesKeyFromBizId(st.bizId)
 	pipe := st.rdb.Pipeline()
-	pipe.SAdd(ctx, rediskeys.RankActiveServicesKey, member)
-	pipe.Expire(ctx, rediskeys.RankActiveServicesKey, commonrank.ColdDataTTL)
+	pipe.SAdd(ctx, registryKey, member)
+	pipe.Expire(ctx, registryKey, commonrank.ColdDataTTL)
 	if _, err := pipe.Exec(ctx); err != nil {
 		zaplog.LoggerSugar.Warnf("rank engine: registerActive bizId=%s: %v", st.bizId, err)
 	}
@@ -369,7 +370,8 @@ func (st *Store) registerActive(closeTime, gameEndTime int64) {
 // registerActive 当初写入的确切 deadline，前缀筛选与调用方状态无关，始终正确。
 // 注册表大小有界（见文档「注册表规模」），SMEMBERS 成本可控，且只发生在服务删除这种低频路径上。
 func (st *Store) unregisterActive() {
-	members, err := st.rdb.SMembers(rediskeys.RankActiveServicesKey)
+	registryKey := rediskeys.GetGameRankActiveServicesKeyFromBizId(st.bizId)
+	members, err := st.rdb.SMembers(registryKey)
 	if err != nil || len(members) == 0 {
 		return
 	}
@@ -385,8 +387,8 @@ func (st *Store) unregisterActive() {
 	}
 	ctx := context.Background()
 	pipe := st.rdb.Pipeline()
-	pipe.SRem(ctx, rediskeys.RankActiveServicesKey, stale...)
-	pipe.Expire(ctx, rediskeys.RankActiveServicesKey, commonrank.ColdDataTTL)
+	pipe.SRem(ctx, registryKey, stale...)
+	pipe.Expire(ctx, registryKey, commonrank.ColdDataTTL)
 	if _, err := pipe.Exec(ctx); err != nil {
 		zaplog.LoggerSugar.Warnf("rank engine: unregisterActive bizId=%s: %v", st.bizId, err)
 	}
@@ -719,6 +721,7 @@ func (st *Store) queueDeleteAllDocIDs(groups []*Group) {
 
 	// 读取 members（userID→groupID）
 	members, _ := st.GetAllMembers()
+	bizId := st.bizId
 
 	// 按分组计算并推送所有集合的删除任务
 	for _, g := range groups {
@@ -726,18 +729,17 @@ func (st *Store) queueDeleteAllDocIDs(groups []*Group) {
 			continue
 		}
 		gid := g.GroupID
-		bizId := st.bizId
 
 		// rank_group
-		st.dao.QueueDeleteDocIDs(commonrank.CT_RANK_GROUP, []string{
+		st.dao.QueueDeleteDocIDs(bizId, commonrank.CT_RANK_GROUP, []string{
 			fmt.Sprintf("%s:%d", bizId, gid),
 		})
 		// rank_inst
-		st.dao.QueueDeleteDocIDs(commonrank.CT_RANK_INST, []string{
+		st.dao.QueueDeleteDocIDs(bizId, commonrank.CT_RANK_INST, []string{
 			fmt.Sprintf("%s:%d", bizId, gid),
 		})
 		// rank_settled
-		st.dao.QueueDeleteDocIDs(commonrank.CT_RANK_SETTLED, []string{
+		st.dao.QueueDeleteDocIDs(bizId, commonrank.CT_RANK_SETTLED, []string{
 			fmt.Sprintf("%s:%d", bizId, gid),
 		})
 
@@ -748,7 +750,7 @@ func (st *Store) queueDeleteAllDocIDs(groups []*Group) {
 			for memberIDStr := range robotRaw {
 				robotIDs = append(robotIDs, fmt.Sprintf("%s:%d:%s", bizId, gid, memberIDStr))
 			}
-			st.dao.QueueDeleteDocIDs(commonrank.CT_RANK_ROBOT, robotIDs)
+			st.dao.QueueDeleteDocIDs(bizId, commonrank.CT_RANK_ROBOT, robotIDs)
 		}
 	}
 
@@ -758,14 +760,13 @@ func (st *Store) queueDeleteAllDocIDs(groups []*Group) {
 	claimDocIDs := make([]string, 0, len(members))
 	for uid, gid := range members {
 		uidStr := strconv.FormatInt(uid, 10)
-		bizId := st.bizId
 		memberDocIDs = append(memberDocIDs, fmt.Sprintf("%s:%s", bizId, uidStr))
 		scoreDocIDs = append(scoreDocIDs, fmt.Sprintf("%s:%d:%s", bizId, gid, uidStr))
 		claimDocIDs = append(claimDocIDs, fmt.Sprintf("%s:%s", bizId, uidStr))
 	}
-	st.dao.QueueDeleteDocIDs(commonrank.CT_RANK_MEMBER, memberDocIDs)
-	st.dao.QueueDeleteDocIDs(commonrank.CT_RANK_SCORE, scoreDocIDs)
-	st.dao.QueueDeleteDocIDs(commonrank.CT_RANK_CLAIM, claimDocIDs)
+	st.dao.QueueDeleteDocIDs(bizId, commonrank.CT_RANK_MEMBER, memberDocIDs)
+	st.dao.QueueDeleteDocIDs(bizId, commonrank.CT_RANK_SCORE, scoreDocIDs)
+	st.dao.QueueDeleteDocIDs(bizId, commonrank.CT_RANK_CLAIM, claimDocIDs)
 }
 
 // --- 奖励领取记录 ---
@@ -875,7 +876,7 @@ func (st *Store) TryLockSettle(groupID int32) bool {
 	if !st.available() {
 		return true
 	}
-	lockKey := fmt.Sprintf("rank:settle:{%s}:%d", st.bizId, groupID)
+	lockKey := rediskeys.GetRankSettleKey(st.bizId, groupID)
 	locked, err := st.rdb.SetNX(lockKey, "1", 10*time.Minute)
 	if err != nil {
 		zaplog.LoggerSugar.Warnf("rank engine: TryLockSettle bizId=%s group=%d: %v", st.bizId, groupID, err)
@@ -892,7 +893,7 @@ func (st *Store) TryLockRobotTick(nowMs int64) bool {
 		return true
 	}
 	tickSec := nowMs / 1000
-	lockKey := fmt.Sprintf("rank:robot_tick:{%s}:%d", st.bizId, tickSec)
+	lockKey := rediskeys.GetRankRobotTickKey(st.bizId, tickSec)
 	locked, err := st.rdb.SetNX(lockKey, "1", 3*time.Second)
 	if err != nil {
 		return true // treat as unlocked on error so robots still progress

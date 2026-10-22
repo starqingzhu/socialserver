@@ -221,7 +221,7 @@ func TestSettleDoesNotTouchGroupsHeldByOtherNodes(t *testing.T) {
 	seedLiveData(t, svc, 1)
 
 	// 抢先占住分组 1 的结算锁，模拟另一节点正在结算它。
-	lockKey := "rank:settle:{" + bizID + "}:1"
+	lockKey := rediskeys.GetRankSettleKey(bizID, 1)
 	if ok, err := svc.store.rdb.SetNX(lockKey, "1", 10*time.Minute); err != nil || !ok {
 		t.Fatalf("预占结算锁失败: ok=%v err=%v", ok, err)
 	}
