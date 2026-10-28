@@ -45,12 +45,7 @@ func (c *Config) hasRobots() bool {
 }
 
 func (c *Config) computeBizId() string {
-	var prefix string
-	if c.GameID != 0 {
-		prefix = fmt.Sprintf("g%d_%s_%d", c.GameID, c.BizType, c.ActID)
-	} else {
-		prefix = fmt.Sprintf("%s_%d", c.BizType, c.ActID)
-	}
+	prefix := fmt.Sprintf("g%d_%s_%d", c.GameID, c.BizType, c.ActID)
 	if c.RoundIndex > 0 {
 		return fmt.Sprintf("%s_r%d", prefix, c.RoundIndex)
 	}

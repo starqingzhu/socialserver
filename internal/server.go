@@ -124,21 +124,6 @@ func (s *Server) OnInit() {
 		zaplog.LoggerSugar.Infof("OnInit: base configs loaded from %s", config.Default.ConfigDir)
 	}
 
-	// 加载游戏注册表（与 GameServer 统一）：只有已注册的游戏才初始化对应排行榜库。
-	config.LoadRegistryWithCache(mongodbmodule.Main.TakeSession(), redis.Main, config.Default.MongoCfg.Database)
-
-	// 为每个已注册的游戏加载专属配置目录
-	if registry := config.GetGameRegistry(); registry != nil {
-		for _, def := range registry.All() {
-			gameConfigDir := filepath.Join(config.Default.ConfigDir, def.GameId.String())
-			if err := configmgr.LoadGameConfigs(def.GameId, gameConfigDir); err != nil {
-				zaplog.LoggerSugar.Warnf("OnInit: load game configs failed for gameId=%d, err=%v", def.GameId, err)
-			} else {
-				zaplog.LoggerSugar.Infof("OnInit: loaded game configs for gameId=%d from %s", def.GameId, gameConfigDir)
-			}
-		}
-	}
-
 	// watch 公共配置目录下文件内容变化
 	if err := configmgr.Global.StartWatch(); err != nil {
 		zaplog.LoggerSugar.Warnf("OnInit: start config watcher failed: %v", err)
@@ -153,6 +138,16 @@ func (s *Server) OnInit() {
 		zaplog.LoggerSugar.Fatalf("OnInit: MongoDB init failed: %v", err)
 	}
 	zaplog.LoggerSugar.Infof("OnInit: MongoDB initialized")
+
+	// 加载游戏注册表（与 GameServer 统一）：只有已注册的游戏才初始化对应排行榜库。
+	config.LoadRegistryWithCache(mongodbmodule.Main.TakeSession(), redis.Main, config.Default.MongoCfg.Database)
+
+	// 为每个已注册的游戏加载专属配置目录
+	if registry := config.GetGameRegistry(); registry != nil {
+		for _, def := range registry.All() {
+			s.loadGameConfigFiles(def.GameId)
+		}
+	}
 
 	//队列初始化
 	if err := queue.InitQueues(); err != nil {
@@ -185,6 +180,19 @@ func (s *Server) OnInit() {
 	// 在注入 dbResolver 之后再启动首次同步和后台循环，防止默认库中的旧配置被误恢复，
 	// 并在 warmUp backfill 路径中把积分数据写入错误的数据库。
 	rankservice.GetGlobalManager().Start()
+
+	// 监听游戏注册表变更：实时 Redis Pub/Sub + 5 分钟轮询兜底
+	config.WatchGameRegistryChanges(redis.Main, mongodbmodule.Main.TakeSession(), config.Default.MongoCfg.Database,
+		func(gid gameid.GameId) {
+			// 新增游戏：加载本地配置，并补充排行榜索引
+			s.loadGameConfigFiles(gid)
+			rankservice.GetGlobalManager().EnsureIndexesForGames([]int32{gid.Int32()})
+		},
+		func(gid gameid.GameId) {
+			// 删除游戏：卸载本地配置
+			configmgr.UnloadGameConfigs(gid)
+		},
+	)
 
 	// 节点信息初始化+etcd注册
 	s.initServerNodeInfo()
@@ -244,6 +252,15 @@ func (s *Server) OnClose() {
 		if e := mongodbmodule.Main.Stop(); e != nil {
 			zaplog.LoggerSugar.Error("mongodb close err:", e)
 		}
+	}
+}
+
+func (s *Server) loadGameConfigFiles(gid gameid.GameId) {
+	gameConfigDir := filepath.Join(config.Default.ConfigDir, gid.String())
+	if err := configmgr.LoadGameConfigs(gid, gameConfigDir); err != nil {
+		zaplog.LoggerSugar.Warnf("OnInit: load game configs failed for gameId=%d, err=%v", gid, err)
+	} else {
+		zaplog.LoggerSugar.Infof("OnInit: loaded game configs for gameId=%d from %s", gid, gameConfigDir)
 	}
 }
 

@@ -92,6 +92,7 @@ type PeriodicSavedState struct {
 	CurrentRound     int32 `bson:"currentRound"`
 	RoundOpenTime    int64 `bson:"roundOpenTime"`
 	RoundCloseTime   int64 `bson:"roundCloseTime"`
+	LastCleanedRound int32 `bson:"lastCleanedRound"` // 已清理的历史轮次上限，避免每次启动全量遍历
 }
 
 // RankConfigDoc 排行榜配置文档，所有业务类型统一存储于 commonrank.CT_RANK_CONFIG 集合。

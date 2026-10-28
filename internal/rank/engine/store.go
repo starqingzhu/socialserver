@@ -246,7 +246,17 @@ func (st *Store) IncrRealCount(group *Group) (int32, error) {
 	}
 	// HIncrBy 会在 meta 不存在时创建它，所以 meta 的 TTL 也要在这里补。
 	st.expireKey(metaKey)
-	group.RealCount = int32(newCount)
+
+	// 防御：Redis 被清理后 HIncrBy 会从 1 重新计数，必须以内存/分组中的真实值为基准修正，
+	// 防止 group.RealCount 被覆盖为错误值后写入 MongoDB，进而导致机器人重复生成。
+	if int32(newCount) <= group.RealCount {
+		corrected := group.RealCount + 1
+		st.rdb.HSet(metaKey, fmt.Sprintf("realCount_%d", group.GroupID), strconv.FormatInt(int64(corrected), 10))
+		group.RealCount = corrected
+	} else {
+		group.RealCount = int32(newCount)
+	}
+
 	data, _ := json.Marshal(group)
 	st.rdb.HSet(key, field, string(data))
 	st.expireKey(key)
@@ -260,12 +270,42 @@ func (st *Store) NextGroupID() (int32, error) {
 	if !st.available() {
 		return 0, fmt.Errorf("store not available")
 	}
-	val, err := st.rdb.HIncrBy(rediskeys.GetRankMetaKey(st.bizId), "nextGroupID", 1)
+	metaKey := rediskeys.GetRankMetaKey(st.bizId)
+	val, err := st.rdb.HIncrBy(metaKey, "nextGroupID", 1)
 	if err != nil {
 		return 0, err
 	}
 	// 计数器所在的 meta key 可能刚被 HIncrBy 创建出来，同样要带上活跃期 TTL。
-	st.expireKey(rediskeys.GetRankMetaKey(st.bizId))
+	st.expireKey(metaKey)
+
+	// 防御：Redis 被清理后 HIncrBy 会从 1 重新计数，可能与已有分组 ID 冲突。
+	// 若返回值异常小（<=1），优先检查 Redis 分组列表，再回退到 MongoDB 修正。
+	if val <= 1 {
+		var maxID int32
+		if raw, err := st.rdb.HGetAll(rediskeys.GetRankGroupsKey(st.bizId)); err == nil && len(raw) > 0 {
+			for gidStr := range raw {
+				gid, _ := strconv.ParseInt(gidStr, 10, 32)
+				if int32(gid) > maxID {
+					maxID = int32(gid)
+				}
+			}
+		}
+		if maxID <= 0 && st.hasMongo() {
+			if groups, err := st.dao.LoadGroups(st.bizId); err == nil {
+				for _, g := range groups {
+					if g != nil && g.GroupID > maxID {
+						maxID = g.GroupID
+					}
+				}
+			}
+		}
+		if maxID >= int32(val) {
+			corrected := int64(maxID + 1)
+			st.rdb.HSet(metaKey, "nextGroupID", strconv.FormatInt(corrected, 10))
+			return int32(corrected), nil
+		}
+	}
+
 	return int32(val), nil
 }
 

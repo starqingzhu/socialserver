@@ -17,17 +17,18 @@ import (
 //   - currentRound 由 tick 单 goroutine 写，多 RPC goroutine 读：通过 atomic 保护。
 //   - RoundOpenTime/RoundCloseTime 仅由 tick goroutine 读写，无需额外同步。
 type PeriodicState struct {
-	GameID           int32
-	BizType          string
-	ActID            int32
+	GameID             int32
+	BizType            string
+	ActID              int32
 	CycleMinutes     int32
 	BaseCycleMinutes int32 // 初始周期，历史轮次时间窗口计算用（周期变更后保持不变）
 	TotalOpenTime    int64
 	TotalCloseTime   int64
 
-	currentRound   int32 // 仅通过 GetCurrentRound/setCurrentRound 访问
-	RoundOpenTime  int64
-	RoundCloseTime int64
+	currentRound     int32 // 仅通过 GetCurrentRound/setCurrentRound 访问
+	RoundOpenTime    int64
+	RoundCloseTime   int64
+	lastCleanedRound int32 // 已清理的历史轮次上限，避免每次启动全量遍历
 }
 
 // RoundInfo 轮次摘要。
@@ -47,12 +48,6 @@ func (p *PeriodicState) GetCurrentRound() int32 {
 // setCurrentRound 线程安全地设置当前轮次号（仅供 tick goroutine 调用）。
 func (p *PeriodicState) setCurrentRound(r int32) {
 	atomic.StoreInt32(&p.currentRound, r)
-}
-
-// LogicalKey 返回逻辑活动的 map 键格式 "{bizType}:{actID}"。
-// 与 rankservice.BizKey.String() 保持一致。
-func LogicalKey(bizType string, actID int32) string {
-	return fmt.Sprintf("%s:%d", bizType, actID)
 }
 
 // IsRoundBizId 判断一个 BizId 是否为周期子轮次 BizId，格式 "{bizType}_{actID}_r{N}"。
@@ -96,18 +91,12 @@ func ExtractRoundBizBase(roundBizId string) (base string, ok bool) {
 
 // StateLogicalKey 返回该状态的 map 键。
 func (p *PeriodicState) StateLogicalKey() string {
-	if p.GameID != 0 {
-		return fmt.Sprintf("g%d_%s:%d", p.GameID, p.BizType, p.ActID)
-	}
-	return LogicalKey(p.BizType, p.ActID)
+	return FormatLogicalKey(p.GameID, p.BizType, p.ActID)
 }
 
 // roundBizId 返回第 round 轮的 engine 内部 BizId（用于 Redis/MongoDB 键）。
 func (p *PeriodicState) roundBizId(round int32) string {
-	if p.GameID != 0 {
-		return fmt.Sprintf("g%d_%s_%d_r%d", p.GameID, p.BizType, p.ActID, round)
-	}
-	return fmt.Sprintf("%s_%d_r%d", p.BizType, p.ActID, round)
+	return FormatRoundBizId(p.GameID, p.BizType, p.ActID, round)
 }
 
 // currentBizId 返回当前轮的 engine 内部 BizId。
@@ -249,6 +238,7 @@ func (p *PeriodicState) ToSavedState() engine.PeriodicSavedState {
 		CurrentRound:     p.GetCurrentRound(),
 		RoundOpenTime:    p.RoundOpenTime,
 		RoundCloseTime:   p.RoundCloseTime,
+		LastCleanedRound: p.lastCleanedRound,
 	}
 }
 
@@ -264,6 +254,7 @@ func StateFromSaved(gameId int32, bizType string, actID int32, s engine.Periodic
 		TotalCloseTime:   s.TotalCloseTime,
 		RoundOpenTime:    s.RoundOpenTime,
 		RoundCloseTime:   s.RoundCloseTime,
+		lastCleanedRound: s.LastCleanedRound,
 	}
 	p.currentRound = s.CurrentRound // 创建阶段未共享，直接赋值
 	// 兼容旧数据：BaseCycleMinutes 缺失时退化为 CycleMinutes

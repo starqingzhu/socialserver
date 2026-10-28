@@ -6,7 +6,6 @@ import (
 	"reflect"
 
 	"common/rpc"
-	libdispatch "golib/dispatch"
 	"golib/zaplog"
 	pb "pbcommon/gen/ss/msg"
 	"socialserver/internal/dispatch"
@@ -17,7 +16,6 @@ import (
 )
 
 type ServerHandler struct {
-	pb.UnimplementedGameServerServer
 	pb.UnimplementedSocailServerServer
 }
 
@@ -40,10 +38,6 @@ func (h *ServerHandler) Close() error {
 	return nil
 }
 
-func (h *ServerHandler) S2SCompleted(ctx context.Context, req *pb.PBS2SCompletedRequest) (*pb.PBS2SCompletedResponse, error) {
-	return grpcDispatch[*pb.PBS2SCompletedRequest, *pb.PBS2SCompletedResponse](ctx, dispatch.CmdS2SCompleted, req)
-}
-
 // grpcDispatch 泛型适配器：marshal req → dispatch → unmarshal resp，把 dispatch 错误还原为 gRPC status。
 func grpcDispatch[Req, Resp proto.Message](ctx context.Context, cmd string, req Req) (Resp, error) {
 	var zero Resp
@@ -51,10 +45,7 @@ func grpcDispatch[Req, Resp proto.Message](ctx context.Context, cmd string, req 
 	if err != nil {
 		return zero, grpcstatus.Error(codes.Internal, err.Error())
 	}
-	meta := libdispatch.Meta{
-		Protocol: libdispatch.ProtocolGRPC,
-		GameId:   rpc.GameIdFromContext(ctx).Int32(),
-	}
+	meta := rpc.MetaFromIncomingContext(ctx)
 	respBytes, dispatchErr := dispatch.Main.Dispatch(ctx, meta, cmd, payload)
 	if dispatchErr != nil {
 		return zero, dispatchToGRPCErr(dispatchErr)

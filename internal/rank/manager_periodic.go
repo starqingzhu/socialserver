@@ -33,11 +33,7 @@ func (m *Manager) GetEngineServiceByKey(logicalKey string) *engine.Service {
 // BUG5 fix: 双重检查锁，保证并发注册时不覆盖已有服务。
 func (m *Manager) registerSubService(ctx context.Context, bizType BizType, logicalKey string, cfg engine.Config) (*engine.Service, error) {
 	if cfg.RankCode == "" {
-		if cfg.GameID != 0 {
-			cfg.RankCode = fmt.Sprintf("g%d_%s_score_%d", cfg.GameID, bizType, cfg.ActID)
-		} else {
-			cfg.RankCode = fmt.Sprintf("%s_score_%d", bizType, cfg.ActID)
-		}
+		cfg.RankCode = periodic.FormatRankCode(cfg.GameID, string(bizType), cfg.ActID)
 	}
 	if cfg.CreateTime == 0 {
 		cfg.CreateTime = time.Now().UnixMilli()
@@ -86,11 +82,7 @@ func (m *Manager) registerSubService(ctx context.Context, bizType BizType, logic
 // 用于轮次推进时将 logicalKey 指向新一轮的 engine.Service。
 func (m *Manager) replaceSubService(ctx context.Context, bizType BizType, logicalKey string, cfg engine.Config) (*engine.Service, error) {
 	if cfg.RankCode == "" {
-		if cfg.GameID != 0 {
-			cfg.RankCode = fmt.Sprintf("g%d_%s_score_%d", cfg.GameID, bizType, cfg.ActID)
-		} else {
-			cfg.RankCode = fmt.Sprintf("%s_score_%d", bizType, cfg.ActID)
-		}
+		cfg.RankCode = periodic.FormatRankCode(cfg.GameID, string(bizType), cfg.ActID)
 	}
 	if cfg.CreateTime == 0 {
 		cfg.CreateTime = time.Now().UnixMilli()
@@ -131,6 +123,18 @@ func (m *Manager) GetPeriodicState(gameId int32, bizType BizType, actID int32) *
 		return nil
 	}
 	return m.periodicHandler.GetState(NewGameBizKey(gameId, bizType, actID).String())
+}
+
+// GetResolvedCurrentRound 优先从 Redis 读取周期活动的当前轮次，本地值仅作为兜底。
+func (m *Manager) GetResolvedCurrentRound(gameId int32, bizType BizType, actID int32) int32 {
+	if m == nil {
+		return 1
+	}
+	state := m.GetPeriodicState(gameId, bizType, actID)
+	if state == nil {
+		return 1
+	}
+	return m.periodicHandler.ResolveCurrentRound(state)
 }
 
 // GetHistoricalRoundList 查询历史轮次的排行榜。
@@ -245,24 +249,14 @@ func (m *Manager) ResolveEngineService(gameId int32, bizType BizType, actID int3
 
 // FallbackClaimReward 为一次性排行榜在服务不在内存时（>7天后重启或GM删除前）直接走 Store/DAO 路径。
 func (m *Manager) FallbackClaimReward(gameId int32, bizType BizType, actID int32, userID int64, now int64) (bool, int64, error) {
-	var bizId string
-	if gameId != 0 {
-		bizId = fmt.Sprintf("g%d_%s_%d", gameId, bizType, actID)
-	} else {
-		bizId = fmt.Sprintf("%s_%d", bizType, actID)
-	}
+	bizId := periodic.FormatBizId(gameId, string(bizType), actID)
 	store := engine.NewStore(m.rdb, m.dao, bizId, nil)
 	return store.AtomicClaim(userID, now)
 }
 
 // FallbackGetClaimStatus 为一次性排行榜在服务不在内存时直接走 Store/DAO 路径查询领奖状态。
 func (m *Manager) FallbackGetClaimStatus(gameId int32, bizType BizType, actID int32, userID int64) (bool, int64, error) {
-	var bizId string
-	if gameId != 0 {
-		bizId = fmt.Sprintf("g%d_%s_%d", gameId, bizType, actID)
-	} else {
-		bizId = fmt.Sprintf("%s_%d", bizType, actID)
-	}
+	bizId := periodic.FormatBizId(gameId, string(bizType), actID)
 	store := engine.NewStore(m.rdb, m.dao, bizId, nil)
 	ct, found, err := store.GetClaim(userID)
 	if err != nil {

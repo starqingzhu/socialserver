@@ -15,7 +15,6 @@ import dispatchproto "golib/dispatch/proto"
 func RegisterAll(d *dispatchproto.Dispatcher) error {
 	registers := []func(*dispatchproto.Dispatcher) error{
 		registerRank,
-		registerS2S,
 	}
 	for _, fn := range registers {
 		if err := fn(d); err != nil {

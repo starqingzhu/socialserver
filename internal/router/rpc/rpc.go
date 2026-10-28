@@ -47,7 +47,6 @@ func startGRPCServer() {
 
 	grpcServer = rpcserver.NewServer(grpcConfig)
 	grpcServer.RegisterService(func(s *grpc.Server) {
-		pb.RegisterGameServerServer(s, socialServerHandler)
 		pb.RegisterSocailServerServer(s, socialServerHandler)
 	})
 

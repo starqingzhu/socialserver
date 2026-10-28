@@ -3,6 +3,8 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"common/configmgr"
@@ -14,9 +16,9 @@ import (
 	"golib/zaplog"
 	commonMsg "pbcommon/gen/common/msg"
 	pb "pbcommon/gen/ss/msg"
+	"socialserver/internal/dispatch"
 	rankservice "socialserver/internal/rank"
 	"socialserver/internal/rank/engine"
-	"socialserver/internal/dispatch"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -55,9 +57,6 @@ func registerRank(d *dispatchproto.Dispatcher) error {
 
 func handleUpsertScore(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SUpsertScoreRequest, resp *pb.PBS2SUpsertScoreResponse) (retErr error) {
 	gameId := meta.GameId
-	if req.Context != nil && req.Context.GameId != 0 {
-		gameId = req.Context.GameId
-	}
 	zaplog.LoggerSugar.Infof("[rank] S2SUpsertScore req bizType=%s actId=%d userId=%d totalScore=%d ts=%d round=%d",
 		req.BizType, req.ActId, req.UserId, req.TotalScore, req.Timestamp, req.Round)
 	defer func() {
@@ -78,13 +77,11 @@ func handleUpsertScore(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 	currentRound := int32(1)
 	manager := rankservice.GetGlobalManager()
 	if manager != nil {
-		if ps := manager.GetPeriodicState(gameId, bizType, req.ActId); ps != nil {
-			currentRound = ps.GetCurrentRound()
-			if req.Round > 0 && req.Round != ps.GetCurrentRound() {
-				resp.MsgCode = commonMsg.MsgCode_CODE_RANK_ROUND_CHANGED
-				resp.CurrentRound = ps.GetCurrentRound()
-				return nil
-			}
+		currentRound = manager.GetResolvedCurrentRound(gameId, bizType, req.ActId)
+		if req.Round > 0 && req.Round != currentRound {
+			resp.MsgCode = commonMsg.MsgCode_CODE_RANK_ROUND_CHANGED
+			resp.CurrentRound = currentRound
+			return nil
 		}
 	}
 
@@ -126,9 +123,6 @@ func handleUpsertScore(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 
 func handleGetRankList(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SGetRankListRequest, resp *pb.PBS2SGetRankListResponse) (retErr error) {
 	gameId := meta.GameId
-	if req.Context != nil && req.Context.GameId != 0 {
-		gameId = req.Context.GameId
-	}
 	zaplog.LoggerSugar.Infof("[rank] S2SGetRankList req bizType=%s actId=%d userId=%d start=%d end=%d round=%d",
 		req.BizType, req.ActId, req.UserId, req.Start, req.End, req.Round)
 	defer func() {
@@ -148,10 +142,7 @@ func handleGetRankList(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 	bizType := rankservice.BizType(req.BizType)
 	svc, isHistorical := manager.ResolveEngineService(gameId, bizType, req.ActId, req.Round)
 
-	currentRound := int32(1)
-	if ps := manager.GetPeriodicState(gameId, bizType, req.ActId); ps != nil {
-		currentRound = ps.GetCurrentRound()
-	}
+	currentRound := manager.GetResolvedCurrentRound(gameId, bizType, req.ActId)
 
 	if isHistorical {
 		snapshots, mySnap, err := manager.GetHistoricalRoundList(ctx, gameId, bizType, req.ActId, req.Round, req.UserId, req.Start, req.End)
@@ -204,9 +195,6 @@ func handleGetRankList(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 
 func handleGetMemberRank(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SGetMemberRankRequest, resp *pb.PBS2SGetMemberRankResponse) (retErr error) {
 	gameId := meta.GameId
-	if req.Context != nil && req.Context.GameId != 0 {
-		gameId = req.Context.GameId
-	}
 	zaplog.LoggerSugar.Infof("[rank] S2SGetMemberRank req bizType=%s actId=%d userId=%d round=%d",
 		req.BizType, req.ActId, req.UserId, req.Round)
 	defer func() {
@@ -230,6 +218,7 @@ func handleGetMemberRank(ctx context.Context, meta libdispatch.Meta, req *pb.PBS
 	}
 	bizType := rankservice.BizType(req.BizType)
 	svc, isHistorical := manager.ResolveEngineService(gameId, bizType, req.ActId, req.Round)
+	_ = manager.GetResolvedCurrentRound(gameId, bizType, req.ActId) // 保证多节点轮次一致性（日志用）
 	if isHistorical {
 		zaplog.LoggerSugar.Infof("[rank] S2SGetMemberRank route=historical bizType=%s actId=%d userId=%d round=%d",
 			req.BizType, req.ActId, req.UserId, req.Round)
@@ -276,9 +265,6 @@ func handleGetMemberRank(ctx context.Context, meta libdispatch.Meta, req *pb.PBS
 
 func handleSettle(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SSettleRequest, resp *pb.PBS2SSettleResponse) (retErr error) {
 	gameId := meta.GameId
-	if req.Context != nil && req.Context.GameId != 0 {
-		gameId = req.Context.GameId
-	}
 	zaplog.LoggerSugar.Infof("[rank] S2SSettle req bizType=%s actId=%d timestamp=%d",
 		req.BizType, req.ActId, req.Timestamp)
 	defer func() {
@@ -309,9 +295,6 @@ func handleSettle(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SSettl
 
 func handleGetRewardUsers(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SGetRewardUsersRequest, resp *pb.PBS2SGetRewardUsersResponse) (retErr error) {
 	gameId := meta.GameId
-	if req.Context != nil && req.Context.GameId != 0 {
-		gameId = req.Context.GameId
-	}
 	zaplog.LoggerSugar.Infof("[rank] S2SGetRewardUsers req bizType=%s actId=%d round=%d", req.BizType, req.ActId, req.Round)
 	defer func() {
 		if retErr != nil {
@@ -354,9 +337,6 @@ func handleGetRewardUsers(ctx context.Context, meta libdispatch.Meta, req *pb.PB
 
 func handleClaimReward(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SClaimRewardRequest, resp *pb.PBS2SClaimRewardResponse) (retErr error) {
 	gameId := meta.GameId
-	if req.Context != nil && req.Context.GameId != 0 {
-		gameId = req.Context.GameId
-	}
 	zaplog.LoggerSugar.Infof("[rank] S2SClaimReward req bizType=%s actId=%d userId=%d round=%d",
 		req.BizType, req.ActId, req.UserId, req.Round)
 	defer func() {
@@ -407,9 +387,6 @@ func handleClaimReward(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2S
 
 func handleGetClaimStatus(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SGetClaimStatusRequest, resp *pb.PBS2SGetClaimStatusResponse) (retErr error) {
 	gameId := meta.GameId
-	if req.Context != nil && req.Context.GameId != 0 {
-		gameId = req.Context.GameId
-	}
 	zaplog.LoggerSugar.Infof("[rank] S2SGetClaimStatus req bizType=%s actId=%d userId=%d round=%d",
 		req.BizType, req.ActId, req.UserId, req.Round)
 	defer func() {
@@ -460,17 +437,18 @@ func handleGetClaimStatus(ctx context.Context, meta libdispatch.Meta, req *pb.PB
 
 // --- GM 管理接口 ---
 
-func handleListRankBizTypes(_ context.Context, _ libdispatch.Meta, _ *pb.PBS2SListRankBizTypesRequest, resp *pb.PBS2SListRankBizTypesResponse) (retErr error) {
-	zaplog.LoggerSugar.Infof("[rank] S2SListRankBizTypes")
+func handleListRankBizTypes(_ context.Context, meta libdispatch.Meta, _ *pb.PBS2SListRankBizTypesRequest, resp *pb.PBS2SListRankBizTypesResponse) (retErr error) {
+	gameId := meta.GameId
+	zaplog.LoggerSugar.Infof("[rank] S2SListRankBizTypes gameId=%d", gameId)
 	defer func() {
 		if retErr != nil {
-			zaplog.LoggerSugar.Warnf("[rank] S2SListRankBizTypes resp err=%v", retErr)
+			zaplog.LoggerSugar.Warnf("[rank] S2SListRankBizTypes resp gameId=%d err=%v", gameId, retErr)
 		} else {
-			zaplog.LoggerSugar.Infof("[rank] S2SListRankBizTypes resp count=%d", len(resp.BizTypes))
+			zaplog.LoggerSugar.Infof("[rank] S2SListRankBizTypes resp gameId=%d count=%d bizTypes=[%s]", gameId, len(resp.BizTypes), strings.Join(resp.BizTypes, ","))
 		}
 	}()
 
-	cf, err := configmgr.GetConfigByFileName("RankBase")
+	cf, err := configmgr.GetGameConfigByFileName(gameid.GameId(gameId), "RankBase")
 	if err != nil {
 		resp.MsgCode = commonMsg.MsgCode_CODE_SERVER_INNER
 		return nil
@@ -494,9 +472,6 @@ func handleListRankBizTypes(_ context.Context, _ libdispatch.Meta, _ *pb.PBS2SLi
 
 func handleCreateRankConfig(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SCreateRankConfigRequest, resp *pb.PBS2SCreateRankConfigResponse) (retErr error) {
 	gameId := meta.GameId
-	if req.Context != nil && req.Context.GameId != 0 {
-		gameId = req.Context.GameId
-	}
 	zaplog.LoggerSugar.Infof("[rank] S2SCreateRankConfig req bizType=%s actId=%d openTime=%d closeTime=%d gameEndTime=%d",
 		req.BizType, req.ActId, req.OpenTime, req.CloseTime, req.GameEndTime)
 	defer func() {
@@ -532,9 +507,6 @@ func handleCreateRankConfig(ctx context.Context, meta libdispatch.Meta, req *pb.
 
 func handleGetRankConfig(_ context.Context, meta libdispatch.Meta, req *pb.PBS2SGetRankConfigRequest, resp *pb.PBS2SGetRankConfigResponse) (retErr error) {
 	gameId := meta.GameId
-	if req.Context != nil && req.Context.GameId != 0 {
-		gameId = req.Context.GameId
-	}
 	zaplog.LoggerSugar.Infof("[rank] S2SGetRankConfig req bizType=%s actId=%d", req.BizType, req.ActId)
 	defer func() {
 		if retErr != nil {
@@ -556,14 +528,15 @@ func handleGetRankConfig(_ context.Context, meta libdispatch.Meta, req *pb.PBS2S
 	if manager != nil {
 		if state := manager.GetPeriodicState(gameId, rankservice.BizType(req.BizType), req.ActId); state != nil {
 			rankType = pb.RankType_RANK_TYPE_PERIODIC
-			// 优先从配置读取最新的 cycleMinutes，解决配置变更后持久化状态未更新的问题
-			_, cm, _ := rankservice.LoadRankTypeAndCycle(gameid.GameId(gameId), rankservice.BizType(req.BizType))
-			if cm > 0 {
-				cycleMinutes = cm
+			// 用当前轮实际窗口时长计算周期，保证 GM 展示的是本轮真实周期。
+			// 最后一轮被 TotalCloseTime 截断、或配置变更后边缘场景下，
+			// 这比直接读 state.CycleMinutes 更准确。
+			if state.RoundCloseTime > state.RoundOpenTime {
+				cycleMinutes = int32((state.RoundCloseTime - state.RoundOpenTime) / (60 * 1000))
 			} else {
 				cycleMinutes = state.CycleMinutes
 			}
-			currentRound = state.GetCurrentRound()
+			currentRound = manager.GetResolvedCurrentRound(gameId, rankservice.BizType(req.BizType), req.ActId)
 		}
 	}
 
@@ -588,9 +561,6 @@ func handleGetRankConfig(_ context.Context, meta libdispatch.Meta, req *pb.PBS2S
 
 func handleUpdateRankConfig(_ context.Context, meta libdispatch.Meta, req *pb.PBS2SUpdateRankConfigRequest, resp *pb.PBS2SUpdateRankConfigResponse) (retErr error) {
 	gameId := meta.GameId
-	if req.Context != nil && req.Context.GameId != 0 {
-		gameId = req.Context.GameId
-	}
 	zaplog.LoggerSugar.Infof("[rank] S2SUpdateRankConfig req bizType=%s actId=%d openTime=%d closeTime=%d gameEndTime=%d",
 		req.BizType, req.ActId, req.OpenTime, req.CloseTime, req.GameEndTime)
 	defer func() {
@@ -618,9 +588,6 @@ func handleUpdateRankConfig(_ context.Context, meta libdispatch.Meta, req *pb.PB
 
 func handleDeleteRankConfig(_ context.Context, meta libdispatch.Meta, req *pb.PBS2SDeleteRankConfigRequest, resp *pb.PBS2SDeleteRankConfigResponse) (retErr error) {
 	gameId := meta.GameId
-	if req.Context != nil && req.Context.GameId != 0 {
-		gameId = req.Context.GameId
-	}
 	zaplog.LoggerSugar.Infof("[rank] S2SDeleteRankConfig req bizType=%s actId=%d", req.BizType, req.ActId)
 	defer func() {
 		if retErr != nil {
@@ -642,15 +609,17 @@ func handleDeleteRankConfig(_ context.Context, meta libdispatch.Meta, req *pb.PB
 
 func handleListRankConfigs(_ context.Context, meta libdispatch.Meta, req *pb.PBS2SListRankConfigsRequest, resp *pb.PBS2SListRankConfigsResponse) (retErr error) {
 	gameId := meta.GameId
-	if req.Context != nil && req.Context.GameId != 0 {
-		gameId = req.Context.GameId
-	}
 	zaplog.LoggerSugar.Infof("[rank] S2SListRankConfigs req bizType=%s", req.BizType)
 	defer func() {
 		if retErr != nil {
 			zaplog.LoggerSugar.Warnf("[rank] S2SListRankConfigs resp err=%v", retErr)
 		} else {
-			zaplog.LoggerSugar.Infof("[rank] S2SListRankConfigs resp count=%d", len(resp.Ranks))
+			var summaries []string
+			for _, r := range resp.Ranks {
+				summaries = append(summaries, fmt.Sprintf("%s:%d(code=%s settled=%v groups=%d members=%d round=%d type=%s)",
+					r.BizType, r.ActId, r.RankCode, r.Settled, r.GroupCount, r.MemberCount, r.CurrentRound, r.RankType))
+			}
+			zaplog.LoggerSugar.Infof("[rank] S2SListRankConfigs resp count=%d ranks=[%s]", len(resp.Ranks), strings.Join(summaries, ", "))
 		}
 	}()
 
@@ -669,17 +638,17 @@ func handleListRankConfigs(_ context.Context, meta libdispatch.Meta, req *pb.PBS
 		createTime := info.CreateTime
 		if state := manager.GetPeriodicState(gameId, info.BizType, info.ActID); state != nil {
 			rankType = pb.RankType_RANK_TYPE_PERIODIC
-			// 优先从配置读取最新的 cycleMinutes，解决配置变更后持久化状态未更新的问题
-			_, cm, _ := rankservice.LoadRankTypeAndCycle(gameid.GameId(gameId), info.BizType)
-			if cm > 0 {
-				cycleMinutes = cm
+			// 用当前轮实际窗口时长计算周期，保证 GM 展示的是本轮真实周期。
+			if state.RoundCloseTime > state.RoundOpenTime {
+				cycleMinutes = int32((state.RoundCloseTime - state.RoundOpenTime) / (60 * 1000))
 			} else {
 				cycleMinutes = state.CycleMinutes
 			}
-			currentRound = state.GetCurrentRound()
-			openTime = state.RoundOpenTime
-			closeTime = state.RoundCloseTime
-			gameEndTime = state.RoundCloseTime
+			currentRound = manager.GetResolvedCurrentRound(gameId, info.BizType, info.ActID)
+			// 列表页展示活动总时间窗口；当前轮次窗口通过 CycleMinutes + CurrentRound 体现。
+			openTime = state.TotalOpenTime
+			closeTime = state.TotalCloseTime
+			gameEndTime = state.TotalCloseTime
 			createTime = state.TotalOpenTime
 		}
 		ranks[i] = &pb.PBRankConfigSummary{
@@ -705,9 +674,6 @@ func handleListRankConfigs(_ context.Context, meta libdispatch.Meta, req *pb.PBS
 
 func handleGetRankCurRound(_ context.Context, meta libdispatch.Meta, req *pb.PBS2SGetRankCurRoundRequest, resp *pb.PBS2SGetRankCurRoundResponse) (retErr error) {
 	gameId := meta.GameId
-	if req.Context != nil && req.Context.GameId != 0 {
-		gameId = req.Context.GameId
-	}
 	zaplog.LoggerSugar.Infof("[rank] S2SGetRankCurRound req bizType=%s actId=%d", req.BizType, req.ActId)
 	defer func() {
 		if retErr != nil {
@@ -744,9 +710,6 @@ func handleGetRankCurRound(_ context.Context, meta libdispatch.Meta, req *pb.PBS
 
 func handleGMGetUserRankList(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SGMGetUserRankListRequest, resp *pb.PBS2SGMGetUserRankListResponse) (retErr error) {
 	gameId := meta.GameId
-	if req.Context != nil && req.Context.GameId != 0 {
-		gameId = req.Context.GameId
-	}
 	zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetUserRankList req userId=%d", req.UserId)
 	defer func() {
 		if retErr != nil {
@@ -779,9 +742,6 @@ func handleGMGetUserRankList(ctx context.Context, meta libdispatch.Meta, req *pb
 
 func handleGMGetGroupRankList(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SGMGetGroupRankListRequest, resp *pb.PBS2SGMGetGroupRankListResponse) (retErr error) {
 	gameId := meta.GameId
-	if req.Context != nil && req.Context.GameId != 0 {
-		gameId = req.Context.GameId
-	}
 	zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetGroupRankList req bizType=%s actId=%d groupId=%d",
 		req.BizType, req.ActId, req.GroupId)
 	defer func() {
@@ -809,9 +769,6 @@ func handleGMGetGroupRankList(ctx context.Context, meta libdispatch.Meta, req *p
 
 func handleGMGetRankInstanceList(_ context.Context, meta libdispatch.Meta, req *pb.PBS2SGMGetRankInstanceListRequest, resp *pb.PBS2SGMGetRankInstanceListResponse) (retErr error) {
 	gameId := meta.GameId
-	if req.Context != nil && req.Context.GameId != 0 {
-		gameId = req.Context.GameId
-	}
 	zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetRankInstanceList req bizType=%s actId=%d", req.BizType, req.ActId)
 	defer func() {
 		if retErr != nil {
@@ -842,9 +799,6 @@ func handleGMGetRankInstanceList(_ context.Context, meta libdispatch.Meta, req *
 
 func handleGMGetInstanceRankList(ctx context.Context, meta libdispatch.Meta, req *pb.PBS2SGMGetInstanceRankListRequest, resp *pb.PBS2SGMGetInstanceRankListResponse) (retErr error) {
 	gameId := meta.GameId
-	if req.Context != nil && req.Context.GameId != 0 {
-		gameId = req.Context.GameId
-	}
 	zaplog.LoggerSugar.Infof("[rank][gm] S2SGMGetInstanceRankList req bizType=%s actId=%d groupId=%d",
 		req.BizType, req.ActId, req.GroupId)
 	defer func() {

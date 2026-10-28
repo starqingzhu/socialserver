@@ -31,7 +31,4 @@ const (
 	CmdS2SGMGetGroupRankList    = "rank.gm.groupRankList"    // GM：查分组排行榜
 	CmdS2SGMGetRankInstanceList = "rank.gm.instanceList"     // GM：查排行榜实例列表
 	CmdS2SGMGetInstanceRankList = "rank.gm.instanceRankList" // GM：查实例内排名
-
-	// === S2S 完成通知 ===
-	CmdS2SCompleted = "s2s.completed" // S2S 完成通知
 )

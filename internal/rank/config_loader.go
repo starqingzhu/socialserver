@@ -160,10 +160,9 @@ func GetRankBaseName(gameId gameid.GameId, bizType BizType) string {
 }
 
 // ValidateBizType 验证业务类型是否支持。
-// 通过检查 RankBase.json 配置文件中是否存在该业务类型的配置。
-// 使用 gameId=0 的公共配置做验证（向后兼容）。
-func ValidateBizType(bizType BizType) error {
-	_, err := loadRankBase(0, bizType)
+// 通过检查对应游戏的 RankBase.json 配置文件中是否存在该业务类型的配置。
+func ValidateBizType(gameId gameid.GameId, bizType BizType) error {
+	_, err := loadRankBase(gameId, bizType)
 	if err != nil {
 		return fmt.Errorf("unsupported biz type: %s - %w", bizType, err)
 	}

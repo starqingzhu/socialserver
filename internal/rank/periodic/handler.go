@@ -46,7 +46,7 @@ type Handler struct {
 
 	// cycleProvider 提供动态读取配置文件的 cycleMinutes，用于支持配置变更后下一期生效。
 	// 返回 (cycleMinutes, ok)，ok=false 表示读取失败或配置不存在。
-	cycleProvider func(bizType string) (int32, bool)
+	cycleProvider func(gameId int32, bizType string) (int32, bool)
 
 	// timers 追踪 advanceRound 中调度的延迟清理 timer，供 Clear() 优雅关闭时统一 Stop()，
 	// 防止 Server 关闭后 timer 到期仍对已关闭的 Redis 连接发 EXPIRE/DEL 命令
@@ -65,7 +65,7 @@ func NewHandler(rdb *goredis.Redis, dao *engine.DAO, registry ServiceRegistrar) 
 }
 
 // SetCycleProvider 设置动态周期读取器，用于在轮次推进时检测配置变更。
-func (h *Handler) SetCycleProvider(fn func(bizType string) (int32, bool)) {
+func (h *Handler) SetCycleProvider(fn func(gameId int32, bizType string) (int32, bool)) {
 	h.cycleProvider = fn
 }
 
@@ -204,9 +204,23 @@ func (h *Handler) TickAll(ctx context.Context, now int64) {
 	h.mu.RUnlock()
 
 	for _, state := range states {
+		// 同步周期：若 Redis meta 中的周期与本地不同，更新本地（用于未来轮次计算）
+		if meta, ok := h.GetPeriodicMetaFromRedis(state.StateLogicalKey()); ok && meta.CycleMinutes > 0 && meta.CycleMinutes != state.CycleMinutes {
+			state.CycleMinutes = meta.CycleMinutes
+		}
+
 		if !state.isRoundExpired(now) {
 			continue
 		}
+
+		// 若 Redis 已反映更新的轮次，直接同步本地状态，避免全节点抢锁
+		logicalKey := state.StateLogicalKey()
+		redisRound := h.readCurRoundFromRedis(logicalKey)
+		if redisRound > state.GetCurrentRound() {
+			state.advanceToRound(redisRound)
+			continue
+		}
+
 		h.advanceRound(ctx, state, now)
 	}
 }
@@ -223,8 +237,22 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 	logicalKey := state.StateLogicalKey()
 	currentRound := state.GetCurrentRound()
 
+	// 动态锁 TTL：按分组数估算，最少 1 分钟，最多 5 分钟
+	lockTTL := time.Minute
+	if svc := h.registry.GetEngineServiceByKey(logicalKey); svc != nil {
+		if groups := svc.ListGroups(); len(groups) > 30 {
+			estimated := time.Duration(len(groups)*2) * time.Second
+			if estimated > lockTTL {
+				lockTTL = estimated
+			}
+		}
+	}
+	if lockTTL > 5*time.Minute {
+		lockTTL = 5 * time.Minute
+	}
+
 	advanceLock := rediskeys.GetRankPeriodicAdvanceKey(logicalKey, currentRound)
-	locked, err := h.rdb.SetNX(advanceLock, "1", time.Minute)
+	locked, err := h.rdb.SetNX(advanceLock, "1", lockTTL)
 	if err != nil || !locked {
 		return
 	}
@@ -272,31 +300,36 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 	// 目标轮不是 currentRound+1，而是直接由 now 反推（见 nextAdvanceRound）：
 	// state 落后墙钟多轮时一跳到位，而不是每 tick 只走一轮。
 	nextRound := state.nextAdvanceRound(now)
+	cycleChanged := false
+	newCycle := state.CycleMinutes
 
 	// 动态更新 cycleMinutes：读取配置文件，如果不同则更新。
-	// 这样下一轮的 computeRoundWindow 会使用新值，而当前轮次不受影响。
+	// 本轮仍保持原周期运行；下一轮的窗口会使用新值。
 	if h.cycleProvider != nil {
-		if newCycle, ok := h.cycleProvider(state.BizType); ok && newCycle > 0 && newCycle != state.CycleMinutes {
-			oldCycle := state.CycleMinutes
-			state.CycleMinutes = newCycle
+		if nc, ok := h.cycleProvider(state.GameID, state.BizType); ok && nc > 0 && nc != state.CycleMinutes {
+			newCycle = nc
+			cycleChanged = true
 			// 周期变更后，下一轮必须紧接当前轮（currentRound+1），避免：
 			// 1) 周期变长时 computeRoundWindow 按 TotalOpenTime 算出远未来时间，导致时间空白
 			// 2) 周期变短时 nextAdvanceRound 跳到远超 currentRound+1 的轮次，而该轮开始时间可能还在未来
 			nextRound = state.GetCurrentRound() + 1
-			zaplog.LoggerSugar.Infof("rank periodic: cycleMinutes updated logicalKey=%s nextRound=%d old=%d new=%d",
-				logicalKey, nextRound, oldCycle, newCycle)
-			// 持久化到 MongoDB，保证重启后仍使用新值
-			if h.dao != nil {
-				if err := h.dao.SavePeriodicState(logicalKey, state.ToSavedState()); err != nil {
-					zaplog.LoggerSugar.Warnf("rank periodic: save state after cycle update logicalKey=%s: %v", logicalKey, err)
-				}
-			}
-			// 同步更新 Redis meta，使降级恢复路径也能拿到新周期
-			h.setPeriodicMetaInRedis(logicalKey, state)
+			zaplog.LoggerSugar.Infof("rank periodic: cycleMinutes will update logicalKey=%s nextRound=%d old=%d new=%d",
+				logicalKey, nextRound, state.CycleMinutes, newCycle)
 		}
 	}
 
-	nextOpen, nextClose := state.computeRoundWindow(nextRound)
+	var nextOpen, nextClose int64
+	if cycleChanged {
+		// 周期变更时不能依赖 computeRoundWindow（它读取 state.CycleMinutes，而我们要先注册成功再改），
+		// 直接手动计算：下一轮紧接当前轮结束时间，时长为新周期。
+		nextOpen = state.RoundCloseTime
+		nextClose = state.RoundCloseTime + int64(newCycle)*60*1000
+		if nextClose > state.TotalCloseTime {
+			nextClose = state.TotalCloseTime
+		}
+	} else {
+		nextOpen, nextClose = state.computeRoundWindow(nextRound)
+	}
 	if nextOpen >= state.TotalCloseTime {
 		zaplog.LoggerSugar.Infof("rank periodic: no more rounds logicalKey=%s", logicalKey)
 		return
@@ -317,6 +350,10 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 		return
 	}
 
+	// ReplaceRoundService 成功后才正式更新周期并持久化，避免中间失败留下不一致状态。
+	if cycleChanged {
+		state.CycleMinutes = newCycle
+	}
 	state.advanceToRound(nextRound)
 
 	// 将新 currentRound 写入 Redis，使其他节点无需等待 syncFromMongo 即可读到最新轮次
@@ -331,10 +368,13 @@ func (h *Handler) advanceRound(ctx context.Context, state *PeriodicState, now in
 	}
 
 	if h.dao != nil {
-
 		if err := h.dao.SavePeriodicState(logicalKey, state.ToSavedState()); err != nil {
 			zaplog.LoggerSugar.Errorf("rank periodic: save state logicalKey=%s: %v", logicalKey, err)
 		}
+	}
+	// 周期变更后同步更新 Redis meta，使降级恢复路径也能拿到新周期
+	if cycleChanged {
+		h.setPeriodicMetaInRedis(logicalKey, state)
 	}
 
 	zaplog.LoggerSugar.Infof("rank periodic: advanced to round=%d from=%d logicalKey=%s [%d, %d)",
@@ -348,12 +388,7 @@ func (h *Handler) setSettledTTLForRound(svc *engine.Service, state *PeriodicStat
 		return
 	}
 	groups := svc.ListGroups()
-	var rankCode string
-	if state.GameID != 0 {
-		rankCode = fmt.Sprintf("g%d_%s_score_%d", state.GameID, state.BizType, state.ActID)
-	} else {
-		rankCode = fmt.Sprintf("%s_score_%d", state.BizType, state.ActID)
-	}
+	rankCode := FormatRankCode(state.GameID, state.BizType, state.ActID)
 	bizId := state.roundBizId(round)
 	for _, g := range groups {
 		instanceID := commonrank.NewInstanceID(rankCode, bizId, fmt.Sprintf("group_%d", g.GroupID))
@@ -389,10 +424,7 @@ func (h *Handler) resolveHistoricalRound(logicalKey, bizType string, actID, roun
 
 // roundBizId 返回第 round 轮的 engine 内部 BizId（与 PeriodicState.roundBizId 一致，但不依赖状态）。
 func roundBizId(gameId int32, bizType string, actID, round int32) string {
-	if gameId != 0 {
-		return fmt.Sprintf("g%d_%s_%d_r%d", gameId, bizType, actID, round)
-	}
-	return fmt.Sprintf("%s_%d_r%d", bizType, actID, round)
+	return FormatRoundBizId(gameId, bizType, actID, round)
 }
 
 // GetHistoricalRoundList 查询历史轮次的排行榜（从 MongoDB/Redis 读取已结算数据）。
@@ -400,21 +432,13 @@ func (h *Handler) GetHistoricalRoundList(ctx context.Context, gameId int32, bizT
 	if h.dao == nil {
 		return nil, nil, fmt.Errorf("dao not available")
 	}
-	logicalKey := LogicalKey(bizType, actID)
-	if gameId != 0 {
-		logicalKey = fmt.Sprintf("g%d_%s:%d", gameId, bizType, actID)
-	}
+	logicalKey := FormatLogicalKey(gameId, bizType, actID)
 	round, err := h.resolveHistoricalRound(logicalKey, bizType, actID, round)
 	if err != nil {
 		return nil, nil, err
 	}
 	bizId := roundBizId(gameId, bizType, actID, round)
-	var rankCode string
-	if gameId != 0 {
-		rankCode = fmt.Sprintf("g%d_%s_score_%d", gameId, bizType, actID)
-	} else {
-		rankCode = fmt.Sprintf("%s_score_%d", bizType, actID)
-	}
+	rankCode := FormatRankCode(gameId, bizType, actID)
 
 	// 优先从 Redis 查询（结算后 2 周内仍有效），
 	// 再降级到 MongoDB，避免因异步写入延迟导致历史查询短暂失败。
@@ -530,21 +554,13 @@ func (h *Handler) GetHistoricalRewardUsers(ctx context.Context, gameId int32, bi
 	if h.dao == nil {
 		return nil, fmt.Errorf("dao not available")
 	}
-	logicalKey := LogicalKey(bizType, actID)
-	if gameId != 0 {
-		logicalKey = fmt.Sprintf("g%d_%s:%d", gameId, bizType, actID)
-	}
+	logicalKey := FormatLogicalKey(gameId, bizType, actID)
 	round, err := h.resolveHistoricalRound(logicalKey, bizType, actID, round)
 	if err != nil {
 		return nil, err
 	}
 	bizId := roundBizId(gameId, bizType, actID, round)
-	var rankCode string
-	if gameId != 0 {
-		rankCode = fmt.Sprintf("g%d_%s_score_%d", gameId, bizType, actID)
-	} else {
-		rankCode = fmt.Sprintf("%s_score_%d", bizType, actID)
-	}
+	rankCode := FormatRankCode(gameId, bizType, actID)
 	// Redis 优先、Mongo 兜底回写（2 周 TTL），避免历史查询反复打 Mongo。
 	store := engine.NewStore(h.rdb, h.dao, bizId, nil)
 	members, err := store.GetAllMembers()
@@ -610,10 +626,7 @@ func (h *Handler) GetHistoricalClaimStatus(gameId int32, bizType string, actID i
 	if h.dao == nil {
 		return false, 0, fmt.Errorf("dao not available")
 	}
-	logicalKey := LogicalKey(bizType, actID)
-	if gameId != 0 {
-		logicalKey = fmt.Sprintf("g%d_%s:%d", gameId, bizType, actID)
-	}
+	logicalKey := FormatLogicalKey(gameId, bizType, actID)
 	round, err = h.resolveHistoricalRound(logicalKey, bizType, actID, round)
 	if err != nil {
 		return false, 0, err
@@ -631,10 +644,7 @@ func (h *Handler) ClaimHistoricalReward(gameId int32, bizType string, actID int3
 	if h.dao == nil {
 		return false, 0, fmt.Errorf("dao not available")
 	}
-	logicalKey := LogicalKey(bizType, actID)
-	if gameId != 0 {
-		logicalKey = fmt.Sprintf("g%d_%s:%d", gameId, bizType, actID)
-	}
+	logicalKey := FormatLogicalKey(gameId, bizType, actID)
 	round, err = h.resolveHistoricalRound(logicalKey, bizType, actID, round)
 	if err != nil {
 		return false, 0, err
@@ -670,6 +680,19 @@ func (h *Handler) GetRoundInfos(state *PeriodicState) (currentRound int32, round
 		})
 	}
 	return currentRound, rounds, nil
+}
+
+// ResolveCurrentRound 优先从 Redis 读取当前轮次，本地值仅作为兜底（Redis 写入可能短暂滞后）。
+func (h *Handler) ResolveCurrentRound(state *PeriodicState) int32 {
+	if state == nil {
+		return 1
+	}
+	logicalKey := state.StateLogicalKey()
+	curRound := h.readCurRoundFromRedis(logicalKey)
+	if local := state.GetCurrentRound(); local > curRound {
+		curRound = local
+	}
+	return curRound
 }
 
 // GetCurrentRoundInfo 直接返回当前轮次信息，不枚举所有轮次。
@@ -730,15 +753,34 @@ func (h *Handler) readCurRoundFromRedis(logicalKey string) int32 {
 	return int32(n)
 }
 
-// CleanupHistoricalRounds 在启动恢复时清理所有已结算轮次（< CurrentRound）的 Redis 热数据。
+// CleanupHistoricalRounds 在启动恢复时清理已结算轮次（< CurrentRound）的 Redis 热数据。
+// 采用批量渐进：每次最多清理 100 轮，更新 lastCleanedRound，避免启动期全量遍历阻塞主流程。
 // 幂等操作，可重复执行。
 func (h *Handler) CleanupHistoricalRounds(state *PeriodicState) {
 	curRound := state.GetCurrentRound()
-	for r := int32(1); r < curRound; r++ {
+	if curRound <= 1 {
+		return
+	}
+	const batchSize = 100
+	start := state.lastCleanedRound + 1
+	if start < 1 {
+		start = 1
+	}
+	end := start + batchSize
+	if end > curRound {
+		end = curRound
+	}
+	if start >= end {
+		return
+	}
+	for r := start; r < end; r++ {
 		bizId := state.roundBizId(r)
 		store := engine.NewStore(h.rdb, h.dao, bizId, nil)
 		store.CleanupLiveData(nil)
 	}
+	state.lastCleanedRound = end - 1
+	zaplog.LoggerSugar.Infof("rank periodic: cleaned historical rounds %d-%d, logicalKey=%s, curRound=%d",
+		start, end-1, state.StateLogicalKey(), curRound)
 }
 
 // periodicMetaRedisKey 返回存储周期活动元数据的 Redis 键。

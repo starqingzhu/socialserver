@@ -2,7 +2,6 @@ package rankservice
 
 import (
 	"testing"
-	"time"
 )
 
 func TestParseRegistryMember(t *testing.T) {
@@ -35,16 +34,3 @@ func TestParseRegistryMemberInvalid(t *testing.T) {
 	}
 }
 
-func TestRegistryDeadlineDegradesWhenActivityTimesMissing(t *testing.T) {
-	// Manager.rdb == nil ⇒ 底层 Store.available() 为 false ⇒ LoadActivityTimes 返回 ok=false，
-	// registryDeadline 必须退化为滑动窗口起点（now + coldDataTTL），不能返回 0 或负值
-	// （否则 bootstrap 刚建好的成员会被下一轮 syncFromRedis 立刻当作 stale 剔除）。
-	m := &Manager{}
-	before := time.Now().Add(coldDataTTL).UnixMilli()
-	deadline := m.registryDeadline("balloon_1001")
-	after := time.Now().Add(coldDataTTL).UnixMilli()
-
-	if deadline < before || deadline > after {
-		t.Fatalf("expected deadline within [%d, %d], got %d", before, after, deadline)
-	}
-}
