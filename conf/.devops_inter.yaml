@@ -7,11 +7,11 @@ configDir: "../config"
 #redis - 优化生产配置
 redis:
   - group: 1
-    host: "10.7.1.165"
+    host: "r-0xiljf6en8p0l6yvmk.redis.rds-aliyun-america.rds.aliyuncs.com"
     port: 9379
     index: 1
     username: NONE
-    password: "hWCJ$HDajm9SN&&Z"
+    password: "redis_mNcmNe!6QT"
 
 etcd:
   - group: 1
@@ -21,9 +21,9 @@ etcd:
 
 #mongodb - 优化生产配置
 mongodb:
-  uri: mongodb://10.7.1.165:9479
-  username: admin
-  password: hWCJ$HDajm9SN&&Z
+  uri: mongodb://root:mongo_q8Y5bgDQs3@dds-0xiffd8cc75778e42.mongodb.rds-aliyun-america.rds.aliyuncs.com:3717,dds-0xiffd8cc75778e41.mongodb.rds-aliyun-america.rds.aliyuncs.com:3717/admin?replicaSet=mgset-1600021462
+  username: root
+  password: mongo_q8Y5bgDQs3
   authSource: admin
   database: mergeHopeInter
   socketTimeout: 120 #套接字超时时间，单位秒 (优化为2分钟)
