@@ -196,10 +196,26 @@ if [ -d "../conf" ]; then
     esac
 fi
 
-# 复制 config 目录（业务配置：RankBase.json、RobotName.json、RobotRank.json 等）
+# 复制 config 目录（多游戏业务配置：config/{gameId}/*.json）
 if [ -d "../config" ]; then
-    cp -r ../config/* "${TEMP_DIR}/config/" 2>/dev/null || true
-    echo "已复制: config/ 目录（业务配置）"
+    mkdir -p "${TEMP_DIR}/config/"
+    config_copied_count=0
+    for game_cfg_dir in ../config/*/; do
+        dir_name=$(basename "${game_cfg_dir}")
+        if [[ "${dir_name}" =~ ^[0-9]+$ ]]; then
+            if [ -d "${game_cfg_dir}" ]; then
+                mkdir -p "${TEMP_DIR}/config/${dir_name}"
+                cp -r "${game_cfg_dir}"* "${TEMP_DIR}/config/${dir_name}/" 2>/dev/null || true
+                echo "已复制: config/${dir_name}/ 目录（业务配置）"
+                config_copied_count=$((config_copied_count + 1))
+            fi
+        fi
+    done
+    if [ $config_copied_count -eq 0 ]; then
+        echo -e "${YELLOW}警告: 未找到任何游戏业务配置目录（config/{gameId}/）${NC}"
+    else
+        echo "共复制 ${config_copied_count} 个游戏业务配置目录"
+    fi
 fi
 
 # 4. 复制脚本文件
@@ -223,10 +239,8 @@ socialserver/
 │   ├── server.key         # TLS私钥文件（本地环境）
 │   ├── _.gamescombine.com_with_chain.crt  # TLS证书文件（测试/生产环境）
 │   └── _.gamescombine.com.key             # TLS私钥文件（测试/生产环境）
-├── config/                 # 业务配置目录
-│   ├── RankBase.json      # 排行榜基础配置
-│   ├── RobotName.json     # 机器人名称配置
-│   └── RobotRank.json     # 机器人排名配置
+├── config/                 # 业务配置目录（多游戏）
+│   └── {gameId}/          #   如: 1001/、1002/，存放各游戏业务配置
 ├── logs/                   # 日志目录
 └── scripts/                # 脚本目录
     ├── start.sh           # 启动脚本

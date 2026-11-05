@@ -278,7 +278,7 @@ func (s *Server) initServerNodeInfo() {
 		panic(err)
 	}
 
-	node.Init(
+	node.InitWithGame(
 		config.Default.Cluster,
 		rpcAddr,
 		rpcAddr,
@@ -287,7 +287,8 @@ func (s *Server) initServerNodeInfo() {
 		"",
 		s.GitCommitSha1,
 		s.CompileDate,
+		config.Default.Game,
 	)
 
-	zaplog.LoggerSugar.Infof("initServerNodeInfo: node initialized, cluster=%s, addr=%s, type=%s", config.Default.Cluster, rpcAddr, defines.SocialServer.String())
+	zaplog.LoggerSugar.Infof("initServerNodeInfo: node initialized, cluster=%s, game=%s, addr=%s, type=%s", config.Default.Cluster, config.Default.Game, rpcAddr, defines.SocialServer.String())
 }
