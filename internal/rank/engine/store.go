@@ -581,6 +581,43 @@ func (st *Store) GetAllMembers() (map[int64]int32, error) {
 	return members, nil
 }
 
+// DeleteMemberFromMembers 从 rank:members 和 rank:claims 中删除指定用户。
+func (st *Store) DeleteMemberFromMembers(userID int64) error {
+	if !st.available() {
+		return nil
+	}
+	uidStr := strconv.FormatInt(userID, 10)
+	st.rdb.HDel(rediskeys.GetRankMembersKey(st.bizId), uidStr)
+	st.rdb.HDel(rediskeys.GetRankClaimsKey(st.bizId), uidStr)
+	return nil
+}
+
+// DeleteMemberFromMb 从指定实例的 rank:mb 中删除指定用户。
+func (st *Store) DeleteMemberFromMb(instanceID string, userID int64) error {
+	if !st.available() {
+		return nil
+	}
+	st.rdb.HDel(rediskeys.GetRankMbKey(instanceID), strconv.FormatInt(userID, 10))
+	return nil
+}
+
+// QueueDeleteMemberDocs 将单个成员的 MongoDB 删除任务推入写队列。
+func (st *Store) QueueDeleteMemberDocs(userID int64, groupID int32) {
+	if !st.hasMongo() {
+		return
+	}
+	uidStr := strconv.FormatInt(userID, 10)
+	st.dao.QueueDeleteDocIDs(st.bizId, commonrank.CT_RANK_MEMBER, []string{
+		fmt.Sprintf("%s:%s", st.bizId, uidStr),
+	})
+	st.dao.QueueDeleteDocIDs(st.bizId, commonrank.CT_RANK_SCORE, []string{
+		fmt.Sprintf("%s:%d:%s", st.bizId, groupID, uidStr),
+	})
+	st.dao.QueueDeleteDocIDs(st.bizId, commonrank.CT_RANK_CLAIM, []string{
+		fmt.Sprintf("%s:%s", st.bizId, uidStr),
+	})
+}
+
 // --- 机器人状态 ---
 
 func (st *Store) SaveRobots(groupID int32, robots []*robotState) error {

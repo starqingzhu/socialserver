@@ -1131,6 +1131,31 @@ func (s *Service) GetMemberGroupID(userID int64) (groupID int32, ok bool) {
 	return
 }
 
+// RemoveMember 从本活动中移除指定用户：清理内存缓存、Redis 热数据，并排队删除 MongoDB 文档。
+func (s *Service) RemoveMember(userID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureLoaded()
+
+	groupID, ok := s.memberGroup[userID]
+	if !ok {
+		if gid, found, _ := s.store.GetMember(userID); found {
+			groupID = gid
+			ok = true
+		}
+	}
+	if !ok {
+		return nil
+	}
+
+	delete(s.memberGroup, userID)
+	instanceID := s.groupInstanceID(groupID)
+	_ = s.store.DeleteMemberFromMembers(userID)
+	_ = s.store.DeleteMemberFromMb(instanceID, userID)
+	s.store.QueueDeleteMemberDocs(userID, groupID)
+	return nil
+}
+
 func (s *Service) ClaimReward(userID int64, now int64) (bool, int64, error) {
 	return s.store.AtomicClaim(userID, now)
 }
