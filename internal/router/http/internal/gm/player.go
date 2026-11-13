@@ -69,14 +69,7 @@ func DeletePlayerRankData(ctx *gin.Context) {
 	// 1. 查询用户参与的所有排行榜
 	entries := manager.GetMemberEntries(gameId.Int32(), userId)
 	if len(entries) == 0 {
-		ctx.JSON(http.StatusOK, gin.H{
-			"code": defines.HttpCodeSuccess,
-			"msg":  "success",
-			"data": gin.H{
-				"deletedCount": 0,
-			},
-		})
-		return
+		zaplog.LoggerSugar.Warnf("DeletePlayerRankData: no rank entries found for userId=%d, gameId=%d", userId, gameId)
 	}
 
 	// 2. 逐个移除
@@ -96,7 +89,7 @@ func DeletePlayerRankData(ctx *gin.Context) {
 		deletedCount++
 	}
 
-	// 3. 清理成员索引（直接删除该用户的 member_index key）
+	// 3. 清理成员索引（直接删除该用户的 member_index key；无论 entries 是否为空都执行）
 	redisKey := credis.GetGameRankMemberIndexKey(gameId.Int32(), userId)
 	if _, err := goredis.GetRedisCli().Del(redisKey); err != nil {
 		zaplog.LoggerSugar.Warnf("DeletePlayerRankData: del member_index key failed, userId=%d, gameId=%d, key=%s, err=%v",

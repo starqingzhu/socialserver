@@ -1132,6 +1132,7 @@ func (s *Service) GetMemberGroupID(userID int64) (groupID int32, ok bool) {
 }
 
 // RemoveMember 从本活动中移除指定用户：清理内存缓存、Redis 热数据，并排队删除 MongoDB 文档。
+// 注意：已结算的分组不删除其 settled 快照，避免影响历史排名。
 func (s *Service) RemoveMember(userID int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1148,11 +1149,27 @@ func (s *Service) RemoveMember(userID int64) error {
 		return nil
 	}
 
+	// 已结算的分组跳过清理，避免影响历史排名
+	if g, _ := s.store.LoadGroupByID(groupID); g != nil && g.State == GroupStateSettled {
+		return nil
+	}
+
 	delete(s.memberGroup, userID)
 	instanceID := s.groupInstanceID(groupID)
 	_ = s.store.DeleteMemberFromMembers(userID)
 	_ = s.store.DeleteMemberFromMb(instanceID, userID)
 	s.store.QueueDeleteMemberDocs(userID, groupID)
+
+	// 更新分组真实人数；若从 full 恢复为可加入，同步修正状态
+	if g, _ := s.store.LoadGroupByID(groupID); g != nil && g.RealCount > 0 {
+		g.RealCount--
+		if g.State == GroupStateFull && g.totalCount() < s.config.RankPeopleNum {
+			g.State = GroupStateOpen
+		}
+		_ = s.store.SaveGroup(g)
+		s.syncGroupStateLocked(g)
+	}
+
 	return nil
 }
 

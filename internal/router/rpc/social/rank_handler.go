@@ -84,3 +84,7 @@ func (h *ServerHandler) S2SGMGetRankInstanceList(ctx context.Context, req *pb.PB
 func (h *ServerHandler) S2SGMGetInstanceRankList(ctx context.Context, req *pb.PBS2SGMGetInstanceRankListRequest) (*pb.PBS2SGMGetInstanceRankListResponse, error) {
 	return grpcDispatch[*pb.PBS2SGMGetInstanceRankListRequest, *pb.PBS2SGMGetInstanceRankListResponse](ctx, dispatch.CmdS2SGMGetInstanceRankList, req)
 }
+
+func (h *ServerHandler) S2SDeletePlayerRankData(ctx context.Context, req *pb.PBS2SDeletePlayerRankDataRequest) (*pb.PBS2SDeletePlayerRankDataResponse, error) {
+	return grpcDispatch[*pb.PBS2SDeletePlayerRankDataRequest, *pb.PBS2SDeletePlayerRankDataResponse](ctx, dispatch.CmdS2SDeletePlayerRankData, req)
+}

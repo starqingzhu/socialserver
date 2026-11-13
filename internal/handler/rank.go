@@ -11,8 +11,10 @@ import (
 	cfgtypes "common/configmgr/types"
 	"common/gameid"
 	"common/rank"
+	rediskeys "common/redis"
 	libdispatch "golib/dispatch"
 	dispatchproto "golib/dispatch/proto"
+	goredis "golib/redis"
 	"golib/zaplog"
 	commonMsg "pbcommon/gen/common/msg"
 	pb "pbcommon/gen/ss/msg"
@@ -44,6 +46,7 @@ func registerRank(d *dispatchproto.Dispatcher) error {
 		dispatchproto.Register(d, dispatch.CmdS2SGMGetGroupRankList, handleGMGetGroupRankList),
 		dispatchproto.Register(d, dispatch.CmdS2SGMGetRankInstanceList, handleGMGetRankInstanceList),
 		dispatchproto.Register(d, dispatch.CmdS2SGMGetInstanceRankList, handleGMGetInstanceRankList),
+		dispatchproto.Register(d, dispatch.CmdS2SDeletePlayerRankData, handleDeletePlayerRankData),
 	}
 	for _, err := range cmds {
 		if err != nil {
@@ -824,6 +827,52 @@ func handleGMGetInstanceRankList(ctx context.Context, meta libdispatch.Meta, req
 	resp.GroupId = g.GroupID
 	resp.State = string(g.State)
 	resp.Members = snapshotsToProto(snapshots)
+	return nil
+}
+
+func handleDeletePlayerRankData(_ context.Context, meta libdispatch.Meta, req *pb.PBS2SDeletePlayerRankDataRequest, resp *pb.PBS2SDeletePlayerRankDataResponse) (retErr error) {
+	gameId := meta.GameId
+	userId := req.UserId
+	zaplog.LoggerSugar.Infof("[rank][gm] S2SDeletePlayerRankData req userId=%d gameId=%d", userId, gameId)
+	defer func() {
+		if retErr != nil {
+			zaplog.LoggerSugar.Warnf("[rank][gm] S2SDeletePlayerRankData resp userId=%d err=%v", userId, retErr)
+		} else {
+			zaplog.LoggerSugar.Infof("[rank][gm] S2SDeletePlayerRankData resp userId=%d deletedCount=%d", userId, resp.DeletedCount)
+		}
+	}()
+
+	manager := rankservice.GetGlobalManager()
+	if manager == nil {
+		return status.Error(codes.Internal, "rank manager not initialized")
+	}
+
+	entries := manager.GetMemberEntries(gameId, userId)
+	deletedCount := int32(0)
+	for _, entry := range entries {
+		svc := manager.GetEngineService(gameId, entry.BizType, entry.ActID)
+		if svc == nil {
+			zaplog.LoggerSugar.Warnf("DeletePlayerRankData: engine service not found, gameId=%d, bizType=%s, actID=%d",
+				gameId, entry.BizType, entry.ActID)
+			continue
+		}
+		if err := svc.RemoveMember(userId); err != nil {
+			zaplog.LoggerSugar.Errorf("DeletePlayerRankData: remove member failed, userId=%d, gameId=%d, bizType=%s, actID=%d, err=%v",
+				userId, gameId, entry.BizType, entry.ActID, err)
+			continue
+		}
+		deletedCount++
+	}
+
+	// 清理成员索引
+	redisKey := rediskeys.GetGameRankMemberIndexKey(gameId, userId)
+	if _, err := goredis.GetRedisCli().Del(redisKey); err != nil {
+		zaplog.LoggerSugar.Warnf("DeletePlayerRankData: del member_index key failed, userId=%d, gameId=%d, key=%s, err=%v",
+			userId, gameId, redisKey, err)
+	}
+
+	resp.MsgCode = commonMsg.MsgCode_CODE_OK
+	resp.DeletedCount = deletedCount
 	return nil
 }
 

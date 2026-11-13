@@ -31,4 +31,7 @@ const (
 	CmdS2SGMGetGroupRankList    = "rank.gm.groupRankList"    // GM：查分组排行榜
 	CmdS2SGMGetRankInstanceList = "rank.gm.instanceList"     // GM：查排行榜实例列表
 	CmdS2SGMGetInstanceRankList = "rank.gm.instanceRankList" // GM：查实例内排名
+
+	// === GM 数据清理接口 ===
+	CmdS2SDeletePlayerRankData = "rank.gm.deletePlayerRankData" // GM：删除玩家排行榜数据
 )
